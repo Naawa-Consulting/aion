@@ -1,0 +1,28 @@
+# Node/Next.js
+node_modules/
+.next/
+out/
+
+# Python
+__pycache__/
+.pytest_cache/
+.venv/
+*.pyc
+*.pyo
+*.pyd
+
+# OS / Editors
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Data
+data/
+backend/data/
+!backend/data/.gitkeep
+
+# Env
+.env
+frontend/.env.local
+backend/.env

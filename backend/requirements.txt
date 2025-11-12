@@ -1,0 +1,14 @@
+fastapi
+uvicorn[standard]
+pandas
+numpy
+pyarrow
+sqlmodel
+sqlalchemy
+aiosqlite
+python-multipart
+openpyxl
+pydantic-settings
+python-dotenv
+scipy
+statsmodels
