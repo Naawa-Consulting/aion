@@ -1,348 +1,571 @@
 "use client";
 
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from "react";
+import { toast } from "sonner";
 
-type Dataset = { id: string; name: string; columns: { name: string; dtype: string }[] };
-type Model = { id: string; name: string; dataset_id: string; y_var: string; x_vars: string[]; is_hero: boolean };
+import { Card, CardHeader } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+
+type Dataset = { id: string; display_name: string; columns: { name: string; dtype: string }[] };
+type Model = { id: string; name: string; dataset_id: string; role?: string; is_hero: boolean };
+
 type VariableRow = {
   name: string;
   baseline_mean: number;
-  adjusted_mean: number;
-  contribution: number;
-  multiplier: number;
   group_name?: string | null;
   subgroup_name?: string | null;
 };
-type Scenario = {
-  id: string;
-  name: string;
-  model_id: string;
-  adjustments: { variable: string; multiplier: number }[];
-  results: { total: number; groups: any[]; variables: VariableRow[] };
+
+type PeriodValue = {
+  mode: "multiplier" | "value";
+  value: number;
 };
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+type ContributionSlice = { id?: string | null; name?: string | null; value: number };
+type ScenarioSeriesPoint = { period: string; y_pred: number };
+
+type ScenarioSummary = {
+  periods: string[];
+  total: number;
+  average_per_period: number;
+  groups: ContributionSlice[];
+  subgroups: ContributionSlice[];
+  series: ScenarioSeriesPoint[];
+};
+
+type Scenario = {
+  id: string;
+  model_id: string;
+  name: string;
+  horizon: number;
+  start_date: string;
+  freq: "day" | "week" | "month";
+  adjustments: Record<string, Record<string, PeriodValue>>;
+  summary: ScenarioSummary;
+};
+
+const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
 export default function PredictPage() {
   const [datasets, setDatasets] = useState<Dataset[]>([]);
-  const [selectedDataset, setSelectedDataset] = useState('');
+  const [selectedDataset, setSelectedDataset] = useState("");
   const [models, setModels] = useState<Model[]>([]);
-  const [selectedModel, setSelectedModel] = useState('');
-  const [variables, setVariables] = useState<VariableRow[]>([]);
-  const [adjustments, setAdjustments] = useState<Record<string, number>>({});
-  const [preview, setPreview] = useState<any | null>(null);
-  const [scenarios, setScenarios] = useState<Scenario[]>([]);
-  const [scenarioName, setScenarioName] = useState('');
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [selectedModel, setSelectedModel] = useState("");
 
-  const [selectedScenario, setSelectedScenario] = useState<string>('');
-  const [timeCol, setTimeCol] = useState('');
-  const [freq, setFreq] = useState<'day'|'week'|'month'>('month');
-  const [by, setBy] = useState<'group'|'subgroup'>('group');
-  const [stacked, setStacked] = useState<{ index: string[]; series: { key: string; values: number[] }[] } | null>(null);
+  const [variables, setVariables] = useState<VariableRow[]>([]);
+  const [adjustments, setAdjustments] = useState<Record<string, Record<string, PeriodValue>>>({});
+
+  const [horizon, setHorizon] = useState(12);
+  const [startDate, setStartDate] = useState(() => new Date().toISOString().slice(0, 10));
+  const [freq, setFreq] = useState<"day" | "week" | "month">("month");
+
+  const [preview, setPreview] = useState<ScenarioSummary | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
+
+  const [scenarios, setScenarios] = useState<Scenario[]>([]);
+  const [scenarioName, setScenarioName] = useState("Scenario 1");
+  const [selectedScenario, setSelectedScenario] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  const numberFormatter = useMemo(
+    () => new Intl.NumberFormat(undefined, { minimumFractionDigits: 1, maximumFractionDigits: 1 }),
+    []
+  );
+
+  const periodLabels = useMemo(() => buildPeriodLabels(startDate, horizon, freq), [startDate, horizon, freq]);
+  const displayPeriods = preview?.periods?.length ? preview.periods : periodLabels;
+
+  useEffect(() => {
+    fetchDatasets();
+  }, []);
+
+  useEffect(() => {
+    if (selectedDataset) {
+      fetchModels(selectedDataset);
+    }
+  }, [selectedDataset]);
+
+  useEffect(() => {
+    if (!selectedModel) return;
+    fetchBaselineVariables(selectedModel);
+    fetchScenarios(selectedModel);
+  }, [selectedModel]);
+
+  useEffect(() => {
+    ensureAdjustmentDefaults(periodLabels, variables, setAdjustments);
+  }, [periodLabels, variables]);
 
   const fetchDatasets = async () => {
-    const res = await fetch(`${API_URL}/datasets`);
-    const data = await res.json();
-    setDatasets(data);
-    if (!selectedDataset && data.length) setSelectedDataset(data[0].id);
+    try {
+      const res = await fetch(`${API_URL}/datasets`);
+      if (!res.ok) throw new Error();
+      const data = await res.json();
+      setDatasets(data);
+      if (!selectedDataset && data.length) setSelectedDataset(data[0].id);
+    } catch {
+      toast.error("Failed to load datasets");
+    }
   };
 
   const fetchModels = async (datasetId: string) => {
-    const res = await fetch(`${API_URL}/models?dataset_id=${datasetId}`);
-    const data = await res.json();
-    setModels(data);
-    const hero = data.find((m: any) => m.is_hero) || data[0];
-    if (hero) setSelectedModel(hero.id);
+    try {
+      const res = await fetch(`${API_URL}/models?dataset_id=${datasetId}`);
+      if (!res.ok) throw new Error();
+      const data = await res.json();
+      setModels(data);
+      const hero = data.find((m: any) => m.role === "hero" || m.is_hero) || data[0];
+      if (hero) setSelectedModel(hero.id);
+    } catch {
+      toast.error("Failed to load models");
+    }
+  };
+
+  const fetchBaselineVariables = async (modelId: string) => {
+    try {
+      const res = await fetch(`${API_URL}/predict/${modelId}/simulate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ adjustments: [] }),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      const data = await res.json();
+      setVariables(data.variables || []);
+      fetchPreview();
+    } catch {
+      toast.error("Failed to load baseline variables");
+    }
   };
 
   const fetchScenarios = async (modelId: string) => {
-    const res = await fetch(`${API_URL}/predict/${modelId}/scenarios`);
-    if (!res.ok) {
-      setScenarios([]);
-      setSelectedScenario('');
-      return;
+    try {
+      const res = await fetch(`${API_URL}/predict/scenarios?model_id=${modelId}`);
+      if (!res.ok) throw new Error(await res.text());
+      const data = await res.json();
+      setScenarios(data);
+    } catch {
+      toast.error("Failed to load scenarios");
     }
-    const data = await res.json();
-    setScenarios(data);
-    setSelectedScenario(data.length ? data[0].id : '');
   };
 
-  const loadPreview = async (adjMap: Record<string, number>) => {
+  const fetchPreview = useCallback(async () => {
     if (!selectedModel) return;
-    setLoading(true); setError(null);
+    setPreviewLoading(true);
     try {
       const payload = {
-        adjustments: Object.entries(adjMap).map(([variable, multiplier]) => ({ variable, multiplier })),
+        model_id: selectedModel,
+        horizon,
+        start_date: startDate,
+        freq,
+        adjustments,
       };
-      const res = await fetch(`${API_URL}/predict/${selectedModel}/simulate`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+      const res = await fetch(`${API_URL}/predict/scenarios/preview`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
       if (!res.ok) throw new Error(await res.text());
-      const data = await res.json();
+      const data: ScenarioSummary = await res.json();
       setPreview(data);
-      setVariables(data.variables || []);
-      setAdjustments((prev) => {
-        const next = { ...prev } as Record<string, number>;
-        (data.variables || []).forEach((row: any) => {
-          if (next[row.name] === undefined) {
-            next[row.name] = typeof row.multiplier === 'number' ? row.multiplier : 1;
-          }
-        });
-        return next;
-      });
-    } catch (e: any) {
-      setError(e?.message || 'Simulation failed');
+    } catch (error: any) {
+      toast.error(error?.message || "Preview failed");
     } finally {
-      setLoading(false);
+      setPreviewLoading(false);
     }
+  }, [selectedModel, horizon, startDate, freq, adjustments]);
+
+  const handleAdjustmentChange = (period: string, variable: string, mode: PeriodValue["mode"], value: number) => {
+    setAdjustments((prev) => {
+      const next = { ...prev };
+      const periodMap = { ...(next[period] || {}) };
+      periodMap[variable] = { mode, value };
+      next[period] = periodMap;
+      return next;
+    });
   };
 
-  useEffect(() => { fetchDatasets(); }, []);
-  useEffect(() => { if (selectedDataset) fetchModels(selectedDataset); }, [selectedDataset]);
-  useEffect(() => {
-    if (selectedModel) {
-      // reset adjustments and load baseline
-      const base: Record<string, number> = {};
-      setAdjustments(base);
-      loadPreview(base);
-      fetchScenarios(selectedModel);
-    }
-  }, [selectedModel]);
-
-  const handleMultiplierChange = (variable: string, value: string) => {
-    const num = parseFloat(value);
-    setAdjustments((prev) => ({ ...prev, [variable]: isNaN(num) ? 1 : num }));
-  };
-
-  const recalc = () => {
-    loadPreview(adjustments);
-  };
-
-  const saveScenario = async () => {
-    if (!scenarioName) {
-      setError('Scenario name required');
+  const handleSaveScenario = async () => {
+    if (!selectedModel) {
+      toast.error("Select a model first");
       return;
     }
-    setLoading(true); setError(null);
+    setSaving(true);
     try {
-      const payload = {
-        name: scenarioName,
-        adjustments: Object.entries(adjustments).map(([variable, multiplier]) => ({ variable, multiplier })),
-      };
-      const res = await fetch(`${API_URL}/predict/${selectedModel}/scenarios`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
+      const res = await fetch(`${API_URL}/predict/scenarios`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model_id: selectedModel,
+          name: scenarioName || "Scenario",
+          horizon,
+          start_date: startDate,
+          freq,
+          adjustments,
+        }),
       });
       if (!res.ok) throw new Error(await res.text());
-      setScenarioName('');
+      toast.success("Scenario saved");
       await fetchScenarios(selectedModel);
-    } catch (e: any) {
-      setError(e?.message || 'Save scenario failed');
+    } catch (error: any) {
+      toast.error(error?.message || "Unable to save scenario");
     } finally {
-      setLoading(false);
+      setSaving(false);
     }
   };
 
-  const deleteScenario = async (id: string) => {
-    await fetch(`${API_URL}/predict/${selectedModel}/scenarios/${id}`, { method: 'DELETE' });
-    await fetchScenarios(selectedModel);
+  const handleLoadScenario = (scenario: Scenario) => {
+    setScenarioName(scenario.name);
+    setHorizon(scenario.horizon);
+    setStartDate(scenario.start_date);
+    setFreq(scenario.freq);
+    setAdjustments(cloneAdjustments(scenario.adjustments));
+    setSelectedScenario(scenario.id);
+    setPreview(scenario.summary);
   };
 
-  const loadScenarioAdjustments = (sc: Scenario) => {
-    const map: Record<string, number> = {};
-    sc.adjustments.forEach((a) => { map[a.variable] = a.multiplier; });
-    setAdjustments(map);
-    setScenarioName(sc.name);
-    loadPreview(map);
-  };
-
-  const generateStacked = async () => {
-    if (!selectedScenario || !timeCol) return;
-    setLoading(true); setError(null);
+  const handleDeleteScenario = async (scenarioId: string) => {
     try {
-      const url = `${API_URL}/predict/${selectedModel}/scenarios/${selectedScenario}/stacked?time_col=${encodeURIComponent(timeCol)}&freq=${freq}&by=${by}`;
-      const res = await fetch(url);
+      const res = await fetch(`${API_URL}/predict/scenarios/${scenarioId}`, { method: "DELETE" });
       if (!res.ok) throw new Error(await res.text());
-      const data = await res.json();
-      setStacked(data);
-    } catch (e: any) {
-      setError(e?.message || 'Stacked failed');
-    } finally {
-      setLoading(false);
+      toast.success("Scenario deleted");
+      if (selectedScenario === scenarioId) setSelectedScenario(null);
+      if (selectedModel) fetchScenarios(selectedModel);
+    } catch (error: any) {
+      toast.error(error?.message || "Unable to delete scenario");
     }
   };
 
-  const timeCols = useMemo(() => {
-    const ds = datasets.find(d => d.id === selectedDataset);
-    return ds ? ds.columns.map(c => c.name) : [];
-  }, [datasets, selectedDataset]);
-
-  const chartData = useMemo(() => {
-    if (!stacked) return [] as any[];
-    return stacked.index.map((label, i) => {
-      const row: any = { period: label };
-      stacked.series.forEach((s) => { row[s.key] = s.values[i] || 0; });
-      return row;
-    });
-  }, [stacked]);
+  const topGroups = preview?.groups?.slice(0, 3) || [];
+  const chartSeries = preview?.series || [];
 
   return (
-    <main>
-      <h2 className="text-xl font-semibold mb-4">Predict & Scenario Simulation</h2>
-      {error && <p className="text-red-600 mb-3">{error}</p>}
+    <section className="space-y-6">
+      <header className="flex flex-wrap items-center justify-between gap-4">
+        <div>
+          <p className="text-sm text-[var(--color-muted)]">Module 5</p>
+          <h1 className="text-2xl font-semibold">Predict & Scenario Simulation</h1>
+        </div>
+        <div className="flex flex-wrap gap-3 items-center">
+          <label className="flex flex-col text-xs uppercase text-[var(--color-muted)]">
+            Dataset
+            <select
+              className="mt-1 rounded-full border border-[var(--color-border)] px-4 py-2 bg-transparent"
+              value={selectedDataset}
+              onChange={(e) => setSelectedDataset(e.target.value)}
+            >
+              {datasets.map((ds) => (
+                <option key={ds.id} value={ds.id}>
+                  {ds.display_name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="flex flex-col text-xs uppercase text-[var(--color-muted)]">
+            Model
+            <select
+              className="mt-1 rounded-full border border-[var(--color-border)] px-4 py-2 bg-transparent"
+              value={selectedModel}
+              onChange={(e) => setSelectedModel(e.target.value)}
+            >
+              {models.map((m) => (
+                <option key={m.id} value={m.id}>
+                  {m.name}
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
+      </header>
 
-      <div className="flex flex-wrap gap-3 items-center mb-4">
-        <div>
-          <label className="mr-2">Dataset</label>
-          <select className="border rounded px-2 py-1" value={selectedDataset} onChange={(e) => setSelectedDataset(e.target.value)}>
-            {datasets.map(d => <option key={d.id} value={d.id}>{d.name}</option>)}
-          </select>
+      <Card className="space-y-4">
+        <CardHeader title="Scenario parameters" subtitle="Planner horizon and frequency" />
+        <div className="flex flex-wrap gap-4 text-sm">
+          <label className="flex flex-col gap-2">
+            Horizon
+            <input
+              type="number"
+              min={1}
+              className="rounded-lg border border-[var(--color-border)] px-3 py-2 bg-transparent"
+              value={horizon}
+              onChange={(e) => setHorizon(Math.max(1, Number(e.target.value) || 1))}
+            />
+          </label>
+          <label className="flex flex-col gap-2">
+            Start date
+            <input
+              type="date"
+              className="rounded-lg border border-[var(--color-border)] px-3 py-2 bg-transparent"
+              value={startDate}
+              onChange={(e) => setStartDate(e.target.value)}
+            />
+          </label>
+          <label className="flex flex-col gap-2">
+            Frequency
+            <select
+              className="rounded-lg border border-[var(--color-border)] px-3 py-2 bg-transparent"
+              value={freq}
+              onChange={(e) => setFreq(e.target.value as any)}
+            >
+              <option value="day">Daily</option>
+              <option value="week">Weekly</option>
+              <option value="month">Monthly</option>
+            </select>
+          </label>
+          <label className="flex flex-col gap-2 flex-1 min-w-[200px]">
+            Scenario name
+            <input
+              type="text"
+              className="rounded-lg border border-[var(--color-border)] px-3 py-2 bg-transparent"
+              value={scenarioName}
+              onChange={(e) => setScenarioName(e.target.value)}
+            />
+          </label>
         </div>
-        <div>
-          <label className="mr-2">Model</label>
-          <select className="border rounded px-2 py-1" value={selectedModel} onChange={(e) => setSelectedModel(e.target.value)}>
-            {models.map(m => <option key={m.id} value={m.id}>{m.name}{m.is_hero ? ' (Hero)' : ''}</option>)}
-          </select>
+        <div className="flex gap-3">
+          <Button onClick={fetchPreview} disabled={previewLoading || !selectedModel}>
+            {previewLoading ? "Recalculating..." : "Preview scenario"}
+          </Button>
+          <Button variant="secondary" onClick={handleSaveScenario} disabled={saving || !selectedModel}>
+            {saving ? "Saving..." : "Save scenario"}
+          </Button>
         </div>
-        <button className="px-3 py-1.5 rounded bg-blue-600 text-white" onClick={recalc} disabled={loading}>Recalculate</button>
+      </Card>
+
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        <Card padding="sm">
+          <CardHeader title="Projected total" subtitle="Y forecast" />
+          <p className="text-lg font-semibold">{preview ? formatNumber(numberFormatter, preview.total) : "–"}</p>
+        </Card>
+        <Card padding="sm">
+          <CardHeader title="Average per period" subtitle={freq} />
+          <p className="text-lg font-semibold">
+            {preview ? formatNumber(numberFormatter, preview.average_per_period) : "–"}
+          </p>
+        </Card>
+        {topGroups.map((group) => (
+          <Card key={group.id || group.name} padding="sm">
+            <CardHeader title={group.name || "Group"} subtitle="Contribution" />
+            <p className="text-lg font-semibold">{formatNumber(numberFormatter, group.value)}</p>
+          </Card>
+        ))}
       </div>
 
-      <div className="grid lg:grid-cols-3 gap-4">
-        <section className="lg:col-span-2 p-4 bg-white rounded border">
-          <h3 className="font-medium mb-3">Scenario Builder</h3>
-          <div className="mb-3 flex gap-2 items-center">
-            <input className="border rounded px-2 py-1" placeholder="Scenario name" value={scenarioName} onChange={(e) => setScenarioName(e.target.value)} />
-            <button className="px-3 py-1.5 rounded bg-green-600 text-white" onClick={saveScenario} disabled={!scenarioName || loading}>Save Scenario</button>
-          </div>
-          <div className="overflow-auto max-h-[420px]">
-            <table className="min-w-full text-sm">
-              <thead className="bg-gray-100">
-                <tr>
-                  <th className="px-2 py-1 text-left">Variable</th>
-                  <th className="px-2 py-1 text-left">Baseline Mean</th>
-                  <th className="px-2 py-1 text-left">Multiplier</th>
-                  <th className="px-2 py-1 text-left">Adj Mean</th>
-                  <th className="px-2 py-1 text-left">Contribution</th>
-                </tr>
-              </thead>
-              <tbody>
-                {variables.map((row) => (
-                  <tr key={row.name} className="odd:bg-white even:bg-gray-50">
-                    <td className="px-2 py-1">{row.name}</td>
-                    <td className="px-2 py-1">{row.baseline_mean.toFixed(2)}</td>
-                    <td className="px-2 py-1">
-                      <input
-                        type="number"
-                        step="0.05"
-                        className="border rounded px-2 py-1 w-24"
-                        value={adjustments[row.name] ?? 1}
-                        onChange={(e) => handleMultiplierChange(row.name, e.target.value)}
-                      />
-                    </td>
-                    <td className="px-2 py-1">{row.adjusted_mean?.toFixed(2)}</td>
-                    <td className="px-2 py-1">{row.contribution?.toFixed(2)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </section>
-
-        <section className="p-4 bg-white rounded border">
-          <h3 className="font-medium mb-3">Preview</h3>
-          {preview ? (
-            <div className="space-y-3">
-              <p className="text-lg font-semibold">Predicted Total: {preview.total?.toFixed(2)}</p>
-              <div>
-                <h4 className="font-medium mb-1">Group Contributions</h4>
-                <ul className="space-y-1 text-sm">
-                  {preview.groups?.map((g: any) => (
-                    <li key={g.group_id}>{g.group_name || 'Unassigned'}: {g.contribution.toFixed(2)}</li>
-                  ))}
-                </ul>
-              </div>
-            </div>
-          ) : (
-            <p className="text-gray-500">Adjust multipliers and click Recalculate.</p>
-          )}
-        </section>
-      </div>
-
-      <section className="p-4 bg-white rounded border mt-4">
-        <div className="flex items-center justify-between mb-3">
-          <h3 className="font-medium">Saved Scenarios (max 3)</h3>
-        </div>
-        {scenarios.length === 0 ? (
-          <p className="text-gray-500 text-sm">No scenarios saved yet.</p>
-        ) : (
-          <div className="grid md:grid-cols-3 gap-3">
-            {scenarios.map((sc) => (
-              <div key={sc.id} className={`border rounded p-3 ${selectedScenario === sc.id ? 'border-blue-600' : 'border-gray-200'}`}>
-                <div className="flex justify-between items-center mb-2">
-                  <h4 className="font-semibold">{sc.name}</h4>
-                  <button className="text-xs text-red-600" onClick={() => deleteScenario(sc.id)}>Delete</button>
-                </div>
-                <p className="text-sm">Total: {sc.results?.total?.toFixed(2)}</p>
-                <button className="text-xs text-blue-600 underline mr-2" onClick={() => loadScenarioAdjustments(sc)}>Load</button>
-                <button className="text-xs text-blue-600 underline" onClick={() => setSelectedScenario(sc.id)}>Select</button>
-              </div>
-            ))}
-          </div>
-        )}
-      </section>
-
-      <section className="p-4 bg-white rounded border mt-4">
-        <h3 className="font-medium mb-3">Scenario Breakdown Over Time</h3>
-        <div className="flex flex-wrap gap-3 items-center mb-3">
-          <select className="border rounded px-2 py-1" value={selectedScenario} onChange={(e) => setSelectedScenario(e.target.value)}>
-            <option value="">Scenario</option>
-            {scenarios.map(sc => <option key={sc.id} value={sc.id}>{sc.name}</option>)}
-          </select>
-          <select className="border rounded px-2 py-1" value={timeCol} onChange={(e) => setTimeCol(e.target.value)}>
-            <option value="">Time column</option>
-            {timeCols.map(c => <option key={c} value={c}>{c}</option>)}
-          </select>
-          <select className="border rounded px-2 py-1" value={freq} onChange={(e) => setFreq(e.target.value as any)}>
-            <option value="day">Day</option>
-            <option value="week">Week</option>
-            <option value="month">Month</option>
-          </select>
-          <select className="border rounded px-2 py-1" value={by} onChange={(e) => setBy(e.target.value as any)}>
-            <option value="group">Group</option>
-            <option value="subgroup">Subgroup</option>
-          </select>
-          <button className="px-3 py-1.5 rounded bg-blue-600 text-white" onClick={generateStacked} disabled={!selectedScenario || !timeCol}>Generate</button>
-        </div>
-        {stacked && (
+      <Card className="space-y-4">
+        <CardHeader title="Scenario builder" subtitle="Edit multipliers by period and variable" />
+        {variables.length ? (
           <div className="overflow-auto">
             <table className="min-w-full text-sm">
-              <thead className="bg-gray-100">
+              <thead className="bg-[var(--color-bg)]/60">
                 <tr>
-                  <th className="px-2 py-1 text-left">Period</th>
-                  {stacked.series.map((s) => (
-                    <th key={s.key} className="px-2 py-1 text-left">{s.key}</th>
+                  <th className="px-3 py-2 text-left">Variable</th>
+                  <th className="px-3 py-2 text-left">Baseline mean</th>
+                  {displayPeriods.map((period) => (
+                    <th key={period} className="px-3 py-2 text-left whitespace-nowrap">
+                      {period}
+                    </th>
                   ))}
                 </tr>
               </thead>
               <tbody>
-                {chartData.map((row) => (
-                  <tr key={row.period} className="odd:bg-white even:bg-gray-50">
-                    <td className="px-2 py-1">{row.period}</td>
-                    {stacked.series.map((s) => (
-                      <td key={s.key + row.period} className="px-2 py-1">{(row[s.key] ?? 0).toFixed(2)}</td>
-                    ))}
+                {variables.map((variable) => (
+                  <tr key={variable.name} className="odd:bg-transparent even:bg-[var(--color-border)]/20">
+                    <td className="px-3 py-2">{variable.name}</td>
+                    <td className="px-3 py-2">{formatNumber(numberFormatter, variable.baseline_mean)}</td>
+                    {displayPeriods.map((period) => {
+                      const entry = adjustments[period]?.[variable.name];
+                      const mode = entry?.mode || "multiplier";
+                      const value = entry?.value ?? 1;
+                      return (
+                        <td key={`${period}-${variable.name}`} className="px-3 py-2">
+                          <div className="flex items-center gap-1">
+                            <select
+                              className="rounded-md border border-[var(--color-border)] bg-transparent px-2 py-1 text-xs"
+                              value={mode}
+                              onChange={(e) =>
+                                handleAdjustmentChange(period, variable.name, e.target.value as PeriodValue["mode"], value)
+                              }
+                            >
+                              <option value="multiplier">×</option>
+                              <option value="value">Value</option>
+                            </select>
+                            <input
+                              type="number"
+                              step={mode === "multiplier" ? 0.1 : 1}
+                              className="w-24 rounded-md border border-[var(--color-border)] bg-transparent px-2 py-1"
+                              value={value}
+                              onChange={(e) =>
+                                handleAdjustmentChange(period, variable.name, mode, Number(e.target.value) || 0)
+                              }
+                            />
+                          </div>
+                        </td>
+                      );
+                    })}
                   </tr>
                 ))}
               </tbody>
             </table>
           </div>
+        ) : (
+          <p className="text-sm text-[var(--color-muted)]">Select a model to load variables.</p>
         )}
-      </section>
-    </main>
+      </Card>
+
+      <Card className="space-y-4">
+        <CardHeader title="Projected totals" subtitle="Hero vs scenario" />
+        {chartSeries.length ? (
+          <div className="overflow-auto">
+            <table className="min-w-full text-sm">
+              <thead className="bg-[var(--color-bg)]/60">
+                <tr>
+                  <th className="px-3 py-2 text-left">Period</th>
+                  <th className="px-3 py-2 text-left">Projected Y</th>
+                </tr>
+              </thead>
+              <tbody>
+                {chartSeries.map((point) => (
+                  <tr key={point.period} className="odd:bg-transparent even:bg-[var(--color-border)]/20">
+                    <td className="px-3 py-2">{point.period}</td>
+                    <td className="px-3 py-2">{formatNumber(numberFormatter, point.y_pred)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : (
+          <p className="text-sm text-[var(--color-muted)]">Preview the scenario to see projections.</p>
+        )}
+      </Card>
+
+      <Card className="space-y-4">
+        <CardHeader title="Saved scenarios" subtitle="Load, compare or delete (max 3)" />
+        {scenarios.length ? (
+          <div className="grid gap-4 md:grid-cols-3">
+            {scenarios.map((scenario) => (
+              <Card key={scenario.id} className={`space-y-2 ${selectedScenario === scenario.id ? "border-[var(--color-accent)]" : ""}`}>
+                <CardHeader title={scenario.name} subtitle={`${scenario.horizon} periods · ${scenario.freq}`} />
+                <div className="px-4 pb-2 text-sm">
+                  <p className="text-[var(--color-muted)]">Projected total</p>
+                  <p className="text-lg font-semibold">{formatNumber(numberFormatter, scenario.summary.total)}</p>
+                </div>
+                <div className="flex gap-2 px-4 pb-4">
+                  <Button variant="secondary" onClick={() => handleLoadScenario(scenario)}>
+                    Load
+                  </Button>
+                  <Button variant="ghost" onClick={() => handleDeleteScenario(scenario.id)}>
+                    Delete
+                  </Button>
+                </div>
+              </Card>
+            ))}
+          </div>
+        ) : (
+          <p className="text-sm text-[var(--color-muted)]">No saved scenarios yet.</p>
+        )}
+      </Card>
+    </section>
   );
+}
+
+function formatNumber(formatter: Intl.NumberFormat, value: number | null | undefined) {
+  if (value === null || value === undefined || Number.isNaN(value)) return "–";
+  return formatter.format(value);
+}
+
+function buildPeriodLabels(startDate: string, horizon: number, freq: "day" | "week" | "month") {
+  const labels: string[] = [];
+  if (!startDate || horizon <= 0) return labels;
+  let current = new Date(`${startDate}T00:00:00`);
+  for (let i = 0; i < horizon; i += 1) {
+    labels.push(labelForDate(current, freq));
+    current = incrementDate(current, freq);
+  }
+  return labels;
+}
+
+function incrementDate(value: Date, freq: "day" | "week" | "month") {
+  const next = new Date(value);
+  if (freq === "day") {
+    next.setDate(next.getDate() + 1);
+  } else if (freq === "week") {
+    next.setDate(next.getDate() + 7);
+  } else {
+    const month = next.getMonth();
+    next.setMonth(month + 1);
+  }
+  return next;
+}
+
+function labelForDate(value: Date, freq: "day" | "week" | "month") {
+  if (freq === "day") {
+    return value.toISOString().slice(0, 10);
+  }
+  if (freq === "week") {
+    const temp = new Date(value);
+    const firstDay = temp.getDate() - temp.getDay() + 1;
+    temp.setDate(firstDay);
+    const iso = temp.toISOString().slice(0, 10);
+    const [year] = iso.split("-");
+    const week = getWeekNumber(value);
+    return `${year}-W${String(week).padStart(2, "0")}`;
+  }
+  return `${value.getFullYear()}-${String(value.getMonth() + 1).padStart(2, "0")}`;
+}
+
+function getWeekNumber(date: Date) {
+  const target = new Date(date.valueOf());
+  const dayNr = (date.getDay() + 6) % 7;
+  target.setDate(target.getDate() - dayNr + 3);
+  const firstThursday = target.valueOf();
+  target.setMonth(0, 1);
+  if (target.getDay() !== 4) {
+    target.setMonth(0, 1 + ((4 - target.getDay()) + 7) % 7);
+  }
+  return 1 + Math.ceil((firstThursday - target.valueOf()) / 604800000);
+}
+
+function ensureAdjustmentDefaults(
+  periods: string[],
+  variables: VariableRow[],
+  setAdjustments: React.Dispatch<React.SetStateAction<Record<string, Record<string, PeriodValue>>>>
+) {
+  if (!periods.length || !variables.length) return;
+  setAdjustments((prev) => {
+    const next: Record<string, Record<string, PeriodValue>> = {};
+    periods.forEach((period) => {
+      const existing = prev[period] || {};
+      const periodValues: Record<string, PeriodValue> = {};
+      variables.forEach((variable) => {
+        periodValues[variable.name] = existing[variable.name] || { mode: "multiplier", value: 1 };
+      });
+      next[period] = periodValues;
+    });
+
+    const same =
+      Object.keys(prev).length === Object.keys(next).length &&
+      Object.keys(next).every((period) => {
+        const prevVars = prev[period] || {};
+        const nextVars = next[period];
+        return (
+          Object.keys(prevVars).length === Object.keys(nextVars).length &&
+          Object.keys(nextVars).every(
+            (key) =>
+              prevVars[key] &&
+              prevVars[key].mode === nextVars[key].mode &&
+              Number(prevVars[key].value) === Number(nextVars[key].value)
+          )
+        );
+      });
+    return same ? prev : next;
+  });
+}
+
+function cloneAdjustments(source: Record<string, Record<string, PeriodValue>>) {
+  const clone: Record<string, Record<string, PeriodValue>> = {};
+  Object.entries(source || {}).forEach(([period, mapping]) => {
+    clone[period] = {};
+    Object.entries(mapping || {}).forEach(([variable, value]) => {
+      clone[period][variable] = { ...value };
+    });
+  });
+  return clone;
 }

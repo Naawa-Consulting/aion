@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlmodel import Session, select
 
 from ..db import get_session
-from ..models import Group, Subgroup, VariableGroup, Dataset
+from ..models import Group, Subgroup, Dataset, Variable
 from ..schemas import GroupOut, SubgroupOut, CreateGroupRequest, CreateSubgroupRequest, AssignVariableRequest
 
 
@@ -53,24 +53,32 @@ def create_subgroup(body: CreateSubgroupRequest, session: Session = Depends(get_
 
 @router.post("/assign")
 def assign_variable(body: AssignVariableRequest, session: Session = Depends(get_session)):
-    # ensure dataset exists
     ds = session.get(Dataset, body.dataset_id)
     if not ds:
         raise HTTPException(status_code=404, detail="Dataset not found")
-    # ensure subgroup exists
-    sg = session.get(Subgroup, body.subgroup_id)
-    if not sg:
+
+    var = session.exec(
+        select(Variable).where(
+            (Variable.dataset_id == body.dataset_id) & (Variable.name == body.variable_name)
+        )
+    ).first()
+    if not var:
+        raise HTTPException(status_code=404, detail="Variable not found")
+
+    group = session.get(Group, body.group_id) if body.group_id else None
+    subgroup = session.get(Subgroup, body.subgroup_id) if body.subgroup_id else None
+
+    if subgroup and group and subgroup.group_id != group.id:
+        raise HTTPException(status_code=400, detail="Subgroup does not belong to group")
+    if subgroup and not group:
+        group = session.get(Group, subgroup.group_id)
+    if body.group_id and not group:
+        raise HTTPException(status_code=404, detail="Group not found")
+    if body.subgroup_id and not subgroup:
         raise HTTPException(status_code=404, detail="Subgroup not found")
-    # upsert assignment: variable_name unique per dataset
-    existing = session.exec(select(VariableGroup).where(
-        (VariableGroup.dataset_id == body.dataset_id) & (VariableGroup.variable_name == body.variable_name)
-    )).first()
-    if existing:
-        existing.subgroup_id = body.subgroup_id
-        session.add(existing)
-    else:
-        vg = VariableGroup(id=str(uuid.uuid4()), dataset_id=body.dataset_id, variable_name=body.variable_name, subgroup_id=body.subgroup_id)
-        session.add(vg)
+
+    var.group_id = group.id if group else None
+    var.subgroup_id = subgroup.id if subgroup else None
+    session.add(var)
     session.commit()
     return {"status": "ok"}
-

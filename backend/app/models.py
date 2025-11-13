@@ -8,12 +8,16 @@ from sqlmodel import SQLModel, Field
 
 class Dataset(SQLModel, table=True):
     id: str = Field(primary_key=True)  # uuid string
-    name: str
+    name: str  # legacy name kept for backward compatibility
+    display_name: str
+    file_name: str
     path: str
+    checksum: str
     n_rows: int
     n_cols: int
     columns_json: str  # JSON-encoded list of {name,dtype}
     created_at: datetime = Field(default_factory=datetime.utcnow, nullable=False)
+    last_used_at: datetime = Field(default_factory=datetime.utcnow, nullable=False)
 
 
 class Variable(SQLModel, table=True):
@@ -23,6 +27,8 @@ class Variable(SQLModel, table=True):
     dtype: str
     is_derived: bool = False
     source_spec_json: Optional[str] = None
+    group_id: Optional[str] = None
+    subgroup_id: Optional[str] = None
     created_at: datetime = Field(default_factory=datetime.utcnow, nullable=False)
 
 
@@ -39,11 +45,12 @@ class Subgroup(SQLModel, table=True):
     created_at: datetime = Field(default_factory=datetime.utcnow, nullable=False)
 
 
-class VariableGroup(SQLModel, table=True):
+class VariableHistory(SQLModel, table=True):
     id: str = Field(primary_key=True)
     dataset_id: str
-    variable_name: str
-    subgroup_id: str
+    variable_id: str
+    op: str
+    params_json: str
     created_at: datetime = Field(default_factory=datetime.utcnow, nullable=False)
 
 
@@ -53,7 +60,8 @@ class Model(SQLModel, table=True):
     dataset_id: str
     y_var: str
     x_vars_json: str  # JSON array of variable names
-    is_hero: bool = False
+    is_hero: bool = False  # legacy flag
+    role: str = Field(default="none")  # hero|challenger1|challenger2|none
     created_at: datetime = Field(default_factory=datetime.utcnow, nullable=False)
 
 

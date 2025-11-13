@@ -12,7 +12,7 @@ from fastapi.responses import StreamingResponse
 from sqlmodel import Session, select
 
 from ..db import get_session
-from ..models import Dataset, Model, ModelMetrics, VariableGroup, Subgroup, Group
+from ..models import Dataset, Model, ModelMetrics, Variable, Subgroup, Group
 
 
 router = APIRouter()
@@ -40,33 +40,41 @@ def _fit_from_model(session: Session, model_id: str):
 
 
 def _group_maps(session: Session, dataset_id: str):
-    vgs = session.exec(select(VariableGroup).where(VariableGroup.dataset_id == dataset_id)).all()
-    sg_ids = list({vg.subgroup_id for vg in vgs})
-    sgs = session.exec(select(Subgroup).where(Subgroup.id.in_(sg_ids))) .all() if sg_ids else []
-    g_ids = list({sg.group_id for sg in sgs})
-    gs = session.exec(select(Group).where(Group.id.in_(g_ids))).all() if g_ids else []
+    vars_ = session.exec(select(Variable).where(Variable.dataset_id == dataset_id)).all()
+    sg_ids = {v.subgroup_id for v in vars_ if v.subgroup_id}
+    sgs = session.exec(select(Subgroup).where(Subgroup.id.in_(list(sg_ids)))).all() if sg_ids else []
+    g_ids = {sg.group_id for sg in sgs}
+    g_ids.update({v.group_id for v in vars_ if v.group_id})
+    gs = session.exec(select(Group).where(Group.id.in_(list(g_ids)))).all() if g_ids else []
     sg_map = {sg.id: sg for sg in sgs}
     g_map = {g.id: g for g in gs}
-    var_to_sg = {vg.variable_name: vg.subgroup_id for vg in vgs}
-    return var_to_sg, sg_map, g_map
+    var_map = {v.name: {"group_id": v.group_id, "subgroup_id": v.subgroup_id} for v in vars_}
+    return var_map, sg_map, g_map
 
 
 @router.get("/{model_id}/summary")
-def summary(model_id: str, include_intercept: bool = Query(True), session: Session = Depends(get_session)):
+def summary(
+    model_id: str,
+    include_intercept: bool = Query(True),
+    as_percent: bool = Query(False),
+    session: Session = Depends(get_session),
+):
     m, ds, work, X, Xc, y, params = _fit_from_model(session, model_id)
-    var_to_sg, sg_map, g_map = _group_maps(session, ds.id)
+    var_map, sg_map, g_map = _group_maps(session, ds.id)
 
     rows = []
     group_totals: Dict[str, float] = {}
     subgroup_totals: Dict[str, float] = {}
-
+    raw_total = 0.0
     for name in X.columns:
         coef = float(params.get(name, 0.0))
         mean_val = float(X[name].mean())
         contrib = coef * mean_val
-        sg_id = var_to_sg.get(name)
+        mapping = var_map.get(name, {})
+        sg_id = mapping.get("subgroup_id")
+        gid = mapping.get("group_id")
         sg = sg_map.get(sg_id) if sg_id else None
-        g = g_map.get(sg.group_id) if sg else None
+        g = g_map.get(gid) if gid else (g_map.get(sg.group_id) if sg else None)
         rows.append({
             "name": name,
             "coef": coef,
@@ -79,23 +87,54 @@ def summary(model_id: str, include_intercept: bool = Query(True), session: Sessi
         })
         if sg:
             subgroup_totals[sg.id] = subgroup_totals.get(sg.id, 0.0) + contrib
+            grp_id = g.id if g else sg.group_id
+            if grp_id:
+                group_totals[grp_id] = group_totals.get(grp_id, 0.0) + contrib
+        elif g:
             group_totals[g.id] = group_totals.get(g.id, 0.0) + contrib
+        raw_total += contrib
 
     intercept = float(params.get('const', 0.0)) if include_intercept else 0.0
-    total_contribution = float(sum(r["contribution"] for r in rows) + intercept)
+    total_contribution = float(raw_total + intercept)
+
+    def percent(value: float) -> float:
+        return float((value / total_contribution) * 100) if total_contribution else 0.0
+
+    baseline_entry = None
+    if include_intercept:
+        baseline_entry = {
+            "name": "baseline",
+            "coef": intercept,
+            "mean": 1.0,
+            "contribution": intercept,
+            "percent": percent(intercept),
+            "group_id": "baseline",
+            "group_name": "Baseline",
+            "subgroup_id": "baseline",
+            "subgroup_name": "Baseline",
+        }
+        rows.append(baseline_entry)
+        group_totals["baseline"] = group_totals.get("baseline", 0.0) + intercept
+        subgroup_totals["baseline"] = subgroup_totals.get("baseline", 0.0) + intercept
+
+    for row in rows:
+        row["value"] = float(row["contribution"])
+        row["percent"] = percent(row["contribution"])
 
     group_rows = [{
         "group_id": gid,
-        "group_name": g_map[gid].name if gid in g_map else None,
+        "group_name": g_map[gid].name if gid in g_map else ("Baseline" if gid == "baseline" else None),
         "contribution": float(val),
+        "percent": percent(val),
     } for gid, val in group_totals.items()]
 
     subgroup_rows = [{
         "subgroup_id": sid,
-        "subgroup_name": sg_map[sid].name if sid in sg_map else None,
-        "group_id": sg_map[sid].group_id if sid in sg_map else None,
-        "group_name": g_map.get(sg_map[sid].group_id).name if (sid in sg_map and sg_map[sid].group_id in g_map) else None,
+        "subgroup_name": sg_map[sid].name if sid in sg_map else ("Baseline" if sid == "baseline" else None),
+        "group_id": sg_map[sid].group_id if sid in sg_map else ("baseline" if sid == "baseline" else None),
+        "group_name": g_map.get(sg_map[sid].group_id).name if (sid in sg_map and sg_map[sid].group_id in g_map) else ("Baseline" if sid == "baseline" else None),
         "contribution": float(val),
+        "percent": percent(val),
     } for sid, val in subgroup_totals.items()]
 
     return {
@@ -109,6 +148,7 @@ def summary(model_id: str, include_intercept: bool = Query(True), session: Sessi
         "include_intercept": include_intercept,
         "intercept": intercept,
         "total_contribution": total_contribution,
+        "as_percent": as_percent,
         "variables": rows,
         "groups": group_rows,
         "subgroups": subgroup_rows,
@@ -122,10 +162,11 @@ def stacked(
     freq: str = Query("month"),  # day|week|month
     by: str = Query("group"),     # group|subgroup
     include_intercept: bool = Query(False),
+    as_percent: bool = Query(False),
     session: Session = Depends(get_session),
 ):
     m, ds, work, X, Xc, y, params = _fit_from_model(session, model_id)
-    var_to_sg, sg_map, g_map = _group_maps(session, ds.id)
+    var_map, sg_map, g_map = _group_maps(session, ds.id)
 
     if time_col not in work.columns and time_col in pd.read_parquet(ds.path).columns:
         # If time col was dropped due to NA in numeric filtering, join from original df
@@ -154,21 +195,30 @@ def stacked(
 
     contrib_df["__period__"] = periods
 
+    other_label = "Other"
+    baseline_label = "Baseline"
+
     if by == "subgroup":
         # Map variable -> subgroup name or '_unassigned'
         def sg_key(var: str) -> str:
-            sid = var_to_sg.get(var)
-            return sg_map[sid].name if sid and sid in sg_map else "_unassigned_"
+            sid = var_map.get(var, {}).get("subgroup_id")
+            return sg_map[sid].name if sid and sid in sg_map else other_label
         rename_map = {var: sg_key(var) for var in X.columns}
     else:
         # group
         def g_key(var: str) -> str:
-            sid = var_to_sg.get(var)
+            gid = var_map.get(var, {}).get("group_id")
+            if gid and gid in g_map:
+                return g_map[gid].name
+            sid = var_map.get(var, {}).get("subgroup_id")
             if sid and sid in sg_map:
                 gid = sg_map[sid].group_id
-                return g_map[gid].name if gid in g_map else "_unassigned_"
-            return "_unassigned_"
+                return g_map[gid].name if gid in g_map else other_label
+            return other_label
         rename_map = {var: g_key(var) for var in X.columns}
+
+    if include_intercept:
+        rename_map["__intercept__"] = baseline_label
 
     melted = contrib_df.melt(id_vars=["__period__"], value_vars=list(X.columns) + (["__intercept__"] if include_intercept else []), var_name="key", value_name="value")
     # Map variable keys to group/subgroup names
@@ -177,6 +227,8 @@ def stacked(
 
     # Pivot to wide for easier consumption
     pivot = grp.pivot(index="__period__", columns="key", values="value").fillna(0.0)
+    if as_percent:
+        pivot = pivot.apply(lambda row: (row / row.sum()) * 100 if row.sum() else row, axis=1)
     pivot = pivot.sort_index()
     index = list(pivot.index.astype(str))
     series = [{"key": c, "values": [float(v) for v in pivot[c].tolist()]} for c in pivot.columns]
@@ -185,8 +237,13 @@ def stacked(
 
 
 @router.get("/{model_id}/export/summary.xlsx")
-def export_summary(model_id: str, include_intercept: bool = Query(True), session: Session = Depends(get_session)):
-    data = summary(model_id, include_intercept, session)
+def export_summary(
+    model_id: str,
+    include_intercept: bool = Query(True),
+    as_percent: bool = Query(False),
+    session: Session = Depends(get_session),
+):
+    data = summary(model_id, include_intercept, as_percent, session)
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
         pd.DataFrame(data["variables"]).to_excel(writer, index=False, sheet_name="variables")
@@ -203,9 +260,10 @@ def export_stacked(
     freq: str = Query("month"),
     by: str = Query("group"),
     include_intercept: bool = Query(False),
+    as_percent: bool = Query(False),
     session: Session = Depends(get_session),
 ):
-    data = stacked(model_id, time_col, freq, by, include_intercept, session)
+    data = stacked(model_id, time_col, freq, by, include_intercept, as_percent, session)
     buf = io.BytesIO()
     # Convert to a flat table for Excel
     index = data["index"]
@@ -214,4 +272,3 @@ def export_stacked(
         pd.DataFrame(rows).to_excel(writer, index=False, sheet_name="stacked")
     buf.seek(0)
     return StreamingResponse(buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition": "attachment; filename=stacked.xlsx"})
-

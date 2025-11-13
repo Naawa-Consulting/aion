@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from typing import List, Optional, Literal
-from pydantic import BaseModel
+from datetime import date, datetime
+from typing import Dict, List, Optional, Literal
+from pydantic import BaseModel, Field
 
 
 class ColumnInfo(BaseModel):
@@ -9,12 +10,22 @@ class ColumnInfo(BaseModel):
     dtype: str
 
 
+class DatasetDependencyInfo(BaseModel):
+    variables: int = 0
+    models: int = 0
+    scenarios: int = 0
+
+
 class DatasetOut(BaseModel):
     id: str
-    name: str
+    display_name: str
+    file_name: str
     n_rows: int
     n_cols: int
+    created_at: datetime
+    last_used_at: datetime
     columns: List[ColumnInfo]
+    dependencies: DatasetDependencyInfo
 
 
 class UploadResult(BaseModel):
@@ -35,6 +46,10 @@ class ColumnRenameRequest(BaseModel):
     renames: List[ColumnRename]
 
 
+class DatasetRenameRequest(BaseModel):
+    display_name: str
+
+
 class VariableOut(BaseModel):
     id: str
     dataset_id: str
@@ -45,6 +60,14 @@ class VariableOut(BaseModel):
     subgroup_name: Optional[str] = None
     group_id: Optional[str] = None
     group_name: Optional[str] = None
+    created_at: Optional[datetime] = None
+
+
+class VariableHistoryItem(BaseModel):
+    id: str
+    op: str
+    params: dict
+    created_at: datetime
 
 
 TransformOp = Literal["lag", "decay", "log", "add", "sub", "mul", "div"]
@@ -59,6 +82,16 @@ class TransformRequest(BaseModel):
     alpha: Optional[float] = None     # for decay (0<alpha<=1)
     left: Optional[str] = None        # for arithmetic
     right: Optional[str] = None       # for arithmetic
+
+
+class TransformPreviewPoint(BaseModel):
+    before: Optional[float] = None
+    after: Optional[float] = None
+
+
+class TransformResponse(BaseModel):
+    variable: VariableOut
+    preview: List[TransformPreviewPoint] = []
 
 
 class GroupOut(BaseModel):
@@ -88,7 +121,13 @@ class CreateSubgroupRequest(BaseModel):
 class AssignVariableRequest(BaseModel):
     dataset_id: str
     variable_name: str
-    subgroup_id: str
+    subgroup_id: Optional[str] = None
+    group_id: Optional[str] = None
+
+
+class CategorizeRequest(BaseModel):
+    group_id: Optional[str] = None
+    subgroup_id: Optional[str] = None
 
 
 # Modeling
@@ -127,7 +166,39 @@ class ModelOut(BaseModel):
     y_var: str
     x_vars: list[str]
     is_hero: bool
+    role: Literal["hero", "challenger1", "challenger2", "none"] = "none"
     metrics: ModelMetricsOut
+
+
+class UpdateModelRequest(BaseModel):
+    name: Optional[str] = None
+    x_vars: Optional[list[str]] = None
+
+
+class ModelRoleRequest(BaseModel):
+    role: Literal["hero", "challenger1", "challenger2", "none"]
+
+
+class CoefficientItem(BaseModel):
+    name: str
+    coef: float
+    std_err: float
+    t_value: float
+    p_value: float
+    vif: Optional[float] = None
+
+
+class ModelSummaryResponse(BaseModel):
+    model_id: str
+    intercept: CoefficientItem
+    coefficients: list[CoefficientItem]
+
+
+class PredictionsResponse(BaseModel):
+    index: list[str]
+    y_true: list[float]
+    y_pred: list[float]
+    residuals: list[float]
 
 
 class Adjustment(BaseModel):
@@ -139,14 +210,83 @@ class SimulationRequest(BaseModel):
     adjustments: list[Adjustment] = []
 
 
-class ScenarioRequest(BaseModel):
+class PeriodValue(BaseModel):
+    mode: Literal["multiplier", "value"] = "multiplier"
+    value: float
+
+
+ScenarioAdjustments = Dict[str, Dict[str, PeriodValue]]
+
+
+class ScenarioBase(BaseModel):
+    model_id: str
     name: str
-    adjustments: list[Adjustment] = []
+    horizon: int = Field(gt=0, description="Number of periods to plan for")
+    start_date: date
+    freq: Literal["day", "week", "month"] = "month"
+    adjustments: ScenarioAdjustments = Field(default_factory=dict)
+
+
+class ScenarioCreate(ScenarioBase):
+    pass
+
+
+class ScenarioUpdate(BaseModel):
+    name: Optional[str] = None
+    horizon: Optional[int] = Field(default=None, gt=0)
+    start_date: Optional[date] = None
+    freq: Optional[Literal["day", "week", "month"]] = None
+    adjustments: Optional[ScenarioAdjustments] = None
+
+
+class ScenarioPreviewRequest(BaseModel):
+    model_id: str
+    horizon: int = Field(gt=0)
+    start_date: date
+    freq: Literal["day", "week", "month"] = "month"
+    adjustments: ScenarioAdjustments = Field(default_factory=dict)
+
+
+class ContributionSlice(BaseModel):
+    id: Optional[str]
+    name: Optional[str]
+    value: float
+
+
+class ScenarioSeriesPoint(BaseModel):
+    period: str
+    y_pred: float
+
+
+class ScenarioSummary(BaseModel):
+    periods: list[str]
+    total: float
+    average_per_period: float
+    groups: list[ContributionSlice]
+    subgroups: list[ContributionSlice]
+    series: list[ScenarioSeriesPoint]
 
 
 class ScenarioOut(BaseModel):
     id: str
     model_id: str
     name: str
-    adjustments: list[Adjustment]
-    results: dict
+    horizon: int
+    start_date: date
+    freq: Literal["day", "week", "month"]
+    adjustments: ScenarioAdjustments
+    summary: ScenarioSummary
+
+
+class ScenarioTimeseriesSlice(BaseModel):
+    period: str
+    y_pred: float
+    by_group: list[ContributionSlice]
+    by_subgroup: list[ContributionSlice]
+
+
+class ScenarioTimeseriesResponse(BaseModel):
+    scenario_id: str
+    model_id: str
+    periods: list[str]
+    series: list[ScenarioTimeseriesSlice]
