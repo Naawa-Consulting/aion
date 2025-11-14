@@ -12,6 +12,7 @@ from sqlmodel import Session, select, delete
 
 from ..db import get_session
 from ..models import Dataset, Variable, VariableHistory, Subgroup, Group
+from ..utils.datasets import load_dataset_frame
 from ..schemas import (
     TransformRequest,
     TransformResponse,
@@ -26,13 +27,12 @@ router = APIRouter()
 
 
 def _read_df(ds: Dataset) -> pd.DataFrame:
-    p = Path(ds.path)
-    if not p.exists():
-        raise HTTPException(status_code=500, detail="Dataset file missing")
     try:
-        return pd.read_parquet(p)
+        return load_dataset_frame(ds)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed reading parquet: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed reading dataset: {e}")
 
 
 def _write_df(ds: Dataset, df: pd.DataFrame) -> None:

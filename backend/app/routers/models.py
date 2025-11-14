@@ -14,6 +14,7 @@ from statsmodels.stats.stattools import durbin_watson
 
 from ..db import get_session
 from ..models import Dataset, Model, ModelMetrics, Scenario
+from ..utils.datasets import load_dataset_frame
 from ..schemas import (
     CorrelationResponse,
     CorrelationItem,
@@ -34,8 +35,10 @@ ROLE_CHOICES = {"hero", "challenger1", "challenger2", "none"}
 
 def _load_df(ds: Dataset) -> pd.DataFrame:
     try:
-        return pd.read_parquet(ds.path)
+        return load_dataset_frame(ds)
     except Exception as e:
+        if isinstance(e, ValueError):
+            raise HTTPException(status_code=400, detail=str(e))
         raise HTTPException(status_code=500, detail=f"Failed to read dataset: {e}")
 
 

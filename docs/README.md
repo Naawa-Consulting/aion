@@ -43,6 +43,9 @@ This repository contains a modular analytics application with a Next.js frontend
 - Rename endpoint: `PATCH /datasets/{id}/rename` updates the display label without touching the underlying file.
 - Delete endpoint: `DELETE /datasets/{id}?cascade=true|false` removes dataset + dependents (variables, models, scenarios) when `cascade=true`. If dependencies exist and `cascade=false`, the API returns a 400 with counts so the UI can warn the user.
 - Preview endpoint updates `last_used_at` for "recent" order and continues to serve first 20 rows with dtype chips.
+- Working sample selector: dataset detail now exposes a “Working Sample Size” control (All rows vs. Custom). Selection calls `PATCH /datasets/{id}/sample_size` (with `{ sample_size: null|number }`), persists on the dataset, and every downstream module (Transform/Modeling/Analysis/Predict) automatically restricts computations to the first `sample_size` rows. Responses now include `sample_size` and `total_rows` so the UI can display “Currently using X of Y rows” and show a confirmation/loading overlay before applying the change.
+- Time variable selector: choose a temporal column inside the dataset detail card. `GET /datasets/{id}/time_candidates` suggests columns; `PATCH /datasets/{id}/time_variable` saves `{ column, coerce, time_format, timezone }` (or clears when `column=null`). All analytics endpoints now load data via the helper that enforces sample size + datetime parsing, so temporal features (lag/decay, stacked charts, scenario horizons) stay consistent.
+- Replace dataset file: new “Update File” action opens a modal that uploads a CSV/XLSX via `POST /datasets/{id}/update` (strict vs. force schema modes). Each replacement writes `/data/{dataset_id}/v{n}.parquet`, bumps the dataset’s `version`, and archives the previous file so `GET /datasets/{id}/versions` can list history. Schema differences return 400 with added/removed columns, and a success toast announces the new version.
 
 ### Module 2
 
@@ -76,10 +79,11 @@ This repository contains a modular analytics application with a Next.js frontend
 
 ### Module 5
 
-- Simulation endpoint: `POST /predict/{model_id}/simulate` with `{ adjustments: [{ variable, multiplier }] }` returns predicted totals, variable contributions, and group rollups.
-- Scenario persistence: `POST /predict/{model_id}/scenarios` (max 3 per model) saves adjustments; `GET /predict/{model_id}/scenarios` lists saved scenarios; `DELETE /predict/{model_id}/scenarios/{scenario_id}` removes one.
-- Scenario stacked breakdown: `GET /predict/{model_id}/scenarios/{scenario_id}/stacked?time_col=...&freq=...&by=group|subgroup`.
-- Frontend `/predict` provides the builder, preview, saved scenarios, and time breakdown controls.
+- Scenario builder is now a time-phased planner: choose horizon, start date, and frequency, then edit a grid of periods × variables (either multipliers or absolute overrides). Saved scenarios (max 3 per model) surface as cards with quick metrics and load/delete actions; comparisons and projected totals update in real time with toasts + micro loading states.
+- Preview endpoint: `POST /predict/scenarios/preview` with `{ model_id, horizon, start_date, freq, adjustments }` returns `{ periods, total, average_per_period, groups, subgroups, series }` for instant UI feedback.
+- Scenario CRUD: `POST /predict/scenarios` saves a scenario, `GET /predict/scenarios?model_id=...` lists them, `GET /predict/scenarios/{id}` fetches one, `PATCH /predict/scenarios/{id}` renames/updates adjustments, and `DELETE /predict/scenarios/{id}` removes it. All responses carry the summary block described above.
+- Time series + exports: `GET /predict/scenarios/{id}/timeseries` provides per-period `{ y_pred, by_group, by_subgroup }`. Import a CSV plan via `POST /predict/scenarios/{id}/import` (columns: period, variable, mode, value) and export CSV/XLSX with `GET /predict/scenarios/{id}/export?format=csv|xlsx`.
+
 
 ## Deployment
 

@@ -13,6 +13,7 @@ from sqlmodel import Session, select
 
 from ..db import get_session
 from ..models import Dataset, Model, ModelMetrics, Variable, Subgroup, Group
+from ..utils.datasets import load_dataset_frame
 
 
 router = APIRouter()
@@ -25,7 +26,10 @@ def _fit_from_model(session: Session, model_id: str):
     ds = session.get(Dataset, m.dataset_id)
     if not ds:
         raise HTTPException(status_code=404, detail="Dataset not found")
-    df = pd.read_parquet(ds.path)
+    try:
+        df = load_dataset_frame(ds)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
     x_vars = json.loads(m.x_vars_json)
     cols = [m.y_var] + x_vars
     work = df[cols].apply(pd.to_numeric, errors='coerce').dropna()
@@ -168,9 +172,14 @@ def stacked(
     m, ds, work, X, Xc, y, params = _fit_from_model(session, model_id)
     var_map, sg_map, g_map = _group_maps(session, ds.id)
 
-    if time_col not in work.columns and time_col in pd.read_parquet(ds.path).columns:
+    if time_col not in work.columns:
+        try:
+            original = load_dataset_frame(ds, columns=[time_col])
+        except Exception as exc:  # pragma: no cover - passthrough to default errors
+            raise HTTPException(status_code=400, detail=f"time_col error: {exc}") from exc
+        if time_col not in original.columns:
+            raise HTTPException(status_code=400, detail="time_col not found in dataset")
         # If time col was dropped due to NA in numeric filtering, join from original df
-        original = pd.read_parquet(ds.path)[[time_col]]
         work = work.join(original, how='left')
 
     if time_col not in work.columns:

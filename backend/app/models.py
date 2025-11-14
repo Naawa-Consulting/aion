@@ -1,9 +1,13 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 from sqlmodel import SQLModel, Field
+
+
+def utcnow() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 class Dataset(SQLModel, table=True):
@@ -16,8 +20,14 @@ class Dataset(SQLModel, table=True):
     n_rows: int
     n_cols: int
     columns_json: str  # JSON-encoded list of {name,dtype}
-    created_at: datetime = Field(default_factory=datetime.utcnow, nullable=False)
-    last_used_at: datetime = Field(default_factory=datetime.utcnow, nullable=False)
+    sample_size: int | None = Field(default=None, nullable=True)
+    time_variable: str | None = Field(default=None, nullable=True)
+    time_format: str | None = Field(default=None, nullable=True)
+    time_timezone: str | None = Field(default=None, nullable=True)
+    previous_version_id: str | None = Field(default=None, nullable=True)
+    version: int = Field(default=1, nullable=False)
+    created_at: datetime = Field(default_factory=utcnow, nullable=False)
+    last_used_at: datetime = Field(default_factory=utcnow, nullable=False)
 
 
 class Variable(SQLModel, table=True):

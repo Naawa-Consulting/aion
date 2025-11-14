@@ -21,7 +21,14 @@ class DatasetOut(BaseModel):
     display_name: str
     file_name: str
     n_rows: int
+    total_rows: int
     n_cols: int
+    sample_size: int | None = None
+    time_variable: Optional[str] = None
+    time_format: Optional[str] = None
+    time_timezone: Optional[str] = None
+    version: int = 1
+    previous_version_id: Optional[str] = None
     created_at: datetime
     last_used_at: datetime
     columns: List[ColumnInfo]
@@ -48,6 +55,54 @@ class ColumnRenameRequest(BaseModel):
 
 class DatasetRenameRequest(BaseModel):
     display_name: str
+
+
+class DatasetSampleSizeRequest(BaseModel):
+    sample_size: Optional[int] = None
+
+
+class DatasetUpdateResponse(BaseModel):
+    id: str
+    display_name: str
+    old_version: int
+    new_version: int
+    replaced_columns: dict
+    rows: int
+    cols: int
+    status: Literal["updated"] = "updated"
+
+
+class DatasetVersionInfo(BaseModel):
+    version: int
+    created_at: datetime
+
+
+class DatasetVersionsResponse(BaseModel):
+    versions: List[DatasetVersionInfo]
+
+
+class TimeCandidate(BaseModel):
+    name: str
+    dtype: str
+    parseable: bool
+
+
+class TimeSelection(BaseModel):
+    name: Optional[str] = None
+    time_format: Optional[str] = None
+    time_timezone: Optional[str] = None
+
+
+class TimeCandidateResponse(BaseModel):
+    candidates: List[TimeCandidate]
+    current: Optional[TimeSelection] = None
+
+
+class TimeVariableRequest(BaseModel):
+    column: Optional[str] = None
+    coerce: bool = False
+    time_format: Optional[str] = None
+    timezone: Optional[str] = None
 
 
 class VariableOut(BaseModel):
