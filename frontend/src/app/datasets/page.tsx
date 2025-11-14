@@ -22,16 +22,53 @@ type Dataset = {
   display_name: string;
   file_name: string;
   n_rows: number;
+  total_rows?: number;
   n_cols: number;
+  sample_size?: number | null;
+  time_variable?: string | null;
+  time_format?: string | null;
+  time_timezone?: string | null;
+  version?: number;
+  previous_version_id?: string | null;
   created_at: string;
   last_used_at: string;
   columns: { name: string; dtype: string }[];
   dependencies: { variables: number; models: number; scenarios: number };
 };
 
+type TimeCandidate = { name: string; dtype: string; parseable: boolean };
+type TimeCandidateResponse = {
+  candidates: TimeCandidate[];
+  current?: { name?: string | null; time_format?: string | null; time_timezone?: string | null } | null;
+};
+
 type Preview = {
   columns: string[];
   rows: Record<string, unknown>[];
+};
+
+type Differences = { added: string[]; removed: string[]; dtype_mismatch: string[] };
+
+type VersionInfo = { version: number; created_at: string };
+
+type DatasetSummary = {
+  name: string;
+  version: number;
+  created: string;
+  last_used: string;
+  file_type: string;
+  n_rows: number;
+  sample_size?: number | null;
+  n_columns: number;
+  columns: {
+    name: string;
+    dtype: string;
+    missing_pct: number;
+    unique: number;
+    min?: number | null;
+    max?: number | null;
+    samples: string[];
+  }[];
 };
 
 export default function DatasetsPage() {
@@ -47,6 +84,52 @@ export default function DatasetsPage() {
     { open: false, cascade: true }
   );
   const { datasetId, setDatasetId } = useGlobalStore();
+  const [sampleMode, setSampleMode] = useState<"all" | "custom">("all");
+  const [customSample, setCustomSample] = useState<number>(0);
+  const [sampleUpdating, setSampleUpdating] = useState(false);
+  const [timeCandidates, setTimeCandidates] = useState<TimeCandidate[]>([]);
+  const [timeCandidatesLoading, setTimeCandidatesLoading] = useState(false);
+  const [timeColumn, setTimeColumn] = useState("");
+  const [timeCoerce, setTimeCoerce] = useState(false);
+  const [timeFormat, setTimeFormat] = useState("");
+  const [timeTimezone, setTimeTimezone] = useState("");
+  const [timeSaving, setTimeSaving] = useState(false);
+  const [updateState, setUpdateState] = useState<{
+    open: boolean;
+    dataset?: Dataset;
+    strategy: "strict" | "force";
+    file?: File | null;
+    uploading: boolean;
+    error?: string | null;
+    differences?: Differences | null;
+  }>({
+    open: false,
+    strategy: "strict",
+    uploading: false,
+  });
+  const [versionHistory, setVersionHistory] = useState<{
+    open: boolean;
+    dataset?: Dataset;
+    loading: boolean;
+    items: VersionInfo[];
+  }>({ open: false, loading: false, items: [] });
+  const [summaryState, setSummaryState] = useState<{
+    open: boolean;
+    loading: boolean;
+    data?: DatasetSummary;
+  }>({ open: false, loading: false });
+
+  const dismissUpdateModal = useCallback(() => {
+    setUpdateState({ open: false, strategy: "strict", uploading: false });
+  }, []);
+
+  const closeVersionHistory = useCallback(() => {
+    setVersionHistory({ open: false, loading: false, items: [] });
+  }, []);
+
+  const closeSummary = useCallback(() => {
+    setSummaryState({ open: false, loading: false, data: undefined });
+  }, []);
 
   const fetchDatasets = useCallback(async () => {
     const res = await fetch(`${API_URL}/datasets`);
@@ -81,16 +164,281 @@ export default function DatasetsPage() {
     }
   }, []);
 
+  const fetchTimeCandidates = useCallback(
+    async (id: string) => {
+      setTimeCandidatesLoading(true);
+      try {
+        const res = await fetch(`${API_URL}/datasets/${id}/time_candidates`);
+        if (!res.ok) throw new Error(await res.text());
+        const data: TimeCandidateResponse = await res.json();
+        setTimeCandidates(data.candidates || []);
+        if (data.current?.name) {
+          setTimeColumn(data.current.name);
+          setTimeFormat(data.current.time_format ?? "");
+          setTimeTimezone(data.current.time_timezone ?? "");
+          setTimeCoerce(false);
+        }
+      } catch (error) {
+        console.error(error);
+        setTimeCandidates([]);
+      } finally {
+        setTimeCandidatesLoading(false);
+      }
+    },
+    []
+  );
+
   useEffect(() => {
     if (datasetId) {
       loadPreview(datasetId);
+      fetchTimeCandidates(datasetId);
     }
-  }, [datasetId, loadPreview]);
+  }, [datasetId, loadPreview, fetchTimeCandidates]);
+
+  const fetchVersionHistory = useCallback(
+    async (dataset: Dataset) => {
+      setVersionHistory({ open: true, dataset, loading: true, items: [] });
+      try {
+        const res = await fetch(`${API_URL}/datasets/${dataset.id}/versions`);
+        if (!res.ok) throw new Error(await res.text());
+        const data = await res.json();
+        setVersionHistory({ open: true, dataset, loading: false, items: data.versions || [] });
+      } catch (error: any) {
+        console.error(error);
+        toast.error(error?.message || "Failed to load version history");
+        setVersionHistory({ open: false, dataset: undefined, loading: false, items: [] });
+      }
+    },
+    []
+  );
+
+  const fetchDatasetSummary = useCallback(
+    async (dataset: Dataset) => {
+      setSummaryState({ open: true, loading: true });
+      try {
+        const res = await fetch(`${API_URL}/datasets/${dataset.id}/summary`);
+        if (!res.ok) throw new Error(await res.text());
+        const data = await res.json();
+        setSummaryState({ open: true, loading: false, data });
+      } catch (error: any) {
+        console.error(error);
+        toast.error(error?.message || "Failed to load dataset summary");
+        setSummaryState({ open: false, loading: false });
+      }
+    },
+    []
+  );
 
   const currentDataset = useMemo(
     () => datasets.find((ds) => ds.id === datasetId) || null,
     [datasets, datasetId]
   );
+
+  useEffect(() => {
+    if (!currentDataset) return;
+    const total = currentDataset.total_rows ?? currentDataset.n_rows ?? 0;
+    const nextMode = currentDataset.sample_size ? "custom" : "all";
+    setSampleMode(nextMode);
+    const fallback = currentDataset.sample_size ?? (total || 10);
+    setCustomSample(fallback);
+    setTimeColumn(currentDataset.time_variable ?? "");
+    setTimeFormat(currentDataset.time_format ?? "");
+    setTimeTimezone(currentDataset.time_timezone ?? "");
+    setTimeCoerce(!currentDataset.time_variable);
+  }, [currentDataset]);
+
+  const totalRows = currentDataset?.total_rows ?? currentDataset?.n_rows ?? 0;
+  const activeRows = currentDataset ? currentDataset.sample_size ?? totalRows : 0;
+  const sampleMin = currentDataset ? (totalRows >= 10 ? 10 : totalRows || 10) : 10;
+  const safeCustomSample = Number.isFinite(customSample) ? customSample : 0;
+  const pendingSample = sampleMode === "all" ? null : safeCustomSample;
+  const currentSample = currentDataset?.sample_size ?? null;
+  const sampleInvalid =
+    sampleMode === "custom" &&
+    !!currentDataset &&
+    (
+      totalRows
+        ? safeCustomSample < sampleMin || safeCustomSample > totalRows
+        : safeCustomSample > 0
+    );
+  const canApplySample = Boolean(
+    currentDataset && !sampleInvalid && (currentSample ?? null) !== (pendingSample ?? null)
+  );
+
+  const timePreviewValues = useMemo(() => {
+    if (!preview || !timeColumn) return [];
+    return preview.rows
+      .map((row) => row[timeColumn])
+      .filter((value) => value !== undefined && value !== null)
+      .slice(0, 3)
+      .map((value) => String(value));
+  }, [preview, timeColumn]);
+
+  const handleApplySample = useCallback(async () => {
+    if (!currentDataset || !canApplySample) return;
+    if (sampleMode === "custom" && sampleInvalid) {
+      toast.error("Enter a valid sample size before applying.");
+      return;
+    }
+    const target = sampleMode === "all" ? null : Math.round(safeCustomSample);
+    const targetLabel =
+      target === null ? "all rows" : `${formatNumber(target, 0)} rows`;
+    if (
+      !window.confirm(
+        `Change working dataset to ${targetLabel}? This will affect transformations, modeling, and analysis results.`
+      )
+    ) {
+      return;
+    }
+    setSampleUpdating(true);
+    try {
+      const res = await fetch(`${API_URL}/datasets/${currentDataset.id}/sample_size`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sample_size: target }),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      const updated: Dataset = await res.json();
+      setDatasets((prev) => prev.map((ds) => (ds.id === updated.id ? updated : ds)));
+      toast.success(
+        `✅ Working dataset updated successfully (${formatNumber(
+          updated.sample_size ?? updated.total_rows ?? updated.n_rows,
+          0
+        )} rows active)`
+      );
+      await fetchDatasets();
+      if (datasetId === updated.id) {
+        loadPreview(updated.id);
+      }
+    } catch (error: any) {
+      console.error(error);
+      toast.error(error?.message || "Failed to update sample size");
+    } finally {
+      setTimeout(() => setSampleUpdating(false), 300);
+    }
+  }, [
+    currentDataset,
+    sampleMode,
+    safeCustomSample,
+    canApplySample,
+    sampleInvalid,
+    datasetId,
+    fetchDatasets,
+    loadPreview,
+  ]);
+
+  const handleSaveTimeVariable = useCallback(async () => {
+    if (!currentDataset) return;
+    setTimeSaving(true);
+    try {
+      const res = await fetch(`${API_URL}/datasets/${currentDataset.id}/time_variable`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          column: timeColumn || null,
+          coerce: timeCoerce,
+          time_format: timeFormat || null,
+          timezone: timeTimezone || null,
+        }),
+      });
+      if (!res.ok) {
+        const detail = await safeParseJSON(await res.text());
+        if (detail?.samples) {
+          toast.error(`${detail.error || "Unparseable time values"}: ${detail.samples.map((s: any) => s.value).join(", ")}`);
+        } else {
+          toast.error(detail?.detail || "Failed to save time variable");
+        }
+        return;
+      }
+      const updated: Dataset = await res.json();
+      setDatasets((prev) => prev.map((ds) => (ds.id === updated.id ? updated : ds)));
+      toast.success("✅ Time variable saved");
+      fetchTimeCandidates(updated.id);
+    } catch (error: any) {
+      console.error(error);
+      toast.error(error?.message || "Failed to save time variable");
+    } finally {
+      setTimeSaving(false);
+    }
+  }, [currentDataset, timeColumn, timeCoerce, timeFormat, timeTimezone, fetchTimeCandidates]);
+
+  const handleClearTimeVariable = useCallback(async () => {
+    if (!currentDataset) return;
+    setTimeSaving(true);
+    try {
+      const res = await fetch(`${API_URL}/datasets/${currentDataset.id}/time_variable`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ column: null }),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      const updated: Dataset = await res.json();
+      setDatasets((prev) => prev.map((ds) => (ds.id === updated.id ? updated : ds)));
+      setTimeColumn("");
+      setTimeFormat("");
+      setTimeTimezone("");
+      setTimeCoerce(false);
+      toast.success("Time variable cleared");
+      fetchTimeCandidates(updated.id);
+    } catch (error: any) {
+      console.error(error);
+      toast.error(error?.message || "Failed to clear time variable");
+    } finally {
+      setTimeSaving(false);
+    }
+  }, [currentDataset, fetchTimeCandidates]);
+
+  const handleUpdateUpload = useCallback((fileList: FileList | null) => {
+    const file = fileList?.[0];
+    setUpdateState((state) => ({ ...state, file }));
+  }, []);
+
+  const submitDatasetUpdate = useCallback(async () => {
+    if (!updateState.dataset || !updateState.file) {
+      toast.error("Select a file to upload.");
+      return;
+    }
+    setUpdateState((state) => ({ ...state, uploading: true, error: null, differences: null }));
+    try {
+      const formData = new FormData();
+      formData.append("file", updateState.file);
+      formData.append("replace_strategy", updateState.strategy);
+      const res = await fetch(`${API_URL}/datasets/${updateState.dataset.id}/update`, {
+        method: "POST",
+        body: formData,
+      });
+      if (!res.ok) {
+        const detail = await safeParseJSON(await res.text());
+        const rawMessage =
+          typeof detail === "string"
+            ? detail
+            : typeof detail?.detail === "string"
+            ? detail.detail
+            : typeof detail?.error === "string"
+            ? detail.error
+            : "Failed to update dataset";
+        setUpdateState((state) => ({
+          ...state,
+          uploading: false,
+          error: rawMessage,
+          differences: detail?.differences || null,
+        }));
+        return;
+      }
+      const data = await res.json();
+      toast.success(`✅ Dataset successfully updated (v${data.new_version})`);
+      setUpdateState({ open: false, strategy: "strict", uploading: false });
+      await fetchDatasets();
+      if (datasetId === updateState.dataset.id) {
+        loadPreview(updateState.dataset.id);
+        fetchTimeCandidates(updateState.dataset.id);
+      }
+    } catch (error: any) {
+      console.error(error);
+      toast.error(error?.message || "Update failed");
+      setUpdateState((state) => ({ ...state, uploading: false }));
+    }
+  }, [updateState, datasetId, fetchDatasets, loadPreview, fetchTimeCandidates]);
 
   const uploadFiles = useCallback(
     (files: File[], force = false) =>
@@ -286,6 +634,7 @@ export default function DatasetsPage() {
                       <div>
                         <p className="font-semibold">{ds.display_name}</p>
                         <p className="text-xs text-[var(--color-muted)]">{ds.file_name}</p>
+                        <p className="text-xs text-[var(--color-muted)]">Version {ds.version ?? 1}</p>
                       </div>
                       {isActive && <Badge>Active</Badge>}
                     </div>
@@ -334,6 +683,24 @@ export default function DatasetsPage() {
                         size="sm"
                         onClick={(event) => {
                           event.stopPropagation();
+                          setUpdateState({
+                            open: true,
+                            dataset: ds,
+                            strategy: "strict",
+                            file: null,
+                            uploading: false,
+                            error: null,
+                            differences: null,
+                          });
+                        }}
+                      >
+                        <Upload className="mr-1 h-3 w-3" /> Update File
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={(event) => {
+                          event.stopPropagation();
                           setDeleteState({ open: true, dataset: ds, cascade: true });
                         }}
                       >
@@ -362,56 +729,168 @@ export default function DatasetsPage() {
 
         <Card className="space-y-4">
           {currentDataset ? (
-            <>
+            <div className="relative space-y-4">
+              <div
+                className={`absolute inset-0 rounded-2xl bg-[var(--color-bg)]/70 backdrop-blur-sm transition-opacity duration-300 z-10 ${
+                  sampleUpdating ? "opacity-100 pointer-events-auto" : "opacity-0 pointer-events-none"
+                }`}
+              />
               <CardHeader title={currentDataset.display_name} subtitle={currentDataset.file_name} />
               <div className="grid sm:grid-cols-4 gap-3 text-center">
-                <Stat label="Rows" value={formatNumber(currentDataset.n_rows, 0)} />
+                <Stat label="Rows" value={formatNumber(totalRows, 0)} />
                 <Stat label="Columns" value={currentDataset.n_cols} />
                 <Stat label="Created" value={formatDate(currentDataset.created_at)} />
                 <Stat label="Last used" value={formatDate(currentDataset.last_used_at)} />
               </div>
-              <div className="flex flex-wrap gap-2">
-                {dtypeSummary.map((col) => (
-                  <Badge key={col.name}>{col.name} · {col.dtype}</Badge>
-                ))}
-              </div>
-              <div className="rounded-2xl border border-[var(--color-border)]">
-                <div className="flex items-center justify-between px-4 py-3 border-b border-[var(--color-border)]">
-                  <p className="font-medium">Schema preview</p>
-                  {loadingPreview && <span className="text-xs text-[var(--color-muted)]">Loading…</span>}
+              <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-[var(--color-muted)]">
+                <p>
+                  Version {currentDataset.version ?? 1} · Updated {formatDate(currentDataset.last_used_at)} ·{" "}
+                  {formatNumber(totalRows, 0)} rows, {currentDataset.n_cols} columns
+                </p>
+                <div className="flex gap-2">
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => currentDataset && fetchDatasetSummary(currentDataset)}
+                  >
+                    View details
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => currentDataset && fetchVersionHistory(currentDataset)}
+                    disabled={versionHistory.loading && versionHistory.dataset?.id === currentDataset.id}
+                  >
+                    Version history
+                  </Button>
                 </div>
-                {preview && preview.columns.length > 0 ? (
-                  <div className="max-h-[360px] overflow-auto">
-                    <table className="min-w-full text-sm">
-                      <thead className="bg-[var(--color-bg)]/80">
-                        <tr>
-                          {preview.columns.map((col) => (
-                            <th key={col} className="px-3 py-2 text-left text-xs font-medium text-[var(--color-muted)] uppercase tracking-wide">
-                              {col}
-                            </th>
-                          ))}
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {preview.rows.map((row, idx) => (
-                          <tr key={idx} className="odd:bg-transparent even:bg-[var(--color-border)]/20">
-                            {preview.columns.map((col) => (
-                              <td key={`${idx}-${col}`} className="px-3 py-2 whitespace-nowrap">
-                                {String(row[col] ?? "")}
-                              </td>
-                            ))}
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                ) : (
-                  <div className="p-6 text-center text-sm text-[var(--color-muted)]">
-                    No preview available
-                  </div>
-                )}
               </div>
-            </>
+              <div className="rounded-2xl border border-[var(--color-border)] p-4 space-y-3">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <p className="font-medium">Time variable</p>
+                    <p className="text-xs text-[var(--color-muted)]">Used across Transform, Modeling, Analysis, and Predict.</p>
+                  </div>
+                  {timeCandidatesLoading && <span className="text-xs text-[var(--color-muted)]">Detecting…</span>}
+                </div>
+                <select
+                  className="w-full rounded-2xl border border-[var(--color-border)] bg-transparent px-4 py-2 text-sm"
+                  value={timeColumn}
+                  onChange={(event) => setTimeColumn(event.target.value)}
+                >
+                  <option value="">Select column</option>
+                  {timeCandidates.length > 0 && (
+                    <optgroup label="Suggested">
+                      {timeCandidates.map((candidate) => (
+                        <option key={`candidate-${candidate.name}`} value={candidate.name}>
+                          {candidate.name} {candidate.parseable ? "" : " (needs coercion)"}
+                        </option>
+                      ))}
+                    </optgroup>
+                  )}
+                  {currentDataset?.columns && (
+                    <optgroup label="All columns">
+                      {currentDataset.columns.map((col) => (
+                        <option key={`col-${col.name}`} value={col.name}>
+                          {col.name}
+                        </option>
+                      ))}
+                    </optgroup>
+                  )}
+                </select>
+                <div className="space-y-2 rounded-xl border border-dashed border-[var(--color-border)] p-3 text-xs">
+                  <label className="flex items-center gap-2 text-sm">
+                    <input type="checkbox" checked={timeCoerce} onChange={(event) => setTimeCoerce(event.target.checked)} />
+                    Coerce to datetime
+                  </label>
+                  <div className="flex flex-wrap gap-3">
+                    <label className="flex flex-col gap-1 flex-1 min-w-[160px]">
+                      <span>Custom format</span>
+                      <input
+                        type="text"
+                        placeholder="%Y-%m-%d"
+                        className="rounded-lg border border-[var(--color-border)] bg-transparent px-3 py-2 text-sm"
+                        value={timeFormat}
+                        onChange={(event) => setTimeFormat(event.target.value)}
+                      />
+                    </label>
+                    <label className="flex flex-col gap-1 flex-1 min-w-[160px]">
+                      <span>Timezone</span>
+                      <input
+                        type="text"
+                        placeholder="UTC"
+                        className="rounded-lg border border-[var(--color-border)] bg-transparent px-3 py-2 text-sm"
+                        value={timeTimezone}
+                        onChange={(event) => setTimeTimezone(event.target.value)}
+                      />
+                    </label>
+                  </div>
+                  {timePreviewValues.length > 0 && (
+                    <p className="text-[var(--color-muted)]">
+                      Sample values: {timePreviewValues.join(", ")}
+                    </p>
+                  )}
+                </div>
+                <div className="flex gap-2">
+                  <Button size="sm" onClick={handleSaveTimeVariable} disabled={!currentDataset || timeSaving}>
+                    {timeSaving ? "Saving..." : "Save time variable"}
+                  </Button>
+                  <Button variant="ghost" size="sm" onClick={handleClearTimeVariable} disabled={!currentDataset?.time_variable || timeSaving}>
+                    Clear selection
+                  </Button>
+                </div>
+              </div>
+              <div className="rounded-2xl border border-[var(--color-border)] p-4 space-y-2">
+                <div className="flex flex-wrap items-center gap-3">
+                  <p className="text-sm font-medium">Working Sample Size</p>
+                  <select
+                    className="rounded-2xl border border-[var(--color-border)] bg-transparent px-4 py-2 text-sm transition-colors"
+                    value={sampleMode}
+                    onChange={(event) => {
+                      const nextMode = event.target.value as "all" | "custom";
+                      setSampleMode(nextMode);
+                      if (nextMode === "custom" && sampleMode !== "custom") {
+                        const fallbackValue =
+                          currentDataset.sample_size ?? (safeCustomSample || sampleMin || 10);
+                        setCustomSample(fallbackValue || sampleMin || 10);
+                      }
+                    }}
+                  >
+                    <option value="all">All rows</option>
+                    <option value="custom">Custom…</option>
+                  </select>
+                  {sampleMode === "custom" && (
+                    <input
+                      type="number"
+                      min={sampleMin}
+                      max={totalRows}
+                      className={`w-24 rounded-xl border px-3 py-2 text-sm transition-all duration-200 ${
+                        sampleInvalid ? "border-red-500" : "border-[var(--color-border)]"
+                      } bg-transparent`}
+                      value={customSample}
+                      onChange={(event) => setCustomSample(Number(event.target.value) || 0)}
+                    />
+                  )}
+                  <Button size="sm" onClick={handleApplySample} disabled={!canApplySample || sampleUpdating}>
+                    Apply
+                  </Button>
+                </div>
+                {sampleMode === "custom" && sampleInvalid && (
+                  <p className="text-xs text-red-500">
+                    Enter a value between {formatNumber(sampleMin, 0)} and {formatNumber(totalRows, 0)} rows.
+                  </p>
+                )}
+                <p className="text-xs text-[var(--color-muted)]">
+                  {activeRows === totalRows || !totalRows
+                    ? `Currently using all ${formatNumber(totalRows, 0)} rows.`
+                    : `Currently using ${formatNumber(activeRows, 0)} of ${formatNumber(totalRows, 0)} rows (${(
+                        (activeRows / totalRows) *
+                        100
+                      ).toFixed(1)}% of dataset).`}
+                </p>
+              </div>
+              <SchemaTabs preview={preview} loading={loadingPreview} datasetName={currentDataset.display_name} />
+            </div>
           ) : (
             <div className="min-h-[320px] flex flex-col items-center justify-center text-center text-[var(--color-muted)]">
               <FolderOpen className="h-10 w-10 mb-3" />
@@ -420,6 +899,181 @@ export default function DatasetsPage() {
           )}
         </Card>
       </div>
+
+      <Modal
+        open={summaryState.open}
+        onClose={closeSummary}
+        title="Dataset summary"
+      >
+        {summaryState.loading ? (
+          <p className="text-sm text-[var(--color-muted)]">Loading summary…</p>
+        ) : summaryState.data ? (
+          <div className="space-y-4 max-h-[70vh] overflow-auto">
+            <div className="grid md:grid-cols-2 gap-4 text-sm">
+              <div className="rounded-xl border border-[var(--color-border)] p-3">
+                <p className="text-xs text-[var(--color-muted)]">Dataset</p>
+                <p className="font-semibold">{summaryState.data.name}</p>
+                <p className="text-xs text-[var(--color-muted)]">Version {summaryState.data.version}</p>
+              </div>
+              <div className="rounded-xl border border-[var(--color-border)] p-3">
+                <p className="text-xs text-[var(--color-muted)]">File type</p>
+                <p className="font-semibold">{summaryState.data.file_type?.toUpperCase() || "PARQUET"}</p>
+              </div>
+              <div className="rounded-xl border border-[var(--color-border)] p-3">
+                <p className="text-xs text-[var(--color-muted)]">Created</p>
+                <p className="font-semibold">{formatDate(summaryState.data.created)}</p>
+              </div>
+              <div className="rounded-xl border border-[var(--color-border)] p-3">
+                <p className="text-xs text-[var(--color-muted)]">Last used</p>
+                <p className="font-semibold">{formatDate(summaryState.data.last_used)}</p>
+              </div>
+              <div className="rounded-xl border border-[var(--color-border)] p-3">
+                <p className="text-xs text-[var(--color-muted)]">Rows</p>
+                <p className="font-semibold">
+                  {formatNumber(summaryState.data.n_rows, 0)}
+                  {summaryState.data.sample_size
+                    ? ` (${summaryState.data.sample_size} active)`
+                    : ""}
+                </p>
+              </div>
+              <div className="rounded-xl border border-[var(--color-border)] p-3">
+                <p className="text-xs text-[var(--color-muted)]">Columns</p>
+                <p className="font-semibold">{summaryState.data.n_columns}</p>
+              </div>
+            </div>
+            <div className="rounded-2xl border border-[var(--color-border)] shadow-sm">
+              <div className="px-4 py-3 border-b border-[var(--color-border)]">
+                <p className="font-medium text-sm">Data quality</p>
+              </div>
+              <div className="max-h-[45vh] overflow-auto">
+                <table className="w-full text-sm">
+                  <thead className="sticky top-0 bg-[var(--color-bg)] text-xs uppercase tracking-wide text-[var(--color-muted)]">
+                    <tr>
+                      <th className="px-4 py-2 text-left">Column</th>
+                      <th className="px-4 py-2 text-left">Type</th>
+                      <th className="px-4 py-2 text-left">% Missing</th>
+                      <th className="px-4 py-2 text-left">Unique</th>
+                      <th className="px-4 py-2 text-left">Min / Max</th>
+                      <th className="px-4 py-2 text-left">Preview</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                {summaryState.data.columns.map((col) => (
+                  <tr
+                    key={col.name}
+                    className="border-t border-[var(--color-border)]/70"
+                  >
+                        <td className="px-4 py-3 font-medium">{col.name}</td>
+                        <td className="px-4 py-3 text-[var(--color-muted)]">{col.dtype}</td>
+                        <td className="px-4 py-3 text-[var(--color-muted)]">{col.missing_pct}%</td>
+                        <td className="px-4 py-3 text-[var(--color-muted)]">{col.unique}</td>
+                        <td className="px-4 py-3 text-[var(--color-muted)]">
+                          {col.min !== null && col.min !== undefined ? col.min : "–"} /{" "}
+                          {col.max !== null && col.max !== undefined ? col.max : "–"}
+                        </td>
+                        <td className="px-4 py-3 text-[var(--color-muted)] truncate">
+                          {col.samples?.length ? col.samples.join(", ") : "–"}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        ) : (
+          <p className="text-sm text-[var(--color-muted)]">No summary available.</p>
+        )}
+        <div className="mt-4 flex justify-end">
+          <Button variant="ghost" onClick={closeSummary}>
+            Close
+          </Button>
+        </div>
+      </Modal>
+
+      <Modal
+        open={updateState.open}
+        onClose={dismissUpdateModal}
+        title={updateState.dataset ? `Replace dataset “${updateState.dataset.display_name}”` : "Replace dataset"}
+      >
+        <p className="text-sm text-[var(--color-muted)] mb-3">
+          Upload a new file to replace the existing one. Make sure the schema (column names and types) is the same.
+        </p>
+        <input
+          type="file"
+          accept=".csv,.xlsx,.xls"
+          onChange={(event) => handleUpdateUpload(event.target.files)}
+          className="w-full rounded-lg border border-dashed border-[var(--color-border)] px-3 py-2 text-sm"
+        />
+        <label className="mt-3 flex flex-col gap-1 text-sm">
+          Replace strategy
+          <select
+            className="rounded-lg border border-[var(--color-border)] bg-transparent px-3 py-2"
+            value={updateState.strategy}
+            onChange={(event) =>
+              setUpdateState((state) => ({ ...state, strategy: event.target.value as "strict" | "force" }))
+            }
+          >
+            <option value="strict">Strict (schema must match)</option>
+            <option value="force">Force (allow added/removed columns)</option>
+          </select>
+        </label>
+        {updateState.error && (
+          <div className="mt-3 rounded-lg border border-red-500/50 bg-red-500/10 p-3 text-sm text-red-600">
+            {updateState.error}
+          </div>
+        )}
+        {updateState.differences && (
+          <div className="mt-3 rounded-lg border border-[var(--color-border)] p-3 text-sm">
+            <p className="font-medium mb-1">Schema differences</p>
+            {["added", "removed", "dtype_mismatch"].map((key) => {
+              const list = (updateState.differences as any)[key] as string[];
+              if (!list?.length) return null;
+              const label =
+                key === "added" ? "Added" : key === "removed" ? "Removed" : "Type changes";
+              return (
+                <p key={key}>
+                  <span className="font-semibold">{label}:</span> {list.join(", ")}
+                </p>
+              );
+            })}
+          </div>
+        )}
+        <div className="mt-4 flex justify-end gap-2">
+          <Button variant="ghost" onClick={dismissUpdateModal}>
+            Cancel
+          </Button>
+          <Button onClick={submitDatasetUpdate} disabled={!updateState.file || updateState.uploading}>
+            {updateState.uploading ? "Uploading new version..." : "Upload & Replace"}
+          </Button>
+        </div>
+      </Modal>
+
+      <Modal
+        open={versionHistory.open}
+        onClose={closeVersionHistory}
+        title={versionHistory.dataset ? `${versionHistory.dataset.display_name} · Versions` : "Version history"}
+      >
+        {versionHistory.loading ? (
+          <p className="text-sm text-[var(--color-muted)]">Loading version history…</p>
+        ) : versionHistory.items.length ? (
+          <ul className="space-y-2 text-sm">
+            {versionHistory.items.map((item) => (
+              <li key={item.version} className="rounded-lg border border-[var(--color-border)] p-2 flex items-center justify-between">
+                <span>Version {item.version}</span>
+                <span className="text-[var(--color-muted)]">{formatDate(item.created_at)}</span>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="text-sm text-[var(--color-muted)]">No version history available.</p>
+        )}
+        <div className="mt-4 flex justify-end">
+          <Button variant="ghost" onClick={closeVersionHistory}>
+            Close
+          </Button>
+        </div>
+      </Modal>
 
       <Modal
         open={renameState.open}
@@ -494,4 +1148,122 @@ function safeParseJSON(payload: string | null) {
   } catch (error) {
     return {};
   }
+}
+
+function SchemaTabs({
+  preview,
+  loading,
+}: {
+  preview: Preview | null;
+  loading: boolean;
+}) {
+  const [tab, setTab] = useState<"schema" | "preview">("schema");
+  const schemaRows =
+    preview?.columns?.map((column) => {
+      const samples = (preview.rows || [])
+        .map((row) => row[column])
+        .filter((value) => value !== null && value !== undefined)
+        .slice(0, 3)
+        .map((value) => String(value));
+      return { name: column, type: inferType(samples, preview, column), samples };
+    }) || [];
+
+  return (
+    <div className="rounded-2xl border border-[var(--color-border)] shadow-sm overflow-hidden">
+      <div className="flex border-b border-[var(--color-border)] text-sm">
+        {["schema", "preview"].map((key) => (
+          <button
+            key={key}
+            className={`flex-1 px-4 py-2 transition ${
+              tab === key ? "bg-[var(--color-bg)] font-medium" : "text-[var(--color-muted)]"
+            }`}
+            onClick={() => setTab(key as any)}
+          >
+            {key === "schema" ? "Schema Overview" : "Table Preview"}
+          </button>
+        ))}
+      </div>
+      {tab === "schema" ? (
+        schemaRows.length ? (
+          <div className="max-h-[360px] overflow-auto animate-fade">
+            <table className="w-full text-sm">
+              <thead className="sticky top-0 bg-[var(--color-bg)]">
+                <tr className="text-xs uppercase tracking-wide text-[var(--color-muted)]">
+                  <th className="px-4 py-2 text-left">Column</th>
+                  <th className="px-4 py-2 text-left">Type</th>
+                  <th className="px-4 py-2 text-left">Preview</th>
+                </tr>
+              </thead>
+              <tbody>
+                {schemaRows.map((row) => (
+                  <tr
+                    key={row.name}
+                    className="border-t border-[var(--color-border)]/70 transition hover:bg-[var(--color-border)]/20"
+                  >
+                    <td className="px-4 py-3 font-medium">{row.name}</td>
+                    <td className="px-4 py-3 text-[var(--color-muted)]">{row.type}</td>
+                    <td className="px-4 py-3 text-[var(--color-muted)]">
+                      {row.samples.length ? row.samples.join(", ") : "—"}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : (
+          <div className="p-6 text-center text-sm text-[var(--color-muted)]">
+            {loading ? "Loading schema…" : "No schema available"}
+          </div>
+        )
+      ) : preview && preview.columns.length ? (
+        <div className="max-h-[360px] overflow-auto">
+          <table className="min-w-full text-sm">
+            <thead className="bg-[var(--color-bg)]/80">
+              <tr>
+                {preview.columns.map((col) => (
+                  <th key={col} className="px-3 py-2 text-left text-xs font-medium text-[var(--color-muted)] uppercase tracking-wide">
+                    {col}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {preview.rows.map((row, idx) => (
+                <tr key={idx} className="odd:bg-transparent even:bg-[var(--color-border)]/20">
+                  {preview.columns.map((col) => (
+                    <td key={`${idx}-${col}`} className="px-3 py-2 whitespace-nowrap">
+                      {String(row[col] ?? "")}
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        <div className="p-6 text-center text-sm text-[var(--color-muted)]">
+          {loading ? "Loading preview…" : "No preview available"}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function inferType(samples: string[], preview: Preview | null, column: string) {
+  if (preview?.columns) {
+    const colIndex = preview.columns.indexOf(column);
+    if (colIndex >= 0 && preview.rows.length) {
+      const value = preview.rows[0][column];
+      if (value !== null && value !== undefined) {
+        const type = typeof value;
+        if (type === "number") return "number";
+        if (value instanceof Date) return "datetime";
+      }
+    }
+  }
+  const sample = samples[0];
+  if (!sample) return "—";
+  if (!Number.isNaN(Date.parse(sample))) return "datetime";
+  if (!Number.isNaN(Number(sample))) return "number";
+  return "string";
 }
