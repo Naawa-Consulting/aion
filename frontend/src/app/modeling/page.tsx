@@ -354,7 +354,14 @@ export default function ModelingPage() {
               {correlationData.map((item) => (
                 <label key={item.name} className="flex items-center justify-between text-sm">
                   <span>
-                    {item.name} <span className="text-xs text-[var(--color-muted)]">({item.corr.toFixed(3)})</span>
+                    {item.name}{" "}
+                    <span className="text-xs text-[var(--color-muted)]">
+                      (
+                      {Number.isFinite(item.corr)
+                        ? (item.corr as number).toFixed(3)
+                        : "-"}
+                      )
+                    </span>
                   </span>
                   <input type="checkbox" checked={xSelected.includes(item.name)} onChange={() => handleToggleX(item.name)} />
                 </label>
