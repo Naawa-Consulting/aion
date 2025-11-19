@@ -13,7 +13,7 @@ from statsmodels.stats.outliers_influence import variance_inflation_factor
 from statsmodels.stats.stattools import durbin_watson
 
 from ..db import get_session
-from ..models import Dataset, Model, ModelMetrics, Scenario
+from ..models import Dataset, Model, ModelMetrics, Scenario, Variable, Group, Subgroup
 from ..utils.datasets import load_dataset_frame
 from ..schemas import (
     CorrelationResponse,
@@ -43,7 +43,12 @@ def _load_df(ds: Dataset) -> pd.DataFrame:
 
 
 @router.get("/correlations", response_model=CorrelationResponse)
-def correlations(dataset_id: str = Query(...), y: str = Query(...), session: Session = Depends(get_session)):
+def correlations(
+    dataset_id: str = Query(...),
+    y: str = Query(...),
+    model_id: Optional[str] = Query(default=None),
+    session: Session = Depends(get_session),
+):
     ds = session.get(Dataset, dataset_id)
     if not ds:
         raise HTTPException(status_code=404, detail="Dataset not found")
@@ -51,27 +56,88 @@ def correlations(dataset_id: str = Query(...), y: str = Query(...), session: Ses
     if y not in df.columns:
         raise HTTPException(status_code=400, detail="Dependent variable not in dataset")
 
-    # use numeric only
+    vars_data = session.exec(select(Variable).where(Variable.dataset_id == dataset_id)).all()
+    group_ids = {v.group_id for v in vars_data if v.group_id}
+    subgroup_ids = {v.subgroup_id for v in vars_data if v.subgroup_id}
+    group_map = (
+        {g.id: g.name for g in session.exec(select(Group).where(Group.id.in_(list(group_ids)))).all()}
+        if group_ids
+        else {}
+    )
+    subgroup_map = (
+        {sg.id: sg for sg in session.exec(select(Subgroup).where(Subgroup.id.in_(list(subgroup_ids)))).all()}
+        if subgroup_ids
+        else {}
+    )
+    var_group_meta: dict[str, dict[str, Optional[str]]] = {}
+    for var in vars_data:
+        sg = subgroup_map.get(var.subgroup_id) if var.subgroup_id else None
+        group_name = group_map.get(var.group_id)
+        if not group_name and sg:
+            group_name = group_map.get(sg.group_id)
+        var_group_meta[var.name] = {
+            "group": group_name,
+            "subgroup": sg.name if sg else None,
+        }
+
     numeric_df = df.select_dtypes(include=[np.number])
     if y not in numeric_df.columns:
         raise HTTPException(status_code=400, detail="Dependent variable must be numeric")
 
-    y_series = numeric_df[y]
-    # drop rows with missing y
-    numeric_df = numeric_df.loc[y_series.index]
-    joined = numeric_df.dropna(subset=[y])
+    derived_lookup = {
+        var.name: var.is_derived
+        for var in session.exec(select(Variable).where(Variable.dataset_id == dataset_id)).all()
+    }
+
+    residual_series: Optional[pd.Series] = None
+    if model_id:
+        model = session.get(Model, model_id)
+        if not model:
+            raise HTTPException(status_code=404, detail="Model not found")
+        if model.dataset_id != dataset_id:
+            raise HTTPException(status_code=400, detail="Model does not belong to this dataset")
+        if model.y_var != y:
+            raise HTTPException(status_code=400, detail="Model target does not match requested y")
+        x_vars = json.loads(model.x_vars_json)
+        work, y_arr, X = _prepare_training_frame(df, model.y_var, x_vars)
+        X_const = sm.add_constant(X, has_constant="add")
+        result = sm.OLS(y_arr, X_const).fit()
+        y_series = pd.Series(y_arr, index=work.index)
+        residual_series = pd.Series(y_arr - result.predict(X_const), index=work.index)
+        numeric_df = numeric_df.loc[work.index]
+    else:
+        y_series = numeric_df[y].dropna()
+        numeric_df = numeric_df.loc[y_series.index]
+
+    def safe_corr(a: pd.Series, b: pd.Series) -> Optional[float]:
+        joined = pd.concat([a, b], axis=1).dropna()
+        if joined.shape[0] < 2:
+            return None
+        val = joined.iloc[:, 0].corr(joined.iloc[:, 1])
+        if pd.isna(val):
+            return None
+        return float(val)
+
     corr_items: list[CorrelationItem] = []
-    for col in joined.columns:
+    for col in numeric_df.columns:
         if col == y:
             continue
-        try:
-            c = float(joined[col].corr(joined[y]))
-            if not np.isfinite(c):
-                continue
-            corr_items.append(CorrelationItem(name=col, corr=c, dtype=str(df[col].dtype)))
-        except Exception:
-            continue
-    corr_items.sort(key=lambda i: abs(i.corr), reverse=True)
+        series = pd.to_numeric(numeric_df[col], errors="coerce")
+        corr_y = safe_corr(series, y_series)
+        corr_res = safe_corr(series, residual_series) if residual_series is not None else None
+        corr_items.append(
+            CorrelationItem(
+                name=col,
+                corr_y=corr_y,
+                corr_res=corr_res,
+                dtype=str(df[col].dtype),
+                derived=derived_lookup.get(col, False),
+                group_name=var_group_meta.get(col, {}).get("group"),
+                subgroup_name=var_group_meta.get(col, {}).get("subgroup"),
+            )
+        )
+
+    corr_items.sort(key=lambda i: abs(i.corr_y or 0.0), reverse=True)
     return CorrelationResponse(y=y, items=corr_items)
 
 
@@ -303,6 +369,18 @@ def model_summary(model_id: str, session: Session = Depends(get_session)):
     result = sm.OLS(y, X_const).fit()
     metrics = _compute_metrics(y, result.predict(X_const), X)
     vif_lookup = {item["name"]: item["vif"] for item in metrics["vif"]}
+    x_std = X.std(ddof=0)
+    y_std = y.std(ddof=0)
+    y_std_valid = y_std is not None and np.isfinite(y_std) and y_std != 0
+
+    # Std betas: expose standardized coefficients for frontend summary
+    def _beta_std(var: str) -> Optional[float]:
+        if not y_std_valid:
+            return None
+        x_sigma = x_std.get(var)
+        if x_sigma is None or not np.isfinite(x_sigma) or x_sigma == 0:
+            return None
+        return float(result.params[var] * (x_sigma / y_std))
 
     intercept = CoefficientItem(
         name="intercept",
@@ -311,6 +389,7 @@ def model_summary(model_id: str, session: Session = Depends(get_session)):
         t_value=float(result.tvalues["const"]),
         p_value=float(result.pvalues["const"]),
         vif=None,
+        beta_std=None,
     )
 
     coefficients = []
@@ -323,6 +402,7 @@ def model_summary(model_id: str, session: Session = Depends(get_session)):
                 t_value=float(result.tvalues[var]),
                 p_value=float(result.pvalues[var]),
                 vif=vif_lookup.get(var),
+                beta_std=_beta_std(var),
             )
         )
 
@@ -362,16 +442,38 @@ def model_predictions(
     y_hat = result.predict(X_const)
     residuals = y - y_hat
 
+    preferred_time_col = time_col or getattr(ds, "time_variable", None)
+
+    def _parse_time_series(column: Optional[str]) -> Optional[pd.Series]:
+        if not column:
+            return None
+        ts_series = pd.to_datetime(df.loc[work.index, column], errors="coerce")
+        if ts_series.isna().all():
+            return None
+        return ts_series
+
+    time_series = _parse_time_series(preferred_time_col)
+    time_column_used = preferred_time_col if time_series is not None else None
+    if time_series is None:
+        inferred_col = _infer_time_column(df)
+        inferred_series = _parse_time_series(inferred_col)
+        if inferred_series is not None:
+            time_series = inferred_series
+            time_column_used = inferred_col
+
     if granularity == "auto":
-        index = [str(idx) for idx in work.index]
+        if time_series is not None:
+            index = [
+                ts_val.isoformat() if not pd.isna(ts_val) else str(idx_val)
+                for ts_val, idx_val in zip(time_series, work.index)
+            ]
+        else:
+            index = [str(idx) for idx in work.index]
         return PredictionsResponse(index=index, y_true=y.tolist(), y_pred=y_hat.tolist(), residuals=residuals.tolist())
 
-    candidate_col = time_col or _infer_time_column(df)
-    if not candidate_col:
+    if time_series is None or not time_column_used:
         raise HTTPException(status_code=400, detail="No datetime column available; provide time_col")
-    ts = pd.to_datetime(df.loc[work.index, candidate_col], errors="coerce")
-    if ts.isna().all():
-        raise HTTPException(status_code=400, detail="time column could not be parsed")
+    ts = time_series
 
     series = pd.DataFrame(
         {

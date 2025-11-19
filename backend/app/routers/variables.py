@@ -17,6 +17,7 @@ from ..schemas import (
     TransformRequest,
     TransformResponse,
     TransformPreviewPoint,
+    TransformPreviewRequest,
     VariableOut,
     CategorizeRequest,
     VariableHistoryItem,
@@ -344,3 +345,97 @@ def undo_variable(variable_id: str, session: Session = Depends(get_session)):
     session.delete(var)
     session.commit()
     return {"status": "reverted"}
+
+
+@router.post("/transform/preview")
+def preview_transformation(body: TransformPreviewRequest, session: Session = Depends(get_session)):
+    ds = session.get(Dataset, body.dataset_id)
+    if not ds:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+    df = _read_df(ds)
+
+    params = body.params or {}
+
+    column = body.column or params.get("column")
+    if not column or column not in df.columns:
+        raise HTTPException(status_code=400, detail="column not found")
+    series = pd.to_numeric(df[column], errors="coerce")
+    if series.isna().all():
+        raise HTTPException(status_code=400, detail="Column has no numeric values")
+
+    op = body.operation.lower()
+    result: pd.Series | None = None
+    if op == "lag":
+        periods = int(params.get("periods") or params.get("n") or 1)
+        if periods < 0:
+            raise HTTPException(status_code=400, detail="periods must be positive")
+        result = series.shift(periods)
+    elif op == "decay":
+        alpha_value = params.get("alpha") or params.get("half_life")
+        if alpha_value is None:
+            raise HTTPException(status_code=400, detail="alpha parameter required for decay")
+        alpha = float(alpha_value)
+        if not (0 <= alpha < 1):
+            raise HTTPException(status_code=400, detail="alpha must be in [0,1)")
+        vals = series.fillna(0.0).to_numpy()
+        out = np.empty_like(vals)
+        if len(vals) > 0:
+            out[0] = vals[0]
+            for i in range(1, len(vals)):
+                out[i] = vals[i] + alpha * out[i - 1]
+        result = pd.Series(out, index=series.index)
+    elif op == "log":
+        result = pd.Series(np.log(series.replace({0: np.nan})), index=series.index)
+    elif op in {"add", "sub", "mul", "div"}:
+        left = params.get("left")
+        right = params.get("right")
+        if not left or not right or left not in df.columns or right not in df.columns:
+            raise HTTPException(status_code=400, detail="left/right columns required")
+        left_vals = pd.to_numeric(df[left], errors="coerce")
+        right_vals = pd.to_numeric(df[right], errors="coerce")
+        if op == "add":
+            result = left_vals + right_vals
+        elif op == "sub":
+            result = left_vals - right_vals
+        elif op == "mul":
+            result = left_vals * right_vals
+        else:
+            result = left_vals / right_vals.replace({0: np.nan})
+    else:
+        raise HTTPException(status_code=400, detail="Unsupported operation")
+
+    if result is None:
+        raise HTTPException(status_code=400, detail="Unable to compute preview")
+
+    limit = min(max(body.limit, 1), 1000)
+    time_col = getattr(ds, "time_variable", None)
+    if time_col and time_col in df.columns:
+        ordering = pd.to_datetime(df[time_col], errors="coerce")
+        combined = pd.DataFrame({"time": ordering, "original": series, "transformed": result})
+        combined = combined.sort_values("time").head(limit)
+        time_values = combined["time"].fillna(method="ffill").fillna(method="bfill").astype(str).tolist()
+        original_values = combined["original"].tolist()
+        transformed_values = combined["transformed"].tolist()
+    else:
+        combined = pd.DataFrame({"original": series, "transformed": result}).head(limit)
+        time_values = list(range(len(combined)))
+        original_values = combined["original"].tolist()
+        transformed_values = combined["transformed"].tolist()
+
+    original_series = pd.Series(original_values, dtype="float64")
+    transformed_series = pd.Series(transformed_values, dtype="float64")
+    original_mean = original_series.dropna().mean()
+    transformed_mean = transformed_series.dropna().mean()
+    corr = original_series.corr(transformed_series)
+
+    stats = {
+        "mean_original": 0.0 if pd.isna(original_mean) else float(original_mean),
+        "mean_transformed": 0.0 if pd.isna(transformed_mean) else float(transformed_mean),
+        "correlation": 0.0 if pd.isna(corr) else float(corr),
+    }
+    return {
+        "time": time_values,
+        "original": [None if pd.isna(x) else float(x) for x in original_values],
+        "transformed": [None if pd.isna(x) else float(x) for x in transformed_values],
+        "stats": stats,
+    }

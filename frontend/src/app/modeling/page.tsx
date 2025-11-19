@@ -1,19 +1,7 @@
 "use client";
 
-import React, { useEffect, useMemo, useState } from "react";
-import {
-  Bar,
-  BarChart,
-  CartesianGrid,
-  Line,
-  LineChart,
-  ResponsiveContainer,
-  Tooltip,
-  XAxis,
-  YAxis,
-  Legend,
-  Cell,
-} from "recharts";
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import { Bar, BarChart, CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis, Legend, ComposedChart } from "recharts";
 import { toast } from "sonner";
 
 import { Card, CardHeader } from "@/components/ui/card";
@@ -55,6 +43,7 @@ type Coefficient = {
   t_value: number;
   p_value: number;
   vif?: number | null;
+  beta_std?: number | null;
 };
 type Predictions = {
   index: string[];
@@ -64,6 +53,11 @@ type Predictions = {
 };
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+
+const formatPValue = (value: number) => {
+  if (value == null || Number.isNaN(value)) return "-";
+  return value < 1e-4 ? value.toExponential(4) : value.toFixed(4);
+};
 
 export default function ModelingPage() {
   const [datasets, setDatasets] = useState<Dataset[]>([]);
@@ -80,6 +74,7 @@ export default function ModelingPage() {
   const [predictions, setPredictions] = useState<Predictions | null>(null);
   const [showResiduals, setShowResiduals] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [showQuickView, setShowQuickView] = useState(false);
 
   useEffect(() => {
     fetchDatasets();
@@ -183,6 +178,27 @@ export default function ModelingPage() {
     setXSelected((prev) => (prev.includes(name) ? prev.filter((x) => x !== name) : [...prev, name]));
   };
 
+  const handleToggleSelectAll = () => {
+    if (!correlationData.length) return;
+    setXSelected((prev) => {
+      if (allVisibleSelected) {
+        return prev.filter((name) => !correlationData.some((item) => item.name === name));
+      }
+      const merged = new Set(prev);
+      correlationData.forEach((item) => merged.add(item.name));
+      return Array.from(merged);
+    });
+  };
+
+  const selectedDetails = useMemo(
+    () =>
+      xSelected.map((name) => {
+        const meta = corr.find((item) => item.name === name);
+        return { name, corr: meta?.corr ?? null };
+      }),
+    [xSelected, corr]
+  );
+
   const handleSubmit = async () => {
     if (!selectedDataset || !yVar || xSelected.length === 0 || !modelName.trim()) {
       toast.error("Provide a name, target, and predictors");
@@ -261,6 +277,19 @@ export default function ModelingPage() {
     return filtered.map((item) => ({ ...item, abs: Math.abs(item.corr) }));
   }, [corr, corrSearch]);
 
+  const allVisibleSelected = useMemo(() => {
+    if (!correlationData.length) return false;
+    return correlationData.every((item) => xSelected.includes(item.name));
+  }, [correlationData, xSelected]);
+
+  const selectAllRef = useRef<HTMLInputElement | null>(null);
+  useEffect(() => {
+    if (selectAllRef.current) {
+      const someVisibleSelected = correlationData.some((item) => xSelected.includes(item.name));
+      selectAllRef.current.indeterminate = someVisibleSelected && !allVisibleSelected;
+    }
+  }, [correlationData, xSelected, allVisibleSelected]);
+
   const heroModel = models.find((m) => m.role === "hero");
   const challenger1 = models.find((m) => m.role === "challenger1");
   const challenger2 = models.find((m) => m.role === "challenger2");
@@ -292,7 +321,8 @@ export default function ModelingPage() {
   }, [predictions]);
 
   return (
-    <section className="space-y-6">
+    <>
+      <section className="space-y-6">
       <header className="flex flex-wrap items-center justify-between gap-4">
         <div>
           <p className="text-sm text-[var(--color-muted)]">Module 3</p>
@@ -338,34 +368,42 @@ export default function ModelingPage() {
         <Card className="space-y-4">
           <CardHeader title="Correlations" subtitle="Choose predictors" />
           <Input placeholder="Search variables" value={corrSearch} onChange={(e) => setCorrSearch(e.target.value)} />
+          <div className="flex items-center justify-between px-1 text-xs text-[var(--color-muted)]">
+            <label className="flex items-center gap-2">
+              <input
+                ref={selectAllRef}
+                type="checkbox"
+                className="h-4 w-4 accent-[var(--color-accent)]"
+                checked={allVisibleSelected}
+                onChange={handleToggleSelectAll}
+                disabled={!correlationData.length}
+              />
+              <span>Select all (filtered)</span>
+            </label>
+            <button
+              type="button"
+              className="rounded-full border border-[var(--color-border)] px-2.5 py-1 text-[11px] text-[var(--color-muted)] hover:bg-[var(--color-border)]/30"
+              onClick={() => setShowQuickView(true)}
+            >
+              Selected: {xSelected.length}
+            </button>
+          </div>
           <div className="h-[420px] overflow-y-auto pr-2">
-            <BarChart layout="vertical" width={320} height={Math.max(200, correlationData.length * 26)} data={correlationData}>
-              <CartesianGrid strokeDasharray="3 3" horizontal={false} />
-              <XAxis type="number" hide domain={[0, 1]} />
-              <YAxis dataKey="name" type="category" width={100} />
-              <Tooltip formatter={(value: number, _, entry) => [`${entry.payload.corr.toFixed(3)}`, "corr"]} />
-              <Bar dataKey="abs" fill="var(--color-accent)" radius={[0, 6, 6, 0]}>
-                {correlationData.map((entry) => (
-                  <Cell key={entry.name} fill={xSelected.includes(entry.name) ? "var(--color-accent)" : "var(--color-border)"} />
-                ))}
-              </Bar>
-            </BarChart>
-            <div className="space-y-2 mt-4">
+            <div className="space-y-2">
               {correlationData.map((item) => (
                 <label key={item.name} className="flex items-center justify-between text-sm">
                   <span>
                     {item.name}{" "}
                     <span className="text-xs text-[var(--color-muted)]">
-                      (
-                      {Number.isFinite(item.corr)
-                        ? (item.corr as number).toFixed(3)
-                        : "-"}
-                      )
+                      ({Number.isFinite(item.corr) ? Number(item.corr).toFixed(3) : "-"})
                     </span>
                   </span>
                   <input type="checkbox" checked={xSelected.includes(item.name)} onChange={() => handleToggleX(item.name)} />
                 </label>
               ))}
+              {!correlationData.length && (
+                <p className="text-sm text-[var(--color-muted)]">No predictors match your search.</p>
+              )}
             </div>
           </div>
         </Card>
@@ -506,6 +544,7 @@ export default function ModelingPage() {
                   <tr>
                     <th className="px-3 py-2 text-left">Variable</th>
                     <th className="px-3 py-2 text-left">Beta</th>
+                    <th className="px-3 py-2 text-left">Std Beta</th>
                     <th className="px-3 py-2 text-left">Std Err</th>
                     <th className="px-3 py-2 text-left">t</th>
                     <th className="px-3 py-2 text-left">p</th>
@@ -517,10 +556,11 @@ export default function ModelingPage() {
                     <tr key={item.name} className="odd:bg-transparent even:bg-[var(--color-border)]/20">
                       <td className="px-3 py-2">{item.name}</td>
                       <td className="px-3 py-2">{item.coef.toFixed(4)}</td>
+                      <td className="px-3 py-2">{item.beta_std != null ? item.beta_std.toFixed(3) : "-"}</td>
                       <td className="px-3 py-2">{item.std_err.toFixed(4)}</td>
                       <td className="px-3 py-2">{item.t_value.toFixed(2)}</td>
-                      <td className="px-3 py-2">{item.p_value.toExponential(2)}</td>
-                      <td className="px-3 py-2">{item.vif != null ? item.vif.toFixed(2) : "—"}</td>
+                      <td className="px-3 py-2">{formatPValue(item.p_value)}</td>
+                      <td className="px-3 py-2">{item.vif != null ? item.vif.toFixed(2) : "-"}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -565,5 +605,52 @@ export default function ModelingPage() {
         </Card>
       </div>
     </section>
+
+    {showQuickView && (
+      <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-4">
+        <div className="w-full max-w-sm rounded-2xl bg-white p-4 shadow-2xl">
+            <div className="mb-3 flex items-center justify-between">
+              <div>
+                <h3 className="text-sm font-semibold text-[var(--color-foreground)]">Selected predictors</h3>
+                <p className="text-xs text-[var(--color-muted)]">{xSelected.length} total</p>
+              </div>
+              <button
+                type="button"
+                className="text-xs text-[var(--color-muted)] hover:text-[var(--color-foreground)]"
+                onClick={() => setShowQuickView(false)}
+              >
+                Close
+              </button>
+            </div>
+            <div className="max-h-[50vh] space-y-2 overflow-y-auto pr-1">
+              {selectedDetails.length ? (
+                selectedDetails.map((item) => (
+                  <div
+                    key={item.name}
+                    className="flex items-center justify-between rounded-xl border border-[var(--color-border)] px-3 py-2"
+                  >
+                    <div className="min-w-0">
+                      <p className="truncate text-sm font-medium text-[var(--color-foreground)]">{item.name}</p>
+                      <p className="text-xs text-[var(--color-muted)]">
+                        corr: {item.corr != null ? Number(item.corr).toFixed(3) : "-"}
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      className="rounded-full bg-[var(--color-border)] px-2 py-0.5 text-xs text-[var(--color-muted)] hover:bg-[var(--color-border)]/70"
+                      onClick={() => handleToggleX(item.name)}
+                    >
+                      remove
+                    </button>
+                  </div>
+                ))
+              ) : (
+                <p className="text-sm text-[var(--color-muted)]">No predictors selected.</p>
+              )}
+            </div>
+        </div>
+      </div>
+    )}
+    </>
   );
 }

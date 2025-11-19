@@ -139,6 +139,14 @@ class TransformRequest(BaseModel):
     right: Optional[str] = None       # for arithmetic
 
 
+class TransformPreviewRequest(BaseModel):
+    dataset_id: str
+    operation: TransformOp
+    column: Optional[str] = None
+    params: Dict[str, float | int | str | None] = Field(default_factory=dict)
+    limit: int = Field(default=200, ge=1, le=1000)
+
+
 class TransformPreviewPoint(BaseModel):
     before: Optional[float] = None
     after: Optional[float] = None
@@ -180,6 +188,14 @@ class AssignVariableRequest(BaseModel):
     group_id: Optional[str] = None
 
 
+class RenameGroupRequest(BaseModel):
+    name: str
+
+
+class RenameSubgroupRequest(BaseModel):
+    name: str
+
+
 class CategorizeRequest(BaseModel):
     group_id: Optional[str] = None
     subgroup_id: Optional[str] = None
@@ -188,8 +204,12 @@ class CategorizeRequest(BaseModel):
 # Modeling
 class CorrelationItem(BaseModel):
     name: str
-    corr: float
+    corr_y: Optional[float]
+    corr_res: Optional[float] = None
     dtype: str
+    derived: bool = False
+    group_name: Optional[str] = None
+    subgroup_name: Optional[str] = None
 
 
 class CorrelationResponse(BaseModel):
@@ -241,6 +261,7 @@ class CoefficientItem(BaseModel):
     t_value: float
     p_value: float
     vif: Optional[float] = None
+    beta_std: Optional[float] = None
 
 
 class ModelSummaryResponse(BaseModel):

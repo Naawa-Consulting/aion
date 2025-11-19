@@ -1,8 +1,19 @@
 "use client";
 
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import clsx from "clsx";
+import { Pencil, Trash2 } from "lucide-react";
+import {
+  ResponsiveContainer,
+  LineChart,
+  CartesianGrid,
+  XAxis,
+  YAxis,
+  Tooltip,
+  Legend,
+  Line,
+} from "recharts";
 
 import { Card, CardHeader } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -27,8 +38,15 @@ type Variable = {
 };
 
 type Group = { id: string; name: string; subgroups: { id: string; name: string; group_id: string }[] };
+type TransformOp = "lag" | "decay" | "log" | "add" | "sub" | "mul" | "div";
+type PreviewPayload = {
+  dataset_id: string;
+  operation: TransformOp;
+  column?: string;
+  params: Record<string, string | number | boolean | null>;
+  limit: number;
+};
 
-type TransformPreview = { before: number | null; after: number | null };
 
 type HistoryItem = { id: string; op: string; params: Record<string, any>; created_at: string };
 
@@ -41,7 +59,7 @@ export default function TransformPage() {
   const [filteredVariables, setFilteredVariables] = useState<Variable[]>([]);
   const [groups, setGroups] = useState<Group[]>([]);
   const [selectedDataset, setSelectedDataset] = useState<string | null>(null);
-  const [op, setOp] = useState<"lag" | "decay" | "log" | "add" | "sub" | "mul" | "div">("lag");
+  const [op, setOp] = useState<TransformOp>("lag");
   const [column, setColumn] = useState("");
   const [n, setN] = useState(1);
   const [alpha, setAlpha] = useState(0.5);
@@ -50,17 +68,120 @@ export default function TransformPage() {
   const [newName, setNewName] = useState("");
   const [search, setSearch] = useState("");
   const [dtypeFilter, setDtypeFilter] = useState("");
-  const [showDerivedOnly, setShowDerivedOnly] = useState(false);
-  const [lastPreview, setLastPreview] = useState<TransformPreview[]>([]);
+const [showDerivedOnly, setShowDerivedOnly] = useState(false);
+  const [showPreview, setShowPreview] = useState(true);
+  const [previewData, setPreviewData] = useState<{ time: (string | number)[]; original: (number | null)[]; transformed: (number | null)[]; stats?: { mean_original?: number; mean_transformed?: number; correlation?: number } } | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [previewError, setPreviewError] = useState("");
   const [history, setHistory] = useState<HistoryItem[]>([]);
   const [historyVar, setHistoryVar] = useState<Variable | null>(null);
   const [loading, setLoading] = useState(false);
   const [draggingVar, setDraggingVar] = useState<Variable | null>(null);
   const [newGroupName, setNewGroupName] = useState("");
   const [newSubgroupName, setNewSubgroupName] = useState("");
-  const [newSubgroupParent, setNewSubgroupParent] = useState("");
+const [newSubgroupParent, setNewSubgroupParent] = useState("");
+const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
+  const [groupDraft, setGroupDraft] = useState("");
+  const [groupError, setGroupError] = useState("");
+  const [renamingGroupId, setRenamingGroupId] = useState<string | null>(null);
+  const [editingSubgroupId, setEditingSubgroupId] = useState<string | null>(null);
+  const [editingSubgroupGroupId, setEditingSubgroupGroupId] = useState<string | null>(null);
+  const [subgroupDraft, setSubgroupDraft] = useState("");
+  const [subgroupError, setSubgroupError] = useState("");
+  const [renamingSubgroupId, setRenamingSubgroupId] = useState<string | null>(null);
+  const [groupToDelete, setGroupToDelete] = useState<Group | null>(null);
+  const [groupDeleteLoading, setGroupDeleteLoading] = useState(false);
+  const [groupDeleteError, setGroupDeleteError] = useState("");
+  const [subgroupToDelete, setSubgroupToDelete] = useState<{ group: Group; subgroup: { id: string; name: string } } | null>(
+    null
+  );
+  const [subgroupDeleteLoading, setSubgroupDeleteLoading] = useState(false);
+  const [subgroupDeleteError, setSubgroupDeleteError] = useState("");
+  const previewAbortRef = useRef<AbortController | null>(null);
+  const previewDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  const activeGroups = groups;
   const activeDatasetId = selectedDataset || datasetId || null;
+  const groupVariableCount = useMemo(() => {
+    if (!groupToDelete) return 0;
+    return variables.filter((v) => v.group_id === groupToDelete.id).length;
+  }, [groupToDelete, variables]);
+  const subgroupVariableCount = useMemo(() => {
+    if (!subgroupToDelete) return 0;
+    return variables.filter((v) => v.subgroup_id === subgroupToDelete.subgroup.id).length;
+  }, [subgroupToDelete, variables]);
+  const previewPayload = useMemo<PreviewPayload | null>(() => {
+    if (!activeDatasetId) return null;
+    const base = {
+      dataset_id: activeDatasetId,
+      operation: op,
+      limit: 200,
+      params: {} as Record<string, string | number | boolean | null>,
+    };
+    if (op === "lag") {
+      if (!column) return null;
+      const steps = Number.isFinite(n) ? Math.max(0, Math.floor(n)) : 0;
+      return { ...base, column, params: { periods: steps } };
+    }
+    if (op === "decay") {
+      if (!column) return null;
+      return { ...base, column, params: { alpha } };
+    }
+    if (op === "log") {
+      if (!column) return null;
+      return { ...base, column, params: {} };
+    }
+    if (!left || !right) return null;
+    return { ...base, column: left, params: { left, right } };
+  }, [activeDatasetId, op, column, n, alpha, left, right]);
+  const runPreview = useCallback(
+    async (payload: PreviewPayload, signal?: AbortSignal) => {
+      setPreviewLoading(true);
+      setPreviewError("");
+      try {
+        const res = await fetch(`${API_URL}/variables/transform/preview`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+          signal,
+        });
+        if (!res.ok) {
+          let message = "Unable to load preview";
+          try {
+            const errData = await res.json();
+            message = errData?.detail || errData?.error || message;
+          } catch {
+            message = await res.text();
+          }
+          throw new Error(message);
+        }
+        const data = await res.json();
+        setPreviewData(data);
+      } catch (error: any) {
+        if (error?.name === "AbortError") {
+          return;
+        }
+        setPreviewError(error?.message || "Unable to load preview");
+        setPreviewData(null);
+      } finally {
+        setPreviewLoading(false);
+      }
+    },
+    []
+  );
+  const retryPreview = useCallback(() => {
+    if (!showPreview || !previewPayload) return;
+    if (previewDebounceRef.current) {
+      clearTimeout(previewDebounceRef.current);
+      previewDebounceRef.current = null;
+    }
+    if (previewAbortRef.current) {
+      previewAbortRef.current.abort();
+    }
+    const controller = new AbortController();
+    previewAbortRef.current = controller;
+    runPreview(previewPayload, controller.signal);
+  }, [previewPayload, runPreview, showPreview]);
 
   useEffect(() => {
     fetchDatasets();
@@ -73,6 +194,61 @@ export default function TransformPage() {
       setSelectedDataset(activeDatasetId);
     }
   }, [activeDatasetId]);
+
+  useEffect(() => {
+    if (previewDebounceRef.current) {
+      clearTimeout(previewDebounceRef.current);
+      previewDebounceRef.current = null;
+    }
+    if (previewAbortRef.current) {
+      previewAbortRef.current.abort();
+      previewAbortRef.current = null;
+    }
+
+    if (!showPreview) {
+      setPreviewLoading(false);
+      setPreviewError("");
+      return;
+    }
+
+    if (!previewPayload) {
+      setPreviewData(null);
+      setPreviewError("");
+      setPreviewLoading(false);
+      return;
+    }
+
+    const controller = new AbortController();
+    previewAbortRef.current = controller;
+    previewDebounceRef.current = setTimeout(() => {
+      runPreview(previewPayload, controller.signal);
+    }, 300);
+
+    return () => {
+      if (previewDebounceRef.current) {
+        clearTimeout(previewDebounceRef.current);
+        previewDebounceRef.current = null;
+      }
+      controller.abort();
+      previewAbortRef.current = null;
+    };
+  }, [previewPayload, runPreview, showPreview]);
+
+  useEffect(() => {
+    const handler = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        if (groupToDelete) {
+          event.preventDefault();
+          setGroupToDelete(null);
+        } else if (subgroupToDelete) {
+          event.preventDefault();
+          setSubgroupToDelete(null);
+        }
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [groupToDelete, subgroupToDelete]);
 
   useEffect(() => {
     const next = variables.filter((v) => {
@@ -132,6 +308,216 @@ export default function TransformPage() {
     }
   };
 
+  const startGroupRename = (group: Group) => {
+    setEditingGroupId(group.id);
+    setGroupDraft(group.name);
+    setGroupError("");
+  };
+
+  const cancelGroupRename = () => {
+    setEditingGroupId(null);
+    setGroupDraft("");
+    setGroupError("");
+  };
+
+  const submitGroupRename = async () => {
+    if (!editingGroupId) return;
+    const trimmed = groupDraft.trim();
+    if (!trimmed) {
+      setGroupError("Name cannot be empty");
+      return;
+    }
+    const original = groups.find((g) => g.id === editingGroupId)?.name;
+    if (original && original === trimmed) {
+      cancelGroupRename();
+      return;
+    }
+    setRenamingGroupId(editingGroupId);
+    try {
+      const res = await fetch(`${API_URL}/groups/${editingGroupId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: trimmed }),
+      });
+      if (!res.ok) {
+        let message = "Failed to rename group";
+        try {
+          const data = await res.json();
+          message = data?.error || data?.detail || message;
+        } catch {
+          message = await res.text();
+        }
+        setGroupError(message || "Failed to rename group");
+        return;
+      }
+      setGroups((prev) =>
+        prev.map((g) => (g.id === editingGroupId ? { ...g, name: trimmed } : g))
+      );
+      toast.success(`Group renamed to "${trimmed}"`);
+      cancelGroupRename();
+    } catch (error: any) {
+      setGroupError(error?.message || "Failed to rename group");
+    } finally {
+      setRenamingGroupId(null);
+    }
+  };
+
+  const startSubgroupRename = (groupId: string, subgroup: { id: string; name: string }) => {
+    setEditingSubgroupId(subgroup.id);
+    setEditingSubgroupGroupId(groupId);
+    setSubgroupDraft(subgroup.name);
+    setSubgroupError("");
+  };
+
+  const cancelSubgroupRename = () => {
+    setEditingSubgroupId(null);
+    setEditingSubgroupGroupId(null);
+    setSubgroupDraft("");
+    setSubgroupError("");
+  };
+
+  const submitSubgroupRename = async () => {
+    if (!editingSubgroupId || !editingSubgroupGroupId) return;
+    const trimmed = subgroupDraft.trim();
+    if (!trimmed) {
+      setSubgroupError("Name cannot be empty");
+      return;
+    }
+    const parent = groups.find((g) => g.id === editingSubgroupGroupId);
+    const original = parent?.subgroups.find((s) => s.id === editingSubgroupId)?.name;
+    if (original && original === trimmed) {
+      cancelSubgroupRename();
+      return;
+    }
+    setRenamingSubgroupId(editingSubgroupId);
+    try {
+      const res = await fetch(`${API_URL}/groups/subgroups/${editingSubgroupId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: trimmed }),
+      });
+      if (!res.ok) {
+        let message = "Failed to rename subgroup";
+        try {
+          const data = await res.json();
+          message = data?.error || data?.detail || message;
+        } catch {
+          message = await res.text();
+        }
+        setSubgroupError(message || "Failed to rename subgroup");
+        return;
+      }
+      setGroups((prev) =>
+        prev.map((g) =>
+          g.id === editingSubgroupGroupId
+            ? {
+                ...g,
+                subgroups: g.subgroups.map((s) =>
+                  s.id === editingSubgroupId ? { ...s, name: trimmed } : s
+                ),
+              }
+            : g
+        )
+      );
+      toast.success(`Subgroup renamed to "${trimmed}"`);
+      cancelSubgroupRename();
+    } catch (error: any) {
+      setSubgroupError(error?.message || "Failed to rename subgroup");
+    } finally {
+      setRenamingSubgroupId(null);
+    }
+  };
+
+  const confirmDeleteGroup = async () => {
+    if (!groupToDelete) return;
+    setGroupDeleteLoading(true);
+    setGroupDeleteError("");
+    try {
+      const res = await fetch(`${API_URL}/groups/${groupToDelete.id}?reassign=uncategorized`, {
+        method: "DELETE",
+      });
+      if (!res.ok) {
+        const detail = await safeParseJSON(await res.text());
+        throw new Error(detail?.error || detail?.detail || "Failed to delete group");
+      }
+      const summary = await res.json().catch(() => null);
+      setGroups((prev) => prev.filter((g) => g.id !== groupToDelete.id));
+      setVariables((prev) =>
+        prev.map((variable) =>
+          variable.group_id === groupToDelete.id
+            ? {
+                ...variable,
+                group_id: null,
+                group_name: null,
+                subgroup_id: null,
+                subgroup_name: null,
+              }
+            : variable
+        )
+      );
+      toast.success(
+        `Group "${groupToDelete.name}" deleted. ${
+          summary?.reassigned_variables ?? groupVariableCount
+        } variables moved to Uncategorized.`
+      );
+      closeGroupDeleteModal();
+    } catch (error: any) {
+      setGroupDeleteError(error?.message || "Failed to delete group");
+    } finally {
+      setGroupDeleteLoading(false);
+    }
+  };
+
+  const closeGroupDeleteModal = () => {
+    setGroupToDelete(null);
+    setGroupDeleteError("");
+  };
+
+  const closeSubgroupDeleteModal = () => {
+    setSubgroupToDelete(null);
+    setSubgroupDeleteError("");
+  };
+
+  const confirmDeleteSubgroup = async () => {
+    if (!subgroupToDelete) return;
+    setSubgroupDeleteLoading(true);
+    setSubgroupDeleteError("");
+    try {
+      const res = await fetch(`${API_URL}/groups/subgroups/${subgroupToDelete.subgroup.id}`, {
+        method: "DELETE",
+      });
+      if (!res.ok) {
+        const detail = await safeParseJSON(await res.text());
+        throw new Error(detail?.error || detail?.detail || "Failed to delete subgroup");
+      }
+      const summary = await res.json().catch(() => null);
+      setGroups((prev) =>
+        prev.map((group) =>
+          group.id === subgroupToDelete.group.id
+            ? { ...group, subgroups: group.subgroups.filter((sg) => sg.id !== subgroupToDelete.subgroup.id) }
+            : group
+        )
+      );
+      setVariables((prev) =>
+        prev.map((variable) =>
+          variable.subgroup_id === subgroupToDelete.subgroup.id
+            ? { ...variable, subgroup_id: null, subgroup_name: null }
+            : variable
+        )
+      );
+      toast.success(
+        `Subgroup "${subgroupToDelete.subgroup.name}" deleted. ${
+          summary?.cleared_subgroup_assignments ?? subgroupVariableCount
+        } variables now have no subgroup.`
+      );
+      closeSubgroupDeleteModal();
+    } catch (error: any) {
+      setSubgroupDeleteError(error?.message || "Failed to delete subgroup");
+    } finally {
+      setSubgroupDeleteLoading(false);
+    }
+  };
+
   const handleTransform = async () => {
     if (!activeDatasetId) return;
     setLoading(true);
@@ -157,7 +543,6 @@ export default function TransformPage() {
       if (!res.ok) throw new Error(await res.text());
       const data = await res.json();
       await fetchVariables(activeDatasetId);
-      setLastPreview(data.preview || []);
       setNewName("");
       toast.success("Variable created");
     } catch (err: any) {
@@ -225,8 +610,6 @@ export default function TransformPage() {
     const ds = datasets.find((d) => d.id === activeDatasetId);
     return ds ? ds.columns : [];
   }, [datasets, activeDatasetId]);
-
-  const activeGroups = groups;
 
   return (
     <section className="space-y-6">
@@ -390,12 +773,43 @@ export default function TransformPage() {
                 {loading ? "Creating..." : "Create variable"}
               </Button>
             </div>
-            {lastPreview.length > 0 && (
-              <div className="rounded-2xl border border-[var(--color-border)] p-4">
-                <p className="text-sm font-medium mb-2">Preview</p>
-                <Sparkline data={lastPreview} />
-              </div>
-            )}
+            <div className="rounded-2xl border border-[var(--color-border)] p-4 space-y-3">
+              <label className="flex items-center gap-2 text-sm text-[var(--color-muted)]">
+                <input
+                  type="checkbox"
+                  checked={showPreview}
+                  onChange={() => setShowPreview((prev) => !prev)}
+                />
+                Show preview
+              </label>
+              {showPreview ? (
+                previewLoading ? (
+                  <p className="text-sm text-[var(--color-muted)]">Loading preview…</p>
+                ) : previewError ? (
+                  <div className="text-sm text-red-500">
+                    {previewError}{" "}
+                    <button className="underline" onClick={retryPreview}>
+                      Retry
+                    </button>
+                  </div>
+                ) : previewData ? (
+                  <>
+                    <PreviewChart data={previewData} />
+                    {previewData.stats && (
+                      <div className="text-xs text-[var(--color-muted)] flex flex-wrap gap-4">
+                        <span>Mean original: {previewData.stats.mean_original?.toFixed(2)}</span>
+                        <span>Mean transformed: {previewData.stats.mean_transformed?.toFixed(2)}</span>
+                        <span>Correlation: {previewData.stats.correlation?.toFixed(2)}</span>
+                      </div>
+                    )}
+                  </>
+                ) : (
+                  <p className="text-sm text-[var(--color-muted)]">Adjust parameters to see preview.</p>
+                )
+              ) : (
+                <p className="text-sm text-[var(--color-muted)]">Preview disabled.</p>
+              )}
+            </div>
           </Card>
 
           <Card className="space-y-4">
@@ -502,8 +916,58 @@ export default function TransformPage() {
                     if (targetId) handleCategorize(targetId, group.id, null);
                   }}
                 >
-                  <div className="flex items-center justify-between">
-                    <h3 className="font-medium">{group.name}</h3>
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-2 flex-1">
+                      {editingGroupId === group.id ? (
+                        <div className="flex flex-col gap-1">
+                          <input
+                            className="rounded-full border border-[var(--color-border)] bg-transparent px-3 py-1 text-sm focus:border-[var(--color-accent)] focus:outline-none"
+                            value={groupDraft}
+                            onChange={(e) => setGroupDraft(e.target.value.slice(0, 40))}
+                            onKeyDown={(event) => {
+                              if (event.key === "Enter") {
+                                event.preventDefault();
+                                submitGroupRename();
+                              } else if (event.key === "Escape") {
+                                event.preventDefault();
+                                cancelGroupRename();
+                              }
+                            }}
+                            onBlur={() => {
+                              if (!renamingGroupId) submitGroupRename();
+                            }}
+                            disabled={renamingGroupId === group.id}
+                            autoFocus
+                          />
+                          {groupError && <p className="text-xs text-red-500">{groupError}</p>}
+                        </div>
+                      ) : (
+                        <div className="flex items-center gap-2">
+                          <button
+                            type="button"
+                            className="flex items-center gap-2 group cursor-pointer text-left"
+                            onClick={() => startGroupRename(group)}
+                          >
+                            <span className="font-medium truncate max-w-[220px]">{group.name}</span>
+                            <Pencil
+                              size={14}
+                              className="text-[var(--color-muted)] opacity-0 group-hover:opacity-100 transition"
+                            />
+                          </button>
+                          <button
+                            type="button"
+                            className="rounded-full p-1 text-[var(--color-muted)] hover:text-red-500 transition"
+                            onClick={() => {
+                              setGroupToDelete(group);
+                              setGroupDeleteMode("uncategorized");
+                              setGroupDeleteError("");
+                            }}
+                          >
+                            <Trash2 size={16} />
+                          </button>
+                        </div>
+                      )}
+                    </div>
                     <Badge>{group.subgroups.length} subgroups</Badge>
                   </div>
                   <div className="space-y-2">
@@ -523,7 +987,56 @@ export default function TransformPage() {
                           if (targetId) handleCategorize(targetId, group.id, sub.id);
                         }}
                       >
-                        {sub.name}
+                        {editingSubgroupId === sub.id ? (
+                          <div className="flex flex-col gap-1">
+                            <input
+                              className="rounded-full border border-[var(--color-border)] bg-transparent px-3 py-1 text-sm focus:border-[var(--color-accent)] focus:outline-none"
+                              value={subgroupDraft}
+                              onChange={(e) => setSubgroupDraft(e.target.value.slice(0, 40))}
+                              onKeyDown={(event) => {
+                                if (event.key === "Enter") {
+                                  event.preventDefault();
+                                  submitSubgroupRename();
+                                } else if (event.key === "Escape") {
+                                  event.preventDefault();
+                                  cancelSubgroupRename();
+                                }
+                              }}
+                              onBlur={() => {
+                                if (!renamingSubgroupId) submitSubgroupRename();
+                              }}
+                              disabled={renamingSubgroupId === sub.id}
+                              autoFocus
+                            />
+                            {subgroupError && editingSubgroupId === sub.id && (
+                              <p className="text-xs text-red-500">{subgroupError}</p>
+                            )}
+                          </div>
+                        ) : (
+                          <div className="flex items-center justify-between gap-2">
+                            <button
+                              type="button"
+                              className="flex-1 flex items-center gap-2 group text-left"
+                              onClick={() => startSubgroupRename(group.id, sub)}
+                            >
+                              <span className="truncate">{sub.name}</span>
+                              <Pencil
+                                size={14}
+                                className="text-[var(--color-muted)] opacity-0 group-hover:opacity-100 transition"
+                              />
+                            </button>
+                            <button
+                              type="button"
+                              className="rounded-full p-1 text-[var(--color-muted)] hover:text-red-500 transition"
+                              onClick={() => {
+                                setSubgroupToDelete({ group, subgroup: sub });
+                                setSubgroupDeleteError("");
+                              }}
+                            >
+                              <Trash2 size={14} />
+                            </button>
+                          </div>
+                        )}
                       </div>
                     ))}
                   </div>
@@ -560,6 +1073,71 @@ export default function TransformPage() {
                   <pre className="text-xs text-[var(--color-muted)]">{JSON.stringify(item.params, null, 2)}</pre>
                 </div>
               ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {groupToDelete && (
+        <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center px-4">
+          <div className="w-full max-w-md rounded-2xl bg-[var(--color-card)] p-6 shadow-lg space-y-4">
+            <div className="flex items-center justify-between">
+              <h3 className="text-lg font-semibold">Delete group &quot;{groupToDelete.name}&quot;?</h3>
+              <Button variant="ghost" size="sm" onClick={closeGroupDeleteModal}>
+                Close
+              </Button>
+            </div>
+            {groupDeleteError && <p className="text-sm text-red-500">{groupDeleteError}</p>}
+            <p className="text-sm text-[var(--color-muted)]">
+              This group has {groupVariableCount} variables assigned. Deleting it will move them to &quot;Uncategorized&quot;.
+            </p>
+            <p className="text-xs text-red-500">This action cannot be undone.</p>
+            <div className="flex justify-end gap-2">
+              <Button variant="ghost" onClick={closeGroupDeleteModal} disabled={groupDeleteLoading}>
+                Cancel
+              </Button>
+              <Button
+                variant="secondary"
+                className="bg-red-600 text-white hover:bg-red-600/90"
+                onClick={confirmDeleteGroup}
+                disabled={groupDeleteLoading}
+              >
+                {groupDeleteLoading ? "Deleting..." : "Delete group"}
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {subgroupToDelete && (
+        <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center px-4">
+          <div className="w-full max-w-md rounded-2xl bg-[var(--color-card)] p-6 shadow-lg space-y-4">
+            <div className="flex items-center justify-between">
+              <h3 className="text-lg font-semibold">
+                Delete subgroup &quot;{subgroupToDelete.subgroup.name}&quot;?
+              </h3>
+              <Button variant="ghost" size="sm" onClick={closeSubgroupDeleteModal}>
+                Close
+              </Button>
+            </div>
+            {subgroupDeleteError && <p className="text-sm text-red-500">{subgroupDeleteError}</p>}
+            <p className="text-sm text-[var(--color-muted)]">
+              This subgroup has {subgroupVariableCount} variables assigned. They will remain in &quot;
+              {subgroupToDelete.group.name}&quot; but without subgroup.
+            </p>
+            <p className="text-xs text-red-500">This action cannot be undone.</p>
+            <div className="flex justify-end gap-2">
+              <Button variant="ghost" onClick={closeSubgroupDeleteModal} disabled={subgroupDeleteLoading}>
+                Cancel
+              </Button>
+              <Button
+                variant="secondary"
+                className="bg-red-600 text-white hover:bg-red-600/90"
+                onClick={confirmDeleteSubgroup}
+                disabled={subgroupDeleteLoading}
+              >
+                {subgroupDeleteLoading ? "Deleting..." : "Delete subgroup"}
+              </Button>
             </div>
           </div>
         </div>
@@ -628,41 +1206,39 @@ function GroupAssignments({
   );
 }
 
-function Sparkline({ data }: { data: TransformPreview[] }) {
-  const width = 260;
-  const height = 80;
-  const beforePoints = data.map((d) => d.before).filter((d) => typeof d === "number") as number[];
-  const afterPoints = data.map((d) => d.after).filter((d) => typeof d === "number") as number[];
-  const combined = [...beforePoints, ...afterPoints];
-  const min = combined.length ? Math.min(...combined) : 0;
-  const max = combined.length ? Math.max(...combined) : 1;
-
-  const scaleY = (value: number) => {
-    if (max === min) return height / 2;
-    return height - ((value - min) / (max - min)) * height;
-  };
-  const scaleX = (index: number) => {
-    if (data.length <= 1) return 0;
-    return (index / (data.length - 1)) * width;
-  };
-
-  const path = (series: (number | null)[]) =>
-    series
-      .map((value, idx) => {
-        if (value === null || value === undefined) return null;
-        const command = idx === 0 ? "M" : "L";
-        return `${command}${scaleX(idx)},${scaleY(value)}`;
-      })
-      .filter(Boolean)
-      .join(" ");
-
-  const beforePath = path(data.map((d) => d.before));
-  const afterPath = path(data.map((d) => d.after));
+function PreviewChart({
+  data,
+}: {
+  data: { time: (string | number)[]; original: (number | null)[]; transformed: (number | null)[] };
+}) {
+  const chartData = data.time.map((time, index) => ({
+    time,
+    original: data.original[index],
+    transformed: data.transformed[index],
+  }));
 
   return (
-    <svg viewBox={`0 0 ${width} ${height}`} className="w-full" role="img">
-      {beforePath && <path d={beforePath} stroke="var(--color-muted)" strokeWidth="1.5" fill="none" />}
-      {afterPath && <path d={afterPath} stroke="var(--color-accent)" strokeWidth="2" fill="none" />}
-    </svg>
+    <div className="w-full">
+      <ResponsiveContainer width="100%" height={220}>
+        <LineChart data={chartData}>
+          <CartesianGrid strokeDasharray="3 3" />
+          <XAxis dataKey="time" tick={{ fontSize: 10 }} minTickGap={20} />
+          <YAxis tick={{ fontSize: 10 }} />
+          <Tooltip />
+          <Legend />
+          <Line type="monotone" dataKey="original" name="Original" stroke="var(--color-muted)" dot={false} />
+          <Line type="monotone" dataKey="transformed" name="Transformed" stroke="var(--color-accent)" dot={false} />
+        </LineChart>
+      </ResponsiveContainer>
+    </div>
   );
+}
+
+function safeParseJSON(payload: string | null) {
+  if (!payload) return {};
+  try {
+    return JSON.parse(payload);
+  } catch {
+    return {};
+  }
 }
