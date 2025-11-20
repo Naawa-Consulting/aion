@@ -42,6 +42,8 @@ def _load_df(ds: Dataset) -> pd.DataFrame:
         raise HTTPException(status_code=500, detail=f"Failed to read dataset: {e}")
 
 
+# Correlations endpoint already handles residual correlations (via optional model_id)
+# and injects Module 2 group/subgroup metadata for each variable.
 @router.get("/correlations", response_model=CorrelationResponse)
 def correlations(
     dataset_id: str = Query(...),
