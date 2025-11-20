@@ -35,6 +35,16 @@ class DatasetOut(BaseModel):
     dependencies: DatasetDependencyInfo
 
 
+class DatasetMeta(BaseModel):
+    id: str
+    name: str
+    rows: int
+    columns: int
+    time_column: Optional[str] = None
+    created_at: datetime
+    last_used_at: datetime
+
+
 class UploadResult(BaseModel):
     datasets: list[DatasetOut]
 
@@ -243,6 +253,18 @@ class ModelOut(BaseModel):
     is_hero: bool
     role: Literal["hero", "challenger1", "challenger2", "none"] = "none"
     metrics: ModelMetricsOut
+
+
+class ModelWithRole(BaseModel):
+    id: str
+    name: str
+    dataset_id: str
+    role: Optional[Literal["hero", "challenger1", "challenger2"]] = None
+    r2: float
+    adj_r2: float
+    mae: float
+    rmse: float
+    mape: Optional[float] = None
 
 
 class UpdateModelRequest(BaseModel):

@@ -16,7 +16,18 @@ import { Card, CardHeader } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 
 type Dataset = { id: string; display_name: string; columns: { name: string; dtype: string }[] };
-type Model = { id: string; name: string; dataset_id: string; role?: string; is_hero: boolean };
+type ModelRole = "hero" | "challenger1" | "challenger2";
+type Model = {
+  id: string;
+  name: string;
+  dataset_id: string;
+  role: ModelRole | null;
+  r2: number;
+  adj_r2: number;
+  mae: number;
+  rmse: number;
+  mape: number | null;
+};
 type Summary = {
   model: { id: string; name: string; dataset_id: string; y_var: string };
   include_intercept: boolean;
@@ -28,8 +39,11 @@ type Summary = {
   subgroups: any[];
 };
 type StackedData = { index: string[]; series: { key: string; values: number[] }[] };
+type DatasetMeta = { id: string; name: string; rows: number; columns: number; time_column: string | null };
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+const MODEL_ROLES: readonly ModelRole[] = ["hero", "challenger1", "challenger2"];
+const TIME_COLUMN_PLACEHOLDER = "—";
 
 export default function AnalysisPage() {
   const [datasets, setDatasets] = useState<Dataset[]>([]);
@@ -38,7 +52,8 @@ export default function AnalysisPage() {
   const [selectedModel, setSelectedModel] = useState("");
   const [summary, setSummary] = useState<Summary | null>(null);
   const [stacked, setStacked] = useState<StackedData | null>(null);
-  const [timeCol, setTimeCol] = useState("—");
+  const [timeCol, setTimeCol] = useState(TIME_COLUMN_PLACEHOLDER);
+  const [timeColumnDefault, setTimeColumnDefault] = useState<string | null>(null);
   const [freq, setFreq] = useState<"day" | "week" | "month">("month");
   const [groupBy, setGroupBy] = useState<"group" | "subgroup">("group");
   const [asPercent, setAsPercent] = useState(false);
@@ -53,14 +68,23 @@ export default function AnalysisPage() {
   useEffect(() => {
     if (selectedDataset) {
       fetchModels(selectedDataset);
+      fetchDatasetMeta(selectedDataset);
     }
   }, [selectedDataset]);
 
   useEffect(() => {
     if (selectedModel) {
       fetchSummary(selectedModel);
+    } else {
+      setSummary(null);
     }
   }, [selectedModel, includeBaseline, asPercent]);
+
+  useEffect(() => {
+    if (timeColumnDefault) {
+      setTimeCol(timeColumnDefault);
+    }
+  }, [timeColumnDefault]);
 
   const fetchDatasets = async () => {
     try {
@@ -74,16 +98,50 @@ export default function AnalysisPage() {
     }
   };
 
+  const fetchDatasetMeta = async (datasetId: string) => {
+    setTimeColumnDefault(null);
+    setTimeCol(TIME_COLUMN_PLACEHOLDER);
+    try {
+      const res = await fetch(`${API_URL}/datasets/${datasetId}/meta`);
+      if (!res.ok) throw new Error();
+      const data: DatasetMeta = await res.json();
+      setTimeColumnDefault(data.time_column);
+    } catch {
+      setTimeColumnDefault(null);
+    }
+  };
+
   const fetchModels = async (datasetId: string) => {
     try {
-      const res = await fetch(`${API_URL}/models?dataset_id=${datasetId}`);
+      const res = await fetch(`${API_URL}/datasets/${datasetId}/models-with-roles`);
       if (!res.ok) throw new Error();
       const data = await res.json();
-      setModels(data);
-      const hero = data.find((m: any) => m.role === "hero" || m.is_hero) || data[0];
-      if (hero) setSelectedModel(hero.id);
+      const normalized: Model[] = data.map((m: any) => ({
+        id: m.id,
+        name: m.name,
+        dataset_id: m.dataset_id,
+        role: !m.role || m.role === "none" ? null : m.role,
+        r2: m.r2,
+        adj_r2: m.adj_r2,
+        mae: m.mae,
+        rmse: m.rmse,
+        mape: m.mape ?? null,
+      }));
+      const prioritized = normalized.filter(
+        (m) => m.role && MODEL_ROLES.includes(m.role as ModelRole)
+      );
+      const available = prioritized.length ? prioritized : normalized;
+      setModels(available);
+      if (!available.length) {
+        setSelectedModel("");
+        return;
+      }
+      const hero = available.find((m) => m.role === "hero");
+      setSelectedModel(hero ? hero.id : available[0].id);
     } catch {
       toast.error("Failed to load models");
+      setModels([]);
+      setSelectedModel("");
     }
   };
 
@@ -104,7 +162,7 @@ export default function AnalysisPage() {
   };
 
   const fetchStacked = async () => {
-    if (!selectedModel || !timeCol) {
+    if (!selectedModel || !timeCol || timeCol === TIME_COLUMN_PLACEHOLDER) {
       toast.warning("Pick a model and time column");
       return;
     }
@@ -131,7 +189,7 @@ export default function AnalysisPage() {
   };
 
   const downloadStacked = async () => {
-    if (!selectedModel || !timeCol) return;
+    if (!selectedModel || !timeCol || timeCol === TIME_COLUMN_PLACEHOLDER) return;
     const url = `${API_URL}/analysis/${selectedModel}/export/stacked.xlsx?time_col=${encodeURIComponent(timeCol)}&freq=${freq}&by=${groupBy}&include_intercept=${includeBaseline}&as_percent=${asPercent}`;
     const res = await fetch(url);
     const blob = await res.blob();
@@ -416,7 +474,7 @@ export default function AnalysisPage() {
             value={timeCol}
             onChange={(e) => setTimeCol(e.target.value)}
           >
-            <option value="—">Time column</option>
+            <option value={TIME_COLUMN_PLACEHOLDER}>Time column</option>
             {timeColumns.map((col) => (
               <option key={col} value={col}>
                 {col}

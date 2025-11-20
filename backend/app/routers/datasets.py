@@ -34,6 +34,8 @@ from ..schemas import (
     DatasetUpdateResponse,
     DatasetVersionsResponse,
     DatasetVersionInfo,
+    DatasetMeta,
+    ModelWithRole,
 )
 
 
@@ -446,6 +448,22 @@ def get_dataset_versions(dataset_id: str, session: Session = Depends(get_session
     return DatasetVersionsResponse(versions=versions)
 
 
+@router.get("/{dataset_id}/meta", response_model=DatasetMeta)
+def get_dataset_meta(dataset_id: str, session: Session = Depends(get_session)):
+    ds = session.get(Dataset, dataset_id)
+    if not ds:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+    return DatasetMeta(
+        id=ds.id,
+        name=getattr(ds, "display_name", ds.name),
+        rows=ds.n_rows,
+        columns=ds.n_cols,
+        time_column=ds.time_variable,
+        created_at=ds.created_at,
+        last_used_at=ds.last_used_at,
+    )
+
+
 @router.get("/{dataset_id}/summary")
 def dataset_summary(dataset_id: str, session: Session = Depends(get_session)):
     ds = session.get(Dataset, dataset_id)
@@ -493,6 +511,37 @@ def dataset_summary(dataset_id: str, session: Session = Depends(get_session)):
         "n_columns": ds.n_cols,
         "columns": columns,
     }
+
+
+@router.get("/{dataset_id}/models-with-roles", response_model=List[ModelWithRole])
+def models_with_roles(dataset_id: str, session: Session = Depends(get_session)):
+    ds = session.get(Dataset, dataset_id)
+    if not ds:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+    models = session.exec(
+        select(Model).where(Model.dataset_id == dataset_id).order_by(Model.created_at.desc())
+    ).all()
+    allowed_roles = {"hero", "challenger1", "challenger2"}
+    items: list[ModelWithRole] = []
+    for model in models:
+        metrics = session.get(ModelMetrics, model.id)
+        if not metrics:
+            continue
+        role = model.role if model.role in allowed_roles else None
+        items.append(
+            ModelWithRole(
+                id=model.id,
+                name=model.name,
+                dataset_id=model.dataset_id,
+                role=role,
+                r2=metrics.r2,
+                adj_r2=metrics.adj_r2,
+                mae=metrics.mae,
+                rmse=metrics.rmse,
+                mape=metrics.mape,
+            )
+        )
+    return items
 
 
 @router.delete("/{dataset_id}")
