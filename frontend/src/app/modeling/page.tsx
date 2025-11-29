@@ -102,11 +102,13 @@ export default function ModelingPage() {
   const [editingModelId, setEditingModelId] = useState<string | null>(null);
   const [summary, setSummary] = useState<ModelSummary | null>(null);
   const [predictions, setPredictions] = useState<Predictions | null>(null);
-  const [showResiduals, setShowResiduals] = useState(false);
-  const [loading, setLoading] = useState(false);
-  const [showQuickView, setShowQuickView] = useState(false);
-  const [groupFilter, setGroupFilter] = useState<GroupFilter>("all");
-  const [subgroupFilter, setSubgroupFilter] = useState<SubgroupFilter>("all");
+const [showResiduals, setShowResiduals] = useState(false);
+const [loading, setLoading] = useState(false);
+const [showQuickView, setShowQuickView] = useState(false);
+const [groupFilter, setGroupFilter] = useState<GroupFilter>("all");
+const [subgroupFilter, setSubgroupFilter] = useState<SubgroupFilter>("all");
+  const [duplicateLoadingId, setDuplicateLoadingId] = useState<string | null>(null);
+  const [bestLoadingId, setBestLoadingId] = useState<string | null>(null);
 
   useEffect(() => {
     fetchDatasets();
@@ -295,6 +297,36 @@ export default function ModelingPage() {
       fetchModels(selectedDataset);
     } catch (err: any) {
       toast.error(err?.message || "Failed to delete");
+    }
+  };
+
+  const handleDuplicateModel = async (model: Model) => {
+    if (!selectedDataset) return;
+    setDuplicateLoadingId(model.id);
+    try {
+      const res = await fetch(`${API_URL}/models/${model.id}/duplicate`, { method: "POST" });
+      if (!res.ok) throw new Error(await res.text());
+      toast.success("Model duplicated");
+      await fetchModels(selectedDataset);
+    } catch (err: any) {
+      toast.error(err?.message || "Failed to duplicate model");
+    } finally {
+      setDuplicateLoadingId(null);
+    }
+  };
+
+  const handleBestModel = async (model: Model) => {
+    if (!selectedDataset) return;
+    setBestLoadingId(model.id);
+    try {
+      const res = await fetch(`${API_URL}/models/${model.id}/best_stepwise`, { method: "POST" });
+      if (!res.ok) throw new Error(await res.text());
+      toast.success("Best model created");
+      await fetchModels(selectedDataset);
+    } catch (err: any) {
+      toast.error(err?.message || "Failed to create best model");
+    } finally {
+      setBestLoadingId(null);
     }
   };
 
@@ -686,6 +718,22 @@ export default function ModelingPage() {
                         </Button>
                         <Button variant="ghost" size="sm" onClick={() => deleteModel(m)}>
                           Delete
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => handleDuplicateModel(m)}
+                          disabled={duplicateLoadingId === m.id}
+                        >
+                          {duplicateLoadingId === m.id ? "Copying..." : "Copy"}
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => handleBestModel(m)}
+                          disabled={bestLoadingId === m.id}
+                        >
+                          {bestLoadingId === m.id ? "Finding…" : "Best"}
                         </Button>
                         {m.role !== "hero" && (
                           <Button variant="secondary" size="sm" onClick={() => setRole(m, "hero")}>

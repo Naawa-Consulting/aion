@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import io
 import json
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import numpy as np
 import pandas as pd
@@ -19,7 +19,32 @@ from ..utils.datasets import load_dataset_frame
 router = APIRouter()
 
 
-def _fit_from_model(session: Session, model_id: str):
+def _parse_date(value: Optional[str]) -> Optional[pd.Timestamp]:
+    if not value:
+        return None
+    ts = pd.to_datetime(value, errors="coerce")
+    if pd.isna(ts):
+        raise HTTPException(status_code=400, detail=f"Invalid date: {value}")
+    return ts
+
+
+def _apply_date_filter(df: pd.DataFrame, time_column: Optional[str], start: Optional[pd.Timestamp], end: Optional[pd.Timestamp]) -> pd.DataFrame:
+    if not time_column or (start is None and end is None):
+        return df
+    if time_column not in df.columns:
+        return df
+    ts = pd.to_datetime(df[time_column], errors="coerce")
+    if ts.isna().all():
+        return df
+    mask = ts.notna()
+    if start is not None:
+        mask &= ts >= start
+    if end is not None:
+        mask &= ts <= end
+    return df.loc[mask]
+
+
+def _fit_from_model(session: Session, model_id: str, time_column: Optional[str] = None, start: Optional[pd.Timestamp] = None, end: Optional[pd.Timestamp] = None):
     m = session.get(Model, model_id)
     if not m:
         raise HTTPException(status_code=404, detail="Model not found")
@@ -30,6 +55,8 @@ def _fit_from_model(session: Session, model_id: str):
         df = load_dataset_frame(ds)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+    time_field = time_column or getattr(ds, "time_variable", None)
+    df = _apply_date_filter(df, time_field, start, end)
     x_vars = json.loads(m.x_vars_json)
     cols = [m.y_var] + x_vars
     work = df[cols].apply(pd.to_numeric, errors='coerce').dropna()
@@ -40,7 +67,7 @@ def _fit_from_model(session: Session, model_id: str):
     Xc = sm.add_constant(X, has_constant='add')
     res = sm.OLS(y, Xc).fit()
     params = res.params  # pandas Series with const and x_vars
-    return m, ds, work, X, Xc, y, params
+    return m, ds, work, X, Xc, y, params, df
 
 
 def _group_maps(session: Session, dataset_id: str):
@@ -61,9 +88,13 @@ def summary(
     model_id: str,
     include_intercept: bool = Query(True),
     as_percent: bool = Query(False),
+    start_date: Optional[str] = Query(default=None),
+    end_date: Optional[str] = Query(default=None),
     session: Session = Depends(get_session),
 ):
-    m, ds, work, X, Xc, y, params = _fit_from_model(session, model_id)
+    start_ts = _parse_date(start_date)
+    end_ts = _parse_date(end_date)
+    m, ds, work, X, Xc, y, params, _ = _fit_from_model(session, model_id, None, start_ts, end_ts)
     var_map, sg_map, g_map = _group_maps(session, ds.id)
 
     rows = []
@@ -167,19 +198,25 @@ def stacked(
     by: str = Query("group"),     # group|subgroup
     include_intercept: bool = Query(False),
     as_percent: bool = Query(False),
+    start_date: Optional[str] = Query(default=None),
+    end_date: Optional[str] = Query(default=None),
     session: Session = Depends(get_session),
 ):
-    m, ds, work, X, Xc, y, params = _fit_from_model(session, model_id)
+    start_ts = _parse_date(start_date)
+    end_ts = _parse_date(end_date)
+    m, ds, work, X, Xc, y, params, filtered_df = _fit_from_model(session, model_id, time_col, start_ts, end_ts)
     var_map, sg_map, g_map = _group_maps(session, ds.id)
 
     if time_col not in work.columns:
-        try:
-            original = load_dataset_frame(ds, columns=[time_col])
-        except Exception as exc:  # pragma: no cover - passthrough to default errors
-            raise HTTPException(status_code=400, detail=f"time_col error: {exc}") from exc
-        if time_col not in original.columns:
-            raise HTTPException(status_code=400, detail="time_col not found in dataset")
-        # If time col was dropped due to NA in numeric filtering, join from original df
+        if time_col in filtered_df.columns:
+            original = filtered_df[[time_col]]
+        else:
+            try:
+                original = load_dataset_frame(ds, columns=[time_col])
+            except Exception as exc:  # pragma: no cover
+                raise HTTPException(status_code=400, detail=f"time_col error: {exc}") from exc
+            if time_col not in original.columns:
+                raise HTTPException(status_code=400, detail="time_col not found in dataset")
         work = work.join(original, how='left')
 
     if time_col not in work.columns:
@@ -250,9 +287,11 @@ def export_summary(
     model_id: str,
     include_intercept: bool = Query(True),
     as_percent: bool = Query(False),
+    start_date: Optional[str] = Query(default=None),
+    end_date: Optional[str] = Query(default=None),
     session: Session = Depends(get_session),
 ):
-    data = summary(model_id, include_intercept, as_percent, session)
+    data = summary(model_id, include_intercept, as_percent, start_date, end_date, session)
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
         pd.DataFrame(data["variables"]).to_excel(writer, index=False, sheet_name="variables")
@@ -270,9 +309,11 @@ def export_stacked(
     by: str = Query("group"),
     include_intercept: bool = Query(False),
     as_percent: bool = Query(False),
+    start_date: Optional[str] = Query(default=None),
+    end_date: Optional[str] = Query(default=None),
     session: Session = Depends(get_session),
 ):
-    data = stacked(model_id, time_col, freq, by, include_intercept, as_percent, session)
+    data = stacked(model_id, time_col, freq, by, include_intercept, as_percent, start_date, end_date, session)
     buf = io.BytesIO()
     # Convert to a flat table for Excel
     index = data["index"]

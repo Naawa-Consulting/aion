@@ -180,7 +180,13 @@ def _compute_metrics(y: np.ndarray, y_hat: np.ndarray, X: pd.DataFrame) -> dict:
     for i, name in enumerate(X_const.columns):
         if name == 'const':
             continue
-        vif_vals.append({"name": name, "vif": float(variance_inflation_factor(X_const.values, i))})
+        try:
+            value = float(variance_inflation_factor(X_const.values, i))
+            if not np.isfinite(value):
+                value = None
+        except Exception:
+            value = None
+        vif_vals.append({"name": name, "vif": value})
 
     dw = float(durbin_watson(resid))
     return {
@@ -234,6 +240,72 @@ def _fit_and_store_metrics(session: Session, model: Model, df: pd.DataFrame, x_v
     mm.vif_json = json.dumps(metrics["vif"])
     session.add(mm)
     return work, y, X, X_const, result
+
+
+def _generate_unique_name(session: Session, dataset_id: str, base_name: str) -> str:
+    existing = {
+        m.name
+        for m in session.exec(select(Model).where(Model.dataset_id == dataset_id)).all()
+    }
+    if base_name not in existing:
+        return base_name
+    suffix = 2
+    while f"{base_name} ({suffix})" in existing:
+        suffix += 1
+    return f"{base_name} ({suffix})"
+
+
+def _stepwise_selection(
+    X: pd.DataFrame,
+    y: pd.Series,
+    initial: list[str],
+    threshold_in: float = 0.05,
+    threshold_out: float = 0.05,
+    max_iter: int = 100,
+) -> list[str]:
+    included = [col for col in initial if col in X.columns]
+    for _ in range(max_iter):
+        changed = False
+        excluded = [col for col in X.columns if col not in included]
+        new_pvals: dict[str, float] = {}
+        for col in excluded:
+            cols = included + [col]
+            X_const = sm.add_constant(X[cols], has_constant="add")
+            try:
+                result = sm.OLS(y, X_const).fit()
+                new_pvals[col] = result.pvalues.get(col, 1.0)
+            except Exception:
+                continue
+        if new_pvals:
+            best_col, best_p = min(new_pvals.items(), key=lambda item: item[1])
+            if best_p < threshold_in:
+                included.append(best_col)
+                changed = True
+        if included:
+            X_const = sm.add_constant(X[included], has_constant="add")
+            try:
+                result = sm.OLS(y, X_const).fit()
+                pvalues = result.pvalues.drop("const", errors="ignore")
+                if not pvalues.empty:
+                    worst_p = pvalues.max()
+                    if worst_p > threshold_out:
+                        worst_feature = pvalues.idxmax()
+                        included.remove(worst_feature)
+                        changed = True
+            except Exception:
+                pass
+        if not changed:
+            break
+    # Final cleanup: keep only predictors with p < 0.05 in final fit
+    if included:
+        try:
+            X_const = sm.add_constant(X[included], has_constant="add")
+            result = sm.OLS(y, X_const).fit()
+            pvalues = result.pvalues.drop("const", errors="ignore")
+            included = [var for var in included if pvalues.get(var, 1.0) < 0.05]
+        except Exception:
+            pass
+    return included
 
 
 @router.post("", response_model=ModelOut)
@@ -295,6 +367,76 @@ def update_model(model_id: str, body: UpdateModelRequest, session: Session = Dep
     if not mm:
         raise HTTPException(status_code=500, detail="Metrics missing")
     return _model_to_out(m, mm)
+
+
+@router.post("/{model_id}/duplicate", response_model=ModelOut)
+def duplicate_model(model_id: str, session: Session = Depends(get_session)):
+    original = session.get(Model, model_id)
+    if not original:
+        raise HTTPException(status_code=404, detail="Model not found")
+    metrics = session.get(ModelMetrics, original.id)
+    if not metrics:
+        raise HTTPException(status_code=400, detail="Original model metrics missing")
+    new_name = _generate_unique_name(session, original.dataset_id, f"{original.name} - copy")
+    new_model = Model(
+        id=str(uuid.uuid4()),
+        name=new_name,
+        dataset_id=original.dataset_id,
+        y_var=original.y_var,
+        x_vars_json=original.x_vars_json,
+        is_hero=False,
+        role="none",
+    )
+    session.add(new_model)
+    session.commit()
+    new_metrics = ModelMetrics(
+        model_id=new_model.id,
+        r2=metrics.r2,
+        adj_r2=metrics.adj_r2,
+        durbin_watson=metrics.durbin_watson,
+        mae=metrics.mae,
+        rmse=metrics.rmse,
+        mape=metrics.mape,
+        vif_json=metrics.vif_json,
+    )
+    session.add(new_metrics)
+    session.commit()
+    return _model_to_out(new_model, new_metrics)
+
+
+@router.post("/{model_id}/best_stepwise", response_model=ModelOut)
+def create_best_stepwise_model(model_id: str, session: Session = Depends(get_session)):
+    original = session.get(Model, model_id)
+    if not original:
+        raise HTTPException(status_code=404, detail="Model not found")
+    ds = session.get(Dataset, original.dataset_id)
+    if not ds:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+    df = _load_df(ds)
+    original_x = json.loads(original.x_vars_json)
+    work, y_arr, X = _prepare_training_frame(df, original.y_var, original_x)
+    y_series = pd.Series(y_arr, index=work.index)
+    selected_predictors = _stepwise_selection(X, y_series, original_x)
+    if not selected_predictors:
+        selected_predictors = original_x
+    new_name = _generate_unique_name(session, original.dataset_id, f"{original.name} - Best")
+    new_model = Model(
+        id=str(uuid.uuid4()),
+        name=new_name,
+        dataset_id=original.dataset_id,
+        y_var=original.y_var,
+        x_vars_json=json.dumps(selected_predictors),
+        is_hero=False,
+        role="none",
+    )
+    session.add(new_model)
+    session.commit()
+    _fit_and_store_metrics(session, new_model, df, selected_predictors)
+    session.commit()
+    metrics = session.get(ModelMetrics, new_model.id)
+    if not metrics:
+        raise HTTPException(status_code=500, detail="Failed to compute metrics for new model")
+    return _model_to_out(new_model, metrics)
 
 
 @router.delete("/{model_id}")
@@ -370,7 +512,12 @@ def model_summary(model_id: str, session: Session = Depends(get_session)):
     X_const = sm.add_constant(X, has_constant="add")
     result = sm.OLS(y, X_const).fit()
     metrics = _compute_metrics(y, result.predict(X_const), X)
-    vif_lookup = {item["name"]: item["vif"] for item in metrics["vif"]}
+    vif_lookup = {}
+    for item in metrics["vif"]:
+        value = item.get("vif")
+        if isinstance(value, (int, float)) and not np.isfinite(value):
+            value = None
+        vif_lookup[item["name"]] = value
     x_std = X.std(ddof=0)
     y_std = y.std(ddof=0)
     y_std_valid = y_std is not None and np.isfinite(y_std) and y_std != 0
@@ -384,26 +531,30 @@ def model_summary(model_id: str, session: Session = Depends(get_session)):
             return None
         return float(result.params[var] * (x_sigma / y_std))
 
+    const_coef = float(result.params.get("const", 0.0))
     intercept = CoefficientItem(
         name="intercept",
-        coef=float(result.params["const"]),
-        std_err=float(result.bse["const"]),
-        t_value=float(result.tvalues["const"]),
-        p_value=float(result.pvalues["const"]),
+        coef=const_coef,
+        std_err=float(result.bse.get("const", 0.0)),
+        t_value=float(result.tvalues.get("const", 0.0)),
+        p_value=float(result.pvalues.get("const", 1.0)),
         vif=None,
         beta_std=None,
     )
 
     coefficients = []
     for var in x_vars:
+        vif_value = vif_lookup.get(var)
+        if isinstance(vif_value, (int, float)) and not np.isfinite(vif_value):
+            vif_value = None
         coefficients.append(
             CoefficientItem(
                 name=var,
-                coef=float(result.params[var]),
-                std_err=float(result.bse[var]),
-                t_value=float(result.tvalues[var]),
-                p_value=float(result.pvalues[var]),
-                vif=vif_lookup.get(var),
+                coef=float(result.params.get(var, 0.0)),
+                std_err=float(result.bse.get(var, 0.0)),
+                t_value=float(result.tvalues.get(var, 0.0)),
+                p_value=float(result.pvalues.get(var, 1.0)),
+                vif=vif_value,
                 beta_std=_beta_std(var),
             )
         )

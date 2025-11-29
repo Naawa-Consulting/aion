@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Bar,
   BarChart,
@@ -60,6 +60,12 @@ export default function AnalysisPage() {
   const [includeBaseline, setIncludeBaseline] = useState(true);
   const [tableView, setTableView] = useState<"group" | "group_subgroup" | "variable">("group");
   const [loading, setLoading] = useState(false);
+  const [dateRange, setDateRange] = useState<{ start: string | null; end: string | null }>({
+    start: null,
+    end: null,
+  });
+  const [stackedLoading, setStackedLoading] = useState(false);
+  const [stackedError, setStackedError] = useState<string | null>(null);
 
   useEffect(() => {
     fetchDatasets();
@@ -67,6 +73,9 @@ export default function AnalysisPage() {
 
   useEffect(() => {
     if (selectedDataset) {
+      setDateRange({ start: null, end: null });
+      setStacked(null);
+      setStackedError(null);
       fetchModels(selectedDataset);
       fetchDatasetMeta(selectedDataset);
     }
@@ -78,11 +87,13 @@ export default function AnalysisPage() {
     } else {
       setSummary(null);
     }
-  }, [selectedModel, includeBaseline, asPercent]);
+  }, [selectedModel, includeBaseline, asPercent, dateRange.start, dateRange.end]);
 
   useEffect(() => {
     if (timeColumnDefault) {
       setTimeCol(timeColumnDefault);
+    } else {
+      setTimeCol(TIME_COLUMN_PLACEHOLDER);
     }
   }, [timeColumnDefault]);
 
@@ -148,9 +159,13 @@ export default function AnalysisPage() {
   const fetchSummary = async (modelId: string) => {
     setLoading(true);
     try {
-      const res = await fetch(
-        `${API_URL}/analysis/${modelId}/summary?include_intercept=${includeBaseline}&as_percent=${asPercent}`
-      );
+      const params = new URLSearchParams({
+        include_intercept: String(includeBaseline),
+        as_percent: String(asPercent),
+      });
+      if (dateRange.start) params.set("start_date", dateRange.start);
+      if (dateRange.end) params.set("end_date", dateRange.end);
+      const res = await fetch(`${API_URL}/analysis/${modelId}/summary?${params.toString()}`);
       if (!res.ok) throw new Error(await res.text());
       setSummary(await res.json());
     } catch (err: any) {
@@ -161,28 +176,59 @@ export default function AnalysisPage() {
     }
   };
 
-  const fetchStacked = async () => {
+  const fetchStacked = useCallback(async () => {
     if (!selectedModel || !timeCol || timeCol === TIME_COLUMN_PLACEHOLDER) {
-      toast.warning("Pick a model and time column");
       return;
     }
-    setLoading(true);
+    setStackedLoading(true);
+    setStackedError(null);
     try {
-      const url = `${API_URL}/analysis/${selectedModel}/stacked?time_col=${encodeURIComponent(timeCol)}&freq=${freq}&by=${groupBy}&include_intercept=${includeBaseline}&as_percent=${asPercent}`;
+      const params = new URLSearchParams({
+        time_col: timeCol,
+        freq,
+        by: groupBy,
+        include_intercept: String(includeBaseline),
+        as_percent: String(asPercent),
+      });
+      if (dateRange.start) params.set("start_date", dateRange.start);
+      if (dateRange.end) params.set("end_date", dateRange.end);
+      const url = `${API_URL}/analysis/${selectedModel}/stacked?${params.toString()}`;
       const res = await fetch(url);
       if (!res.ok) throw new Error(await res.text());
       setStacked(await res.json());
     } catch (err: any) {
-      toast.error(err?.message || "Failed to load stacked data");
       setStacked(null);
+      setStackedError(err?.message || "Failed to load stacked data");
     } finally {
-      setLoading(false);
+      setStackedLoading(false);
     }
-  };
+  }, [
+    selectedModel,
+    timeCol,
+    freq,
+    groupBy,
+    includeBaseline,
+    asPercent,
+    dateRange.start,
+    dateRange.end,
+  ]);
+
+  useEffect(() => {
+    if (!selectedModel || !timeCol || timeCol === TIME_COLUMN_PLACEHOLDER) {
+      return;
+    }
+    fetchStacked();
+  }, [fetchStacked, selectedModel, timeCol]);
 
   const downloadSummary = async () => {
     if (!selectedModel) return;
-    const url = `${API_URL}/analysis/${selectedModel}/export/summary.xlsx?include_intercept=${includeBaseline}&as_percent=${asPercent}`;
+    const params = new URLSearchParams({
+      include_intercept: String(includeBaseline),
+      as_percent: String(asPercent),
+    });
+    if (dateRange.start) params.set("start_date", dateRange.start);
+    if (dateRange.end) params.set("end_date", dateRange.end);
+    const url = `${API_URL}/analysis/${selectedModel}/export/summary.xlsx?${params.toString()}`;
     const res = await fetch(url);
     const blob = await res.blob();
     downloadBlob(blob, "analysis-summary.xlsx");
@@ -190,7 +236,16 @@ export default function AnalysisPage() {
 
   const downloadStacked = async () => {
     if (!selectedModel || !timeCol || timeCol === TIME_COLUMN_PLACEHOLDER) return;
-    const url = `${API_URL}/analysis/${selectedModel}/export/stacked.xlsx?time_col=${encodeURIComponent(timeCol)}&freq=${freq}&by=${groupBy}&include_intercept=${includeBaseline}&as_percent=${asPercent}`;
+    const params = new URLSearchParams({
+      time_col,
+      freq,
+      by: groupBy,
+      include_intercept: String(includeBaseline),
+      as_percent: String(asPercent),
+    });
+    if (dateRange.start) params.set("start_date", dateRange.start);
+    if (dateRange.end) params.set("end_date", dateRange.end);
+    const url = `${API_URL}/analysis/${selectedModel}/export/stacked.xlsx?${params.toString()}`;
     const res = await fetch(url);
     const blob = await res.blob();
     downloadBlob(blob, "stacked.xlsx");
@@ -237,6 +292,17 @@ export default function AnalysisPage() {
 
     return `${percentFormatter.format((value / summary.total_contribution) * 100)}%`;
 
+  };
+
+  const readyForStacked = Boolean(selectedModel && timeCol && timeCol !== TIME_COLUMN_PLACEHOLDER);
+
+  const formatStackedValue = (value: number | string | null | undefined) => {
+    const num = Number(value);
+    if (!Number.isFinite(num)) {
+      return asPercent ? "0.00%" : "0.00";
+    }
+    const formatted = num.toFixed(2);
+    return asPercent ? `${formatted}%` : formatted;
   };
 
 
@@ -389,6 +455,28 @@ export default function AnalysisPage() {
               ))}
             </select>
           </div>
+          <div className="flex flex-col">
+            <label className="text-xs uppercase text-[var(--color-muted)]">Date range</label>
+            <div className="ml-2 flex items-center gap-2 text-sm">
+              <input
+                type="date"
+                className="rounded-full border border-[var(--color-border)] px-3 py-1.5 bg-transparent text-[var(--color-foreground)]"
+                value={dateRange.start ?? ""}
+                onChange={(e) =>
+                  setDateRange((prev) => ({ ...prev, start: e.target.value || null }))
+                }
+              />
+              <span className="text-xs text-[var(--color-muted)]">to</span>
+              <input
+                type="date"
+                className="rounded-full border border-[var(--color-border)] px-3 py-1.5 bg-transparent text-[var(--color-foreground)]"
+                value={dateRange.end ?? ""}
+                onChange={(e) =>
+                  setDateRange((prev) => ({ ...prev, end: e.target.value || null }))
+                }
+              />
+            </div>
+          </div>
           <Button onClick={downloadSummary}>Download Summary</Button>
         </div>
       </header>
@@ -502,21 +590,31 @@ export default function AnalysisPage() {
             <input type="checkbox" checked={asPercent} onChange={(e) => setAsPercent(e.target.checked)} />
             Percent mode
           </label>
-          <Button variant="secondary" onClick={fetchStacked} disabled={loading}>
-            {loading ? "Loading..." : "Generate"}
+          <Button
+            variant="secondary"
+            onClick={fetchStacked}
+            disabled={!readyForStacked || stackedLoading}
+          >
+            {stackedLoading ? "Loading..." : "Generate"}
           </Button>
-          <Button variant="ghost" onClick={downloadStacked} disabled={!stacked}>
+          <Button variant="ghost" onClick={downloadStacked} disabled={!stacked || stackedLoading}>
             Export Excel
           </Button>
         </div>
-        {stacked && groupedSeries.length > 0 ? (
+        {stackedLoading && (
+          <p className="text-xs text-[var(--color-muted)]">Loading contributions…</p>
+        )}
+        {stackedError && !stackedLoading && (
+          <p className="text-xs text-red-500">Couldn’t load stacked contributions. Please try again.</p>
+        )}
+        {!stackedLoading && !stackedError && stacked && groupedSeries.length > 0 ? (
           <div className="h-96">
             <ResponsiveContainer>
               <BarChart data={groupedSeries} stackOffset={stackOffset}>
                 <CartesianGrid strokeDasharray="3 3" />
                 <XAxis dataKey="period" />
-                <YAxis tickFormatter={(value) => (asPercent ? `${percentFormatter.format(value)}%` : numberFormatter.format(value))} />
-                <Tooltip formatter={(value: number) => (asPercent ? `${percentFormatter.format(value)}%` : numberFormatter.format(value))} />
+                <YAxis tickFormatter={(value) => formatStackedValue(value)} />
+                <Tooltip formatter={(value) => formatStackedValue(value)} />
                 <Legend />
                 {sortedSeries.map((series) => (
                   <Bar
@@ -531,7 +629,14 @@ export default function AnalysisPage() {
             </ResponsiveContainer>
           </div>
         ) : (
-          <p className="text-sm text-[var(--color-muted)]">Choose a time column and generate stacked data.</p>
+          !stackedLoading &&
+          !stackedError && (
+            <p className="text-sm text-[var(--color-muted)]">
+              {readyForStacked
+                ? "No data for the selected filters."
+                : "Select a dataset, model, and time column to view stacked contributions."}
+            </p>
+          )
         )}
       </Card>
     </section>
