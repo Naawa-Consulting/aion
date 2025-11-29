@@ -73,8 +73,8 @@ This repository contains a modular analytics application with a Next.js frontend
 
 ### Module 4
 
-- Summary contributions: `GET /analysis/{model_id}/summary?include_intercept=bool&as_percent=bool` returns coefficient × mean per variable (Baseline included as a first-class group/subgroup). Download: `GET /analysis/{model_id}/export/summary.xlsx`.
-- Stacked contributions: `GET /analysis/{model_id}/stacked?time_col=...&freq=day|week|month&by=group|subgroup&include_intercept=bool&as_percent=bool`. Excel download: `GET /analysis/{model_id}/export/stacked.xlsx`.
+- Summary contributions: `GET /analysis/{model_id}/summary?include_intercept=bool&as_percent=bool` now aggregates each predictor as the sum of `beta_i * X_i,t` over the filtered date range (baseline = intercept × row count), so dashboard cards and the summary table react immediately to the selected period. Download: `GET /analysis/{model_id}/export/summary.xlsx`.
+- Stacked contributions: `GET /analysis/{model_id}/stacked?time_col=...&freq=day|week|month&by=group|subgroup&include_intercept=bool&as_percent=bool` uses the same date-filtered sums per period; Excel download: `GET /analysis/{model_id}/export/stacked.xlsx`.
 - Frontend `/analysis` now offers dashboard cards (total, baseline, top groups), value/% toggles, stacked area chart, and download buttons with icons.
 
 ### Module 5

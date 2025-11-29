@@ -94,17 +94,38 @@ def summary(
 ):
     start_ts = _parse_date(start_date)
     end_ts = _parse_date(end_date)
-    m, ds, work, X, Xc, y, params, _ = _fit_from_model(session, model_id, None, start_ts, end_ts)
+    filtered_df: pd.DataFrame | None = None
+    try:
+        m, ds, work, X, Xc, y, params, filtered_df = _fit_from_model(session, model_id, None, start_ts, end_ts)
+    except HTTPException as exc:
+        if (
+            exc.detail != "Insufficient rows after cleaning for analysis"
+            or (start_ts is None and end_ts is None)
+        ):
+            raise
+        m, ds, work, X, Xc, y, params, full_df = _fit_from_model(session, model_id)
+        filtered_df = _apply_date_filter(full_df.copy(), getattr(ds, "time_variable", None), start_ts, end_ts)
+        if filtered_df.empty:
+            raise HTTPException(status_code=400, detail="No rows available for the selected date range")
     var_map, sg_map, g_map = _group_maps(session, ds.id)
+
+    if filtered_df is None:
+        filtered_df = work
 
     rows = []
     group_totals: Dict[str, float] = {}
     subgroup_totals: Dict[str, float] = {}
-    raw_total = 0.0
+    contributions: Dict[str, float] = {}
+    source_df = filtered_df
+    total_variables = 0.0
     for name in X.columns:
         coef = float(params.get(name, 0.0))
-        mean_val = float(X[name].mean())
-        contrib = coef * mean_val
+        if name not in source_df.columns:
+            continue
+        series = pd.to_numeric(source_df[name], errors="coerce").fillna(0.0)
+        contrib = float((series * coef).sum())
+        contributions[name] = contrib
+        total_variables += contrib
         mapping = var_map.get(name, {})
         sg_id = mapping.get("subgroup_id")
         gid = mapping.get("group_id")
@@ -113,7 +134,7 @@ def summary(
         rows.append({
             "name": name,
             "coef": coef,
-            "mean": mean_val,
+            "mean": float(series.mean()) if len(series) else 0.0,
             "contribution": contrib,
             "subgroup_id": sg.id if sg else None,
             "subgroup_name": sg.name if sg else None,
@@ -127,10 +148,11 @@ def summary(
                 group_totals[grp_id] = group_totals.get(grp_id, 0.0) + contrib
         elif g:
             group_totals[g.id] = group_totals.get(g.id, 0.0) + contrib
-        raw_total += contrib
 
-    intercept = float(params.get('const', 0.0)) if include_intercept else 0.0
-    total_contribution = float(raw_total + intercept)
+    intercept_beta = float(params.get('const', 0.0))
+    n_rows = len(source_df)
+    intercept = intercept_beta * n_rows if include_intercept else 0.0
+    total_contribution = float(total_variables + intercept)
 
     def percent(value: float) -> float:
         return float((value / total_contribution) * 100) if total_contribution else 0.0
@@ -139,8 +161,8 @@ def summary(
     if include_intercept:
         baseline_entry = {
             "name": "baseline",
-            "coef": intercept,
-            "mean": 1.0,
+            "coef": intercept_beta,
+            "mean": float(n_rows),
             "contribution": intercept,
             "percent": percent(intercept),
             "group_id": "baseline",
@@ -204,7 +226,22 @@ def stacked(
 ):
     start_ts = _parse_date(start_date)
     end_ts = _parse_date(end_date)
-    m, ds, work, X, Xc, y, params, filtered_df = _fit_from_model(session, model_id, time_col, start_ts, end_ts)
+    try:
+        m, ds, work, X, Xc, y, params, filtered_df = _fit_from_model(session, model_id, time_col, start_ts, end_ts)
+    except HTTPException as exc:
+        if (
+            exc.detail != "Insufficient rows after cleaning for analysis"
+            or (start_ts is None and end_ts is None)
+        ):
+            raise
+        m, ds, work, X, Xc, y, params, full_df = _fit_from_model(session, model_id)
+        filtered_df = _apply_date_filter(full_df.copy(), time_col, start_ts, end_ts)
+        if filtered_df.empty:
+            raise HTTPException(status_code=400, detail="No rows available for the selected date range")
+        numeric = filtered_df[[m.y_var] + list(X.columns)].apply(pd.to_numeric, errors="coerce").dropna()
+        if numeric.empty:
+            raise HTTPException(status_code=400, detail="No complete rows available for the selected date range")
+        work = numeric
     var_map, sg_map, g_map = _group_maps(session, ds.id)
 
     if time_col not in work.columns:
