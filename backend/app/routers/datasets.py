@@ -7,7 +7,7 @@ import uuid
 import hashlib
 import shutil
 from pathlib import Path
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import List, Optional
 
 import pandas as pd
@@ -140,6 +140,39 @@ def _dataset_out(session: Session, ds: Dataset) -> DatasetOut:
         columns=cols,
         dependencies=deps,
     )
+
+
+def _dataset_time_range(ds: Dataset) -> tuple[date | None, date | None, bool]:
+    if not ds.time_variable:
+        return None, None, False
+    path = Path(ds.path)
+    if not path.exists():
+        return None, None, False
+    try:
+        series = pd.read_parquet(path, columns=[ds.time_variable])[ds.time_variable]
+    except Exception:
+        return None, None, False
+    if ds.sample_size:
+        series = series.head(int(ds.sample_size))
+    parsed = pd.to_datetime(series, format=ds.time_format, errors="coerce")
+    if ds.time_timezone:
+        try:
+            parsed = parsed.dt.tz_localize(ds.time_timezone, nonexistent="NaT", ambiguous="NaT")
+        except (TypeError, ValueError):
+            try:
+                parsed = parsed.dt.tz_convert(ds.time_timezone)
+            except Exception:
+                pass
+    parsed = parsed.dropna()
+    if parsed.empty:
+        return None, None, False
+    min_dt = parsed.min()
+    max_dt = parsed.max()
+    if hasattr(min_dt, "to_pydatetime"):
+        min_dt = min_dt.to_pydatetime()
+    if hasattr(max_dt, "to_pydatetime"):
+        max_dt = max_dt.to_pydatetime()
+    return min_dt.date(), max_dt.date(), True
 
 
 @router.post("/upload", response_model=UploadResult)
@@ -453,6 +486,7 @@ def get_dataset_meta(dataset_id: str, session: Session = Depends(get_session)):
     ds = session.get(Dataset, dataset_id)
     if not ds:
         raise HTTPException(status_code=404, detail="Dataset not found")
+    date_min, date_max, has_valid_dates = _dataset_time_range(ds)
     return DatasetMeta(
         id=ds.id,
         name=getattr(ds, "display_name", ds.name),
@@ -461,6 +495,9 @@ def get_dataset_meta(dataset_id: str, session: Session = Depends(get_session)):
         time_column=ds.time_variable,
         created_at=ds.created_at,
         last_used_at=ds.last_used_at,
+        date_min=date_min,
+        date_max=date_max,
+        has_valid_dates=has_valid_dates,
     )
 
 

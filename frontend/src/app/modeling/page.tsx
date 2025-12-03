@@ -1,6 +1,6 @@
 ﻿"use client";
 
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import clsx from "clsx";
 import { Bar, CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis, Legend, ComposedChart } from "recharts";
 import { toast } from "sonner";
@@ -10,6 +10,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { SelectedPredictorsQuickView } from "@/components/modeling/SelectedPredictorsQuickView";
+import { FilterBar, FilterField } from "@/components/ui/filter-bar";
 
 type Dataset = { id: string; display_name: string; columns: { name: string; dtype: string }[] };
 type Variable = { id: string; name: string; dtype: string };
@@ -111,17 +112,6 @@ const [subgroupFilter, setSubgroupFilter] = useState<SubgroupFilter>("all");
   const [bestLoadingId, setBestLoadingId] = useState<string | null>(null);
 
   useEffect(() => {
-    fetchDatasets();
-  }, []);
-
-  useEffect(() => {
-    if (selectedDataset) {
-      fetchVariables(selectedDataset);
-      fetchModels(selectedDataset);
-    }
-  }, [selectedDataset]);
-
-  useEffect(() => {
     setGroupFilter("all");
     setSubgroupFilter("all");
   }, [selectedDataset]);
@@ -143,21 +133,26 @@ const [subgroupFilter, setSubgroupFilter] = useState<SubgroupFilter>("all");
     }
   }, [models]);
 
-  const fetchDatasets = async () => {
+
+  const fetchDatasets = useCallback(async () => {
     try {
       const res = await fetch(`${API_URL}/datasets`);
       if (!res.ok) throw new Error();
       const data = await res.json();
       setDatasets(data);
-      if (!selectedDataset && data.length) {
-        setSelectedDataset(data[0].id);
+      if (data.length) {
+        setSelectedDataset((prev) => (prev ? prev : data[0].id));
       }
     } catch {
       toast.error("Failed to load datasets");
     }
-  };
+  }, []);
 
-  const fetchVariables = async (datasetId: string) => {
+  useEffect(() => {
+    fetchDatasets();
+  }, [fetchDatasets]);
+
+  const fetchVariables = useCallback(async (datasetId: string) => {
     try {
       const res = await fetch(`${API_URL}/variables?dataset_id=${datasetId}`);
       if (!res.ok) throw new Error();
@@ -165,13 +160,15 @@ const [subgroupFilter, setSubgroupFilter] = useState<SubgroupFilter>("all");
       const mapped: Variable[] = data.map((v: any) => ({ id: v.id, name: v.name, dtype: v.dtype }));
       setVariables(mapped);
       const numeric = mapped.find((v) => /int|float|double|decimal|number/i.test(v.dtype));
-      if (!yVar && numeric) setYVar(numeric.name);
+      if (numeric) {
+        setYVar((prev) => (prev ? prev : numeric.name));
+      }
     } catch {
       toast.error("Failed to load variables");
     }
-  };
+  }, []);
 
-  const fetchModels = async (datasetId: string) => {
+  const fetchModels = useCallback(async (datasetId: string) => {
     try {
       const res = await fetch(`${API_URL}/models?dataset_id=${datasetId}`);
       if (!res.ok) throw new Error();
@@ -180,7 +177,14 @@ const [subgroupFilter, setSubgroupFilter] = useState<SubgroupFilter>("all");
     } catch {
       toast.error("Failed to load models");
     }
-  };
+  }, []);
+
+  useEffect(() => {
+    if (selectedDataset) {
+      fetchVariables(selectedDataset);
+      fetchModels(selectedDataset);
+    }
+  }, [selectedDataset, fetchVariables, fetchModels]);
 
   const fetchCorrelations = async (datasetId: string, y: string, modelId?: string | null) => {
     try {
@@ -502,16 +506,15 @@ const [subgroupFilter, setSubgroupFilter] = useState<SubgroupFilter>("all");
   return (
     <>
       <section className="space-y-6">
-      <header className="flex flex-wrap items-center justify-between gap-4">
+      <header className="space-y-4">
         <div>
           <p className="text-sm text-[var(--color-muted)]">Module 3</p>
           <h1 className="text-2xl font-semibold tracking-tight">Modeling</h1>
         </div>
-        <div className="flex gap-3 items-center">
-          <div>
-            <label className="text-xs uppercase text-[var(--color-muted)]">Dataset</label>
+        <FilterBar>
+          <FilterField label="DATASET" className="w-[240px]">
             <select
-              className="ml-2 rounded-full border border-[var(--color-border)] px-4 py-2 bg-transparent"
+              className="w-full rounded-full border border-[var(--color-border)] bg-transparent px-4 py-2"
               value={selectedDataset}
               onChange={(e) => {
                 setSelectedDataset(e.target.value);
@@ -524,11 +527,10 @@ const [subgroupFilter, setSubgroupFilter] = useState<SubgroupFilter>("all");
                 </option>
               ))}
             </select>
-          </div>
-          <div>
-            <label className="text-xs uppercase text-[var(--color-muted)]">Dependent variable</label>
+          </FilterField>
+          <FilterField label="DEPENDENT VARIABLE" className="w-[260px]">
             <select
-              className="ml-2 rounded-full border border-[var(--color-border)] px-4 py-2 bg-transparent"
+              className="w-full rounded-full border border-[var(--color-border)] bg-transparent px-4 py-2"
               value={yVar}
               onChange={(e) => setYVar(e.target.value)}
             >
@@ -539,8 +541,8 @@ const [subgroupFilter, setSubgroupFilter] = useState<SubgroupFilter>("all");
                 </option>
               ))}
             </select>
-          </div>
-        </div>
+          </FilterField>
+        </FilterBar>
       </header>
 
       <div className="grid gap-6 lg:grid-cols-[360px,1fr]">

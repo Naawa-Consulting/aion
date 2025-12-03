@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Bar,
   BarChart,
@@ -14,6 +14,7 @@ import {
 import { toast } from "sonner";
 import { Card, CardHeader } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import { FilterBar, FilterField } from "@/components/ui/filter-bar";
 
 type Dataset = { id: string; display_name: string; columns: { name: string; dtype: string }[] };
 type ModelRole = "hero" | "challenger1" | "challenger2";
@@ -39,11 +40,68 @@ type Summary = {
   subgroups: any[];
 };
 type StackedData = { index: string[]; series: { key: string; values: number[] }[] };
-type DatasetMeta = { id: string; name: string; rows: number; columns: number; time_column: string | null };
+type DatasetMeta = {
+  id: string;
+  name: string;
+  rows: number;
+  columns: number;
+  time_column: string | null;
+  date_min: string | null;
+  date_max: string | null;
+};
+type DateBounds = { min: string | null; max: string | null };
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 const MODEL_ROLES: readonly ModelRole[] = ["hero", "challenger1", "challenger2"];
+const MODEL_ROLE_ORDER: Record<ModelRole, number> = {
+  hero: 0,
+  challenger1: 1,
+  challenger2: 2,
+};
+const MODEL_ROLE_LABEL: Record<ModelRole, string> = {
+  hero: "Hero",
+  challenger1: "Ch. 1",
+  challenger2: "Ch. 2",
+};
 const TIME_COLUMN_PLACEHOLDER = "—";
+
+const clampDateValue = (value: string | null, bounds: DateBounds): string | null => {
+  if (!value) return null;
+  let next = value;
+  if (bounds.min && next < bounds.min) next = bounds.min;
+  if (bounds.max && next > bounds.max) next = bounds.max;
+  return next;
+};
+
+const clampRange = (
+  range: { start: string | null; end: string | null },
+  bounds: DateBounds,
+  changed: "start" | "end" | "bounds" = "bounds"
+) => {
+  const start = clampDateValue(range.start, bounds);
+  const end = clampDateValue(range.end, bounds);
+  if (start && end && start > end) {
+    if (changed === "start") {
+      return { start, end: start };
+    }
+    if (changed === "end") {
+      return { start: end, end };
+    }
+    return { start, end: start };
+  }
+  return { start, end };
+};
+
+const normalizeDatasetMeta = (raw: any): DatasetMeta => ({
+  id: raw.id,
+  name: raw.name ?? raw.display_name ?? "",
+  rows: raw.rows ?? raw.n_rows ?? 0,
+  columns: raw.columns ?? raw.n_cols ?? 0,
+  time_column: raw.time_column ?? raw.timeColumn ?? null,
+  date_min: raw.date_min ?? raw.dateMin ?? null,
+  date_max: raw.date_max ?? raw.dateMax ?? null,
+});
+
 
 export default function AnalysisPage() {
   const [datasets, setDatasets] = useState<Dataset[]>([]);
@@ -64,30 +122,10 @@ export default function AnalysisPage() {
     start: null,
     end: null,
   });
+  const [dateBounds, setDateBounds] = useState<DateBounds>({ min: null, max: null });
   const [stackedLoading, setStackedLoading] = useState(false);
   const [stackedError, setStackedError] = useState<string | null>(null);
-
-  useEffect(() => {
-    fetchDatasets();
-  }, []);
-
-  useEffect(() => {
-    if (selectedDataset) {
-      setDateRange({ start: null, end: null });
-      setStacked(null);
-      setStackedError(null);
-      fetchModels(selectedDataset);
-      fetchDatasetMeta(selectedDataset);
-    }
-  }, [selectedDataset]);
-
-  useEffect(() => {
-    if (selectedModel) {
-      fetchSummary(selectedModel);
-    } else {
-      setSummary(null);
-    }
-  }, [selectedModel, includeBaseline, asPercent, dateRange.start, dateRange.end]);
+  const dateRangeInitializedRef = useRef(false);
 
   useEffect(() => {
     if (timeColumnDefault) {
@@ -97,32 +135,60 @@ export default function AnalysisPage() {
     }
   }, [timeColumnDefault]);
 
-  const fetchDatasets = async () => {
+  const boundsMin = dateBounds.min;
+  const boundsMax = dateBounds.max;
+
+  useEffect(() => {
+    const bounds = { min: boundsMin, max: boundsMax };
+    setDateRange((prev) => {
+      const next = clampRange(prev, bounds, "bounds");
+      if (next.start === prev.start && next.end === prev.end) {
+        return prev;
+      }
+      return next;
+    });
+  }, [boundsMin, boundsMax]);
+
+  const fetchDatasets = useCallback(async () => {
     try {
       const res = await fetch(`${API_URL}/datasets`);
       if (!res.ok) throw new Error();
       const data = await res.json();
       setDatasets(data);
-      if (!selectedDataset && data.length) setSelectedDataset(data[0].id);
+      if (data.length) {
+        setSelectedDataset((prev) => (prev ? prev : data[0].id));
+      }
     } catch {
       toast.error("Failed to load datasets");
     }
-  };
+  }, []);
 
-  const fetchDatasetMeta = async (datasetId: string) => {
+  useEffect(() => {
+    fetchDatasets();
+  }, [fetchDatasets]);
+
+  const fetchDatasetMeta = useCallback(async (datasetId: string) => {
     setTimeColumnDefault(null);
     setTimeCol(TIME_COLUMN_PLACEHOLDER);
+    setDateBounds({ min: null, max: null });
     try {
       const res = await fetch(`${API_URL}/datasets/${datasetId}/meta`);
       if (!res.ok) throw new Error();
-      const data: DatasetMeta = await res.json();
+      const raw = await res.json();
+      const data = normalizeDatasetMeta(raw);
       setTimeColumnDefault(data.time_column);
+      const bounds = { min: data.date_min ?? null, max: data.date_max ?? null };
+      setDateBounds(bounds);
+      if (!dateRangeInitializedRef.current && (bounds.min || bounds.max)) {
+        setDateRange(clampRange({ start: bounds.min, end: bounds.max }, bounds, "bounds"));
+        dateRangeInitializedRef.current = true;
+      }
     } catch {
       setTimeColumnDefault(null);
     }
-  };
+  }, []);
 
-  const fetchModels = async (datasetId: string) => {
+  const fetchModels = useCallback(async (datasetId: string) => {
     try {
       const res = await fetch(`${API_URL}/datasets/${datasetId}/models-with-roles`);
       if (!res.ok) throw new Error();
@@ -138,9 +204,13 @@ export default function AnalysisPage() {
         rmse: m.rmse,
         mape: m.mape ?? null,
       }));
-      const prioritized = normalized.filter(
-        (m) => m.role && MODEL_ROLES.includes(m.role as ModelRole)
-      );
+      const prioritized = normalized
+        .filter((m) => m.role && MODEL_ROLES.includes(m.role as ModelRole))
+        .sort((a, b) => {
+          const roleA = (a.role as ModelRole) || "challenger2";
+          const roleB = (b.role as ModelRole) || "challenger2";
+          return MODEL_ROLE_ORDER[roleA] - MODEL_ROLE_ORDER[roleB];
+        });
       const available = prioritized.length ? prioritized : normalized;
       setModels(available);
       if (!available.length) {
@@ -154,9 +224,9 @@ export default function AnalysisPage() {
       setModels([]);
       setSelectedModel("");
     }
-  };
+  }, []);
 
-  const fetchSummary = async (modelId: string) => {
+  const fetchSummary = useCallback(async (modelId: string) => {
     setLoading(true);
     try {
       const params = new URLSearchParams({
@@ -174,7 +244,27 @@ export default function AnalysisPage() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [includeBaseline, asPercent, dateRange.start, dateRange.end]);
+
+  useEffect(() => {
+    if (selectedDataset) {
+      setDateRange({ start: null, end: null });
+      setDateBounds({ min: null, max: null });
+      dateRangeInitializedRef.current = false;
+      setStacked(null);
+      setStackedError(null);
+      fetchModels(selectedDataset);
+      fetchDatasetMeta(selectedDataset);
+    }
+  }, [selectedDataset, fetchModels, fetchDatasetMeta]);
+
+  useEffect(() => {
+    if (selectedModel) {
+      fetchSummary(selectedModel);
+    } else {
+      setSummary(null);
+    }
+  }, [selectedModel, fetchSummary]);
 
   const fetchStacked = useCallback(async () => {
     if (!selectedModel || !timeCol || timeCol === TIME_COLUMN_PLACEHOLDER) {
@@ -220,6 +310,17 @@ export default function AnalysisPage() {
     fetchStacked();
   }, [fetchStacked, selectedModel, timeCol]);
 
+  const updateDateField = (field: "start" | "end", rawValue: string) => {
+    setDateRange((prev) => {
+      const candidate = { ...prev, [field]: rawValue ? rawValue : null };
+      const next = clampRange(candidate, dateBounds, field);
+      if (next.start === prev.start && next.end === prev.end) {
+        return prev;
+      }
+      return next;
+    });
+  };
+
   const downloadSummary = async () => {
     if (!selectedModel) return;
     const params = new URLSearchParams({
@@ -237,7 +338,7 @@ export default function AnalysisPage() {
   const downloadStacked = async () => {
     if (!selectedModel || !timeCol || timeCol === TIME_COLUMN_PLACEHOLDER) return;
     const params = new URLSearchParams({
-      time_col,
+      time_col: timeCol,
       freq,
       by: groupBy,
       include_intercept: String(includeBaseline),
@@ -421,16 +522,15 @@ export default function AnalysisPage() {
 
   return (
     <section className="space-y-6">
-      <header className="flex flex-wrap items-center justify-between gap-4">
+      <header className="space-y-4">
         <div>
           <p className="text-sm text-[var(--color-muted)]">Module 4</p>
           <h1 className="text-2xl font-semibold">Analysis & Attribution</h1>
         </div>
-        <div className="flex gap-3 items-center">
-          <div>
-            <label className="text-xs uppercase text-[var(--color-muted)]">Dataset</label>
+        <FilterBar>
+          <FilterField label="DATASET" className="w-[240px]">
             <select
-              className="ml-2 rounded-full border border-[var(--color-border)] px-4 py-2 bg-transparent"
+              className="w-full rounded-full border border-[var(--color-border)] bg-transparent px-4 py-2"
               value={selectedDataset}
               onChange={(e) => setSelectedDataset(e.target.value)}
             >
@@ -440,45 +540,46 @@ export default function AnalysisPage() {
                 </option>
               ))}
             </select>
-          </div>
-          <div>
-            <label className="text-xs uppercase text-[var(--color-muted)]">Model</label>
+          </FilterField>
+          <FilterField label="MODEL" className="w-[260px]">
             <select
-              className="ml-2 rounded-full border border-[var(--color-border)] px-4 py-2 bg-transparent"
+              className="w-full rounded-full border border-[var(--color-border)] bg-transparent px-4 py-2"
               value={selectedModel}
               onChange={(e) => setSelectedModel(e.target.value)}
             >
               {models.map((m) => (
                 <option key={m.id} value={m.id}>
-                  {m.name}
+                  {m.role && MODEL_ROLE_LABEL[m.role as ModelRole]
+                    ? `${m.name} [${MODEL_ROLE_LABEL[m.role as ModelRole]}]`
+                    : m.name}
                 </option>
               ))}
             </select>
-          </div>
-          <div className="flex flex-col">
-            <label className="text-xs uppercase text-[var(--color-muted)]">Date range</label>
-            <div className="ml-2 flex items-center gap-2 text-sm">
+          </FilterField>
+          <FilterField label="DATE RANGE" className="flex-1 min-w-[280px]">
+            <div className="flex flex-wrap gap-3">
               <input
                 type="date"
-                className="rounded-full border border-[var(--color-border)] px-3 py-1.5 bg-transparent text-[var(--color-foreground)]"
+                className="w-[180px] rounded-full border border-[var(--color-border)] px-3 py-1.5 text-[var(--color-foreground)]"
                 value={dateRange.start ?? ""}
-                onChange={(e) =>
-                  setDateRange((prev) => ({ ...prev, start: e.target.value || null }))
-                }
+                min={dateBounds.min ?? undefined}
+                max={dateBounds.max ?? undefined}
+                onChange={(e) => updateDateField("start", e.target.value)}
               />
-              <span className="text-xs text-[var(--color-muted)]">to</span>
               <input
                 type="date"
-                className="rounded-full border border-[var(--color-border)] px-3 py-1.5 bg-transparent text-[var(--color-foreground)]"
+                className="w-[180px] rounded-full border border-[var(--color-border)] px-3 py-1.5 text-[var(--color-foreground)]"
                 value={dateRange.end ?? ""}
-                onChange={(e) =>
-                  setDateRange((prev) => ({ ...prev, end: e.target.value || null }))
-                }
+                min={dateBounds.min ?? undefined}
+                max={dateBounds.max ?? undefined}
+                onChange={(e) => updateDateField("end", e.target.value)}
               />
             </div>
+          </FilterField>
+          <div className="flex items-end">
+            <Button onClick={downloadSummary}>Download Summary</Button>
           </div>
-          <Button onClick={downloadSummary}>Download Summary</Button>
-        </div>
+        </FilterBar>
       </header>
 
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">

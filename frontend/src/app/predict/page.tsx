@@ -77,37 +77,39 @@ export default function PredictPage() {
 
   useEffect(() => {
     fetchDatasets();
-  }, []);
+  }, [fetchDatasets]);
 
   useEffect(() => {
     if (selectedDataset) {
       fetchModels(selectedDataset);
     }
-  }, [selectedDataset]);
+  }, [selectedDataset, fetchModels]);
 
   useEffect(() => {
     if (!selectedModel) return;
     fetchBaselineVariables(selectedModel);
     fetchScenarios(selectedModel);
-  }, [selectedModel]);
+  }, [selectedModel, fetchBaselineVariables, fetchScenarios]);
 
   useEffect(() => {
     ensureAdjustmentDefaults(periodLabels, variables, setAdjustments);
   }, [periodLabels, variables]);
 
-  const fetchDatasets = async () => {
+  const fetchDatasets = useCallback(async () => {
     try {
       const res = await fetch(`${API_URL}/datasets`);
       if (!res.ok) throw new Error();
       const data = await res.json();
       setDatasets(data);
-      if (!selectedDataset && data.length) setSelectedDataset(data[0].id);
+      if (data.length) {
+        setSelectedDataset((prev) => (prev ? prev : data[0].id));
+      }
     } catch {
       toast.error("Failed to load datasets");
     }
-  };
+  }, []);
 
-  const fetchModels = async (datasetId: string) => {
+  const fetchModels = useCallback(async (datasetId: string) => {
     try {
       const res = await fetch(`${API_URL}/models?dataset_id=${datasetId}`);
       if (!res.ok) throw new Error();
@@ -118,9 +120,9 @@ export default function PredictPage() {
     } catch {
       toast.error("Failed to load models");
     }
-  };
+  }, []);
 
-  const fetchBaselineVariables = async (modelId: string) => {
+  const fetchBaselineVariables = useCallback(async (modelId: string) => {
     try {
       const res = await fetch(`${API_URL}/predict/${modelId}/simulate`, {
         method: "POST",
@@ -134,9 +136,9 @@ export default function PredictPage() {
     } catch {
       toast.error("Failed to load baseline variables");
     }
-  };
+  }, [fetchPreview]);
 
-  const fetchScenarios = async (modelId: string) => {
+  const fetchScenarios = useCallback(async (modelId: string) => {
     try {
       const res = await fetch(`${API_URL}/predict/scenarios?model_id=${modelId}`);
       if (!res.ok) throw new Error(await res.text());
@@ -145,7 +147,7 @@ export default function PredictPage() {
     } catch {
       toast.error("Failed to load scenarios");
     }
-  };
+  }, []);
 
   const fetchPreview = useCallback(async () => {
     if (!selectedModel) return;

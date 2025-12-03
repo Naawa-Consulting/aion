@@ -184,11 +184,6 @@ const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
   }, [previewPayload, runPreview, showPreview]);
 
   useEffect(() => {
-    fetchDatasets();
-    fetchGroups();
-  }, []);
-
-  useEffect(() => {
     if (activeDatasetId) {
       fetchVariables(activeDatasetId);
       setSelectedDataset(activeDatasetId);
@@ -271,42 +266,46 @@ const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
     { ctrl: true }
   );
 
-  const fetchDatasets = async () => {
-    try {
-      const res = await fetch(`${API_URL}/datasets`);
-      if (!res.ok) throw new Error();
-      const data = await res.json();
-      setDatasets(data);
-      if (!datasetId && data.length) {
+    const fetchDatasets = useCallback(async () => {
+      try {
+        const res = await fetch(`${API_URL}/datasets`);
+        if (!res.ok) throw new Error();
+        const data = await res.json();
         setDatasets(data);
-        setDatasetId(data[0].id);
+        if (data.length) {
+          setDatasetId((prev) => (prev ? prev : data[0].id));
+        }
+      } catch {
+        toast.error("Failed to load datasets");
       }
-    } catch {
-      toast.error("Failed to load datasets");
-    }
-  };
+    }, [setDatasetId]);
 
-  const fetchVariables = async (dataset: string) => {
-    try {
-      const res = await fetch(`${API_URL}/variables?dataset_id=${dataset}`);
-      if (!res.ok) throw new Error();
-      const data = await res.json();
-      setVariables(data);
-    } catch {
-      toast.error("Failed to load variables");
-    }
-  };
+    const fetchVariables = async (dataset: string) => {
+      try {
+        const res = await fetch(`${API_URL}/variables?dataset_id=${dataset}`);
+        if (!res.ok) throw new Error();
+        const data = await res.json();
+        setVariables(data);
+      } catch {
+        toast.error("Failed to load variables");
+      }
+    };
 
-  const fetchGroups = async () => {
-    try {
-      const res = await fetch(`${API_URL}/groups`);
-      if (!res.ok) throw new Error();
-      const data = await res.json();
-      setGroups(data);
-    } catch {
-      toast.error("Failed to load groups");
-    }
-  };
+    const fetchGroups = useCallback(async () => {
+      try {
+        const res = await fetch(`${API_URL}/groups`);
+        if (!res.ok) throw new Error();
+        const data = await res.json();
+        setGroups(data);
+      } catch {
+        toast.error("Failed to load groups");
+      }
+    }, []);
+
+    useEffect(() => {
+      fetchDatasets();
+      fetchGroups();
+    }, [fetchDatasets, fetchGroups]);
 
   const startGroupRename = (group: Group) => {
     setEditingGroupId(group.id);

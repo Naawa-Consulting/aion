@@ -43,6 +43,9 @@ class DatasetMeta(BaseModel):
     time_column: Optional[str] = None
     created_at: datetime
     last_used_at: datetime
+    date_min: Optional[date] = None
+    date_max: Optional[date] = None
+    has_valid_dates: bool = False
 
 
 class UploadResult(BaseModel):
