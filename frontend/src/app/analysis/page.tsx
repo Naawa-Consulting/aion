@@ -628,7 +628,7 @@ export default function AnalysisPage() {
         {summary ? (
           <div className="overflow-auto max-h-[420px]">
             <table className="min-w-full text-sm">
-              <thead className="bg-[var(--color-bg)]/60">
+              <thead className="bg-[var(--color-bg)] sticky top-0 z-10">
                 <tr>
                   <th className="px-2 py-2 text-left">Group</th>
                   {tableView !== "group" && <th className="px-2 py-2 text-left">Subgroup</th>}

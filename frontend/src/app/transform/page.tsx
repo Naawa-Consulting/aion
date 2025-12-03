@@ -272,13 +272,13 @@ const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
         if (!res.ok) throw new Error();
         const data = await res.json();
         setDatasets(data);
-        if (data.length) {
-          setDatasetId((prev) => (prev ? prev : data[0].id));
+        if (!datasetId && data.length) {
+          setDatasetId(data[0].id);
         }
       } catch {
         toast.error("Failed to load datasets");
       }
-    }, [setDatasetId]);
+    }, [datasetId, setDatasetId]);
 
     const fetchVariables = async (dataset: string) => {
       try {
