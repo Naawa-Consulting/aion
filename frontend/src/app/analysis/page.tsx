@@ -39,14 +39,6 @@ type Summary = {
   variables: any[];
   groups: any[];
   subgroups: any[];
-  subtotals: {
-    key: string;
-    label: string;
-    group_id?: string;
-    group_name?: string;
-    contribution: number;
-    percent: number;
-  }[];
 };
 type StackedData = { index: string[]; series: { key: string; values: number[] }[] };
 type DatasetMeta = {
@@ -546,93 +538,39 @@ export default function AnalysisPage() {
 
 
   
-  const { tableRows, subtotalRows } = useMemo(() => {
+  const tableRows = useMemo(() => {
 
-    if (!summary) {
+    if (!summary) return [];
 
-      return { tableRows: [], subtotalRows: [] };
+    if (tableView === "group") return summary.groups;
 
-    }
+    if (tableView === "group_subgroup") {
 
-    let baseRows: any[] = [];
+      if (hasSubgroups) return summary.subgroups;
 
-    if (tableView === "group") {
+      return summary.groups.map((g: any, idx: number) => ({
 
-      baseRows = summary.groups;
+        subgroup_id: `group-fallback-${g.group_id ?? idx}`,
 
-    } else if (tableView === "group_subgroup") {
+        subgroup_name: DASH,
 
-      if (hasSubgroups) {
+        group_id: g.group_id,
 
-        baseRows = summary.subgroups;
+        group_name: g.group_name,
 
-      } else {
+        contribution: g.contribution,
 
-        baseRows = summary.groups.map((g: any, idx: number) => ({
+        percent: g.percent,
 
-          subgroup_id: `group-fallback-${g.group_id ?? idx}`,
-
-          subgroup_name: DASH,
-
-          group_id: g.group_id,
-
-          group_name: g.group_name,
-
-          contribution: g.contribution,
-
-          percent: g.percent,
-
-        }));
-
-      }
-
-    } else {
-
-      baseRows = summary.variables;
+      }));
 
     }
 
-    const subtotals =
-
-      summary.subtotals?.map((item) => {
-
-        const label = item.label || item.group_name || DASH;
-
-        return {
-
-          group_id: item.group_id ?? `subtotal-${item.key}`,
-
-          group_name: label,
-
-          subgroup_id: tableView !== "group" ? `subtotal-${item.key}-sub` : undefined,
-
-          subgroup_name: tableView !== "group" ? DASH : undefined,
-
-          name: tableView === "variable" ? label : undefined,
-
-          contribution: item.contribution,
-
-          percent: item.percent,
-
-          __isSubtotal: true,
-
-          key: item.key,
-
-        };
-
-      }) ?? [];
-
-    return { tableRows: baseRows, subtotalRows: subtotals };
+    return summary.variables;
 
   }, [summary, tableView, hasSubgroups]);
 
   const baselineGroup = summary?.groups.find((g: any) => g.group_id === "baseline");
-
-  const summaryColumnCount =
-    1 +
-    (tableView !== "group" ? 1 : 0) +
-    (tableView === "variable" ? 1 : 0) +
-    2;
 
   return (
     <section className="space-y-6">
@@ -775,29 +713,6 @@ export default function AnalysisPage() {
                     </td>
                   </tr>
                 ))}
-                {subtotalRows.length > 0 && (
-                  <>
-                    <tr>
-                      <td colSpan={summaryColumnCount} className="pt-2 border-t border-[var(--color-border)]" />
-                    </tr>
-                    {subtotalRows.map((row: any) => (
-                      <tr
-                        key={`subtotal-${row.key}`}
-                        className="bg-[var(--color-border)]/30 font-semibold text-[var(--color-foreground)]"
-                      >
-                        <td className="px-2 py-2">{row.group_name || row.label || DASH}</td>
-                        {tableView !== "group" && <td className="px-2 py-2">{row.subgroup_name || DASH}</td>}
-                        {tableView === "variable" && <td className="px-2 py-2">{row.name || DASH}</td>}
-                        <td className="px-2 py-2">{formatNumber(row.contribution)}</td>
-                        <td className="px-2 py-2">
-                          {row.percent != null
-                            ? `${percentFormatter.format(row.percent)}%`
-                            : percentOfTotal(row.contribution)}
-                        </td>
-                      </tr>
-                    ))}
-                  </>
-                )}
               </tbody>
             </table>
           </div>

@@ -18,6 +18,7 @@ from sqlmodel import Session, select, delete
 
 from ..db import DATA_ROOT, get_session
 from ..models import Dataset, Variable, Model, ModelMetrics, Scenario
+from ..services.analysis import invalidate_cache_for_dataset
 from ..schemas import (
     ColumnInfo,
     DatasetOut,
@@ -297,6 +298,7 @@ def rename_columns(dataset_id: str, body: ColumnRenameRequest, session: Session 
     session.add(ds)
     session.commit()
 
+    invalidate_cache_for_dataset(dataset_id)
     return _dataset_out(session, ds)
 
 
@@ -311,6 +313,7 @@ def rename_dataset(dataset_id: str, body: DatasetRenameRequest, session: Session
     ds.display_name = new_name
     session.add(ds)
     session.commit()
+    invalidate_cache_for_dataset(dataset_id)
     return _dataset_out(session, ds)
 
 
@@ -335,6 +338,7 @@ def update_sample_size(dataset_id: str, body: DatasetSampleSizeRequest, session:
     session.add(ds)
     session.commit()
     session.refresh(ds)
+    invalidate_cache_for_dataset(dataset_id)
     return _dataset_out(session, ds)
 
 
@@ -394,6 +398,7 @@ def update_time_variable(dataset_id: str, body: TimeVariableRequest, session: Se
     session.add(ds)
     session.commit()
     session.refresh(ds)
+    invalidate_cache_for_dataset(dataset_id)
     return _dataset_out(session, ds)
 
 
@@ -454,6 +459,7 @@ async def update_dataset_file(
     session.commit()
     session.refresh(ds)
 
+    invalidate_cache_for_dataset(dataset_id)
     return DatasetUpdateResponse(
         id=ds.id,
         display_name=ds.display_name,
@@ -609,6 +615,7 @@ def delete_dataset(dataset_id: str, cascade: bool = Query(True, description="Del
 
     session.delete(ds)
     session.commit()
+    invalidate_cache_for_dataset(dataset_id)
     return {"status": "deleted", "id": ds.id}
 
 

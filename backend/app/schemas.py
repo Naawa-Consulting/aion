@@ -302,6 +302,15 @@ class PredictionsResponse(BaseModel):
     residuals: list[float]
 
 
+class SummaryTableExportRequest(BaseModel):
+    dataset_id: str
+    model_id: str
+    include_intercept: bool = True
+    start_date: Optional[str] = None
+    end_date: Optional[str] = None
+    group_mode: Literal["group", "group_subgroup", "variable"] = "group"
+
+
 class Adjustment(BaseModel):
     variable: str
     multiplier: float

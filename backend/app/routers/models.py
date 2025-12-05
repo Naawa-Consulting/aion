@@ -14,6 +14,7 @@ from statsmodels.stats.stattools import durbin_watson
 
 from ..db import get_session
 from ..models import Dataset, Model, ModelMetrics, Scenario, Variable, Group, Subgroup
+from ..services.analysis import invalidate_cache_for_model
 from ..utils.datasets import load_dataset_frame
 from ..schemas import (
     CorrelationResponse,
@@ -330,6 +331,7 @@ def create_model(body: CreateModelRequest, session: Session = Depends(get_sessio
     session.commit()
 
     mm = session.get(ModelMetrics, m.id)
+    invalidate_cache_for_model(m.id)
     return _model_to_out(m, mm)
 
 
@@ -366,6 +368,7 @@ def update_model(model_id: str, body: UpdateModelRequest, session: Session = Dep
     mm = session.get(ModelMetrics, m.id)
     if not mm:
         raise HTTPException(status_code=500, detail="Metrics missing")
+    invalidate_cache_for_model(m.id)
     return _model_to_out(m, mm)
 
 
@@ -401,6 +404,7 @@ def duplicate_model(model_id: str, session: Session = Depends(get_session)):
     )
     session.add(new_metrics)
     session.commit()
+    invalidate_cache_for_model(new_model.id)
     return _model_to_out(new_model, new_metrics)
 
 
@@ -436,6 +440,7 @@ def create_best_stepwise_model(model_id: str, session: Session = Depends(get_ses
     metrics = session.get(ModelMetrics, new_model.id)
     if not metrics:
         raise HTTPException(status_code=500, detail="Failed to compute metrics for new model")
+    invalidate_cache_for_model(new_model.id)
     return _model_to_out(new_model, metrics)
 
 
@@ -448,6 +453,7 @@ def delete_model(model_id: str, session: Session = Depends(get_session)):
     session.exec(delete(ModelMetrics).where(ModelMetrics.model_id == model_id))
     session.delete(m)
     session.commit()
+    invalidate_cache_for_model(model_id)
     return {"status": "deleted"}
 
 

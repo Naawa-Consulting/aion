@@ -75,26 +75,6 @@ export default function PredictPage() {
   const periodLabels = useMemo(() => buildPeriodLabels(startDate, horizon, freq), [startDate, horizon, freq]);
   const displayPeriods = preview?.periods?.length ? preview.periods : periodLabels;
 
-  useEffect(() => {
-    fetchDatasets();
-  }, [fetchDatasets]);
-
-  useEffect(() => {
-    if (selectedDataset) {
-      fetchModels(selectedDataset);
-    }
-  }, [selectedDataset, fetchModels]);
-
-  useEffect(() => {
-    if (!selectedModel) return;
-    fetchBaselineVariables(selectedModel);
-    fetchScenarios(selectedModel);
-  }, [selectedModel, fetchBaselineVariables, fetchScenarios]);
-
-  useEffect(() => {
-    ensureAdjustmentDefaults(periodLabels, variables, setAdjustments);
-  }, [periodLabels, variables]);
-
   const fetchDatasets = useCallback(async () => {
     try {
       const res = await fetch(`${API_URL}/datasets`);
@@ -119,33 +99,6 @@ export default function PredictPage() {
       if (hero) setSelectedModel(hero.id);
     } catch {
       toast.error("Failed to load models");
-    }
-  }, []);
-
-  const fetchBaselineVariables = useCallback(async (modelId: string) => {
-    try {
-      const res = await fetch(`${API_URL}/predict/${modelId}/simulate`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ adjustments: [] }),
-      });
-      if (!res.ok) throw new Error(await res.text());
-      const data = await res.json();
-      setVariables(data.variables || []);
-      fetchPreview();
-    } catch {
-      toast.error("Failed to load baseline variables");
-    }
-  }, [fetchPreview]);
-
-  const fetchScenarios = useCallback(async (modelId: string) => {
-    try {
-      const res = await fetch(`${API_URL}/predict/scenarios?model_id=${modelId}`);
-      if (!res.ok) throw new Error(await res.text());
-      const data = await res.json();
-      setScenarios(data);
-    } catch {
-      toast.error("Failed to load scenarios");
     }
   }, []);
 
@@ -174,6 +127,53 @@ export default function PredictPage() {
       setPreviewLoading(false);
     }
   }, [selectedModel, horizon, startDate, freq, adjustments]);
+
+  const fetchBaselineVariables = useCallback(async (modelId: string) => {
+    try {
+      const res = await fetch(`${API_URL}/predict/${modelId}/simulate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ adjustments: [] }),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      const data = await res.json();
+      setVariables(data.variables || []);
+      fetchPreview();
+    } catch {
+      toast.error("Failed to load baseline variables");
+    }
+  }, [fetchPreview]);
+
+  const fetchScenarios = useCallback(async (modelId: string) => {
+    try {
+      const res = await fetch(`${API_URL}/predict/scenarios?model_id=${modelId}`);
+      if (!res.ok) throw new Error(await res.text());
+      const data = await res.json();
+      setScenarios(data);
+    } catch {
+      toast.error("Failed to load scenarios");
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchDatasets();
+  }, [fetchDatasets]);
+
+  useEffect(() => {
+    if (selectedDataset) {
+      fetchModels(selectedDataset);
+    }
+  }, [selectedDataset, fetchModels]);
+
+  useEffect(() => {
+    if (!selectedModel) return;
+    fetchBaselineVariables(selectedModel);
+    fetchScenarios(selectedModel);
+  }, [selectedModel, fetchBaselineVariables, fetchScenarios]);
+
+  useEffect(() => {
+    ensureAdjustmentDefaults(periodLabels, variables, setAdjustments);
+  }, [periodLabels, variables]);
 
   const handleAdjustmentChange = (period: string, variable: string, mode: PeriodValue["mode"], value: number) => {
     setAdjustments((prev) => {

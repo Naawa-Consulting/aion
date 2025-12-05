@@ -271,33 +271,6 @@ def summary(
         row["value"] = float(row["contribution"])
         row["percent"] = percent(row["contribution"])
 
-    def _subtotal_entry(key: str, label: str, amount: float) -> dict[str, object]:
-        return {
-            "row_type": "subtotal",
-            "key": key,
-            "label": label,
-            "group_id": f"subtotal-{key}",
-            "group_name": label,
-            "subgroup_id": None,
-            "subgroup_name": None,
-            "name": None,
-            "contribution": float(amount),
-            "percent": percent(amount),
-        }
-
-    marketing_total = sum(
-        row["contribution"]
-        for row in rows
-        if isinstance(row.get("group_name"), str)
-        and row["group_name"].strip().lower() == "marketing"
-    )
-    other_total = sum(
-        row["contribution"]
-        for row in rows
-        if row.get("group_name") == other_label
-    )
-    baseline_total = float(intercept)
-
     group_rows = [
         {
             "group_id": gid,
@@ -366,12 +339,6 @@ def summary(
     non_baseline_subgroups.sort(key=lambda row: abs(row["contribution"]), reverse=True)
     subgroup_rows = non_baseline_subgroups + baseline_subgroups
 
-    subtotals = [
-        _subtotal_entry("marketing", "∑ Marketing", marketing_total),
-        _subtotal_entry("baseline", "∑ Baseline", baseline_total),
-        _subtotal_entry("other", "∑ Other", other_total),
-    ]
-
     response = {
         "model": {
             "id": m.id,
@@ -387,7 +354,6 @@ def summary(
         "variables": rows,
         "groups": group_rows,
         "subgroups": subgroup_rows,
-        "subtotals": subtotals,
     }
     set_cached_view(summary_cache_key, response)
     return response

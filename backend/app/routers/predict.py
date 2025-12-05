@@ -38,7 +38,7 @@ router = APIRouter()
 
 
 def _compute_contributions(session: Session, model_id: str, adjustments: dict[str, float]):
-    m, ds, work, X, Xc, y, params = _fit_from_model(session, model_id)
+    m, ds, work, X, Xc, y, params, _ = _fit_from_model(session, model_id)
     var_map, sg_map, g_map = _group_maps(session, ds.id)
 
     X_adj = X.copy()
@@ -344,7 +344,7 @@ def _compute_plan(
     freq: str,
     adjustments: dict[str, dict[str, PeriodValue]],
 ):
-    m, ds, work, X, Xc, y, params = _fit_from_model(session, model_id)
+    m, ds, work, X, Xc, y, params, _ = _fit_from_model(session, model_id)
     var_map, sg_map, g_map = _group_maps(session, ds.id)
 
     baseline_means: dict[str, float] = {}
