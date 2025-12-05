@@ -39,6 +39,14 @@ type Summary = {
   variables: any[];
   groups: any[];
   subgroups: any[];
+  subtotals: {
+    key: string;
+    label: string;
+    group_id?: string;
+    group_name?: string;
+    contribution: number;
+    percent: number;
+  }[];
 };
 type StackedData = { index: string[]; series: { key: string; values: number[] }[] };
 type DatasetMeta = {
@@ -129,6 +137,7 @@ export default function AnalysisPage() {
   const [stackedError, setStackedError] = useState<string | null>(null);
   const dateRangeInitializedRef = useRef(false);
   const [highlightedKey, setHighlightedKey] = useState<string | null>(null);
+  const [chartSeries, setChartSeries] = useState<Record<string, any>[]>([]);
 
   useEffect(() => {
     if (timeColumnDefault) {
@@ -353,6 +362,33 @@ export default function AnalysisPage() {
     downloadBlob(blob, "analysis-summary.xlsx");
   };
 
+  const downloadSummaryTable = async () => {
+    if (!selectedDataset || !selectedModel) {
+      toast.error("Select a dataset and model first");
+      return;
+    }
+    const payload: Record<string, unknown> = {
+      dataset_id: selectedDataset,
+      model_id: selectedModel,
+      include_intercept: includeBaseline,
+      group_mode: tableView,
+    };
+    if (dateRange.start) payload.start_date = dateRange.start;
+    if (dateRange.end) payload.end_date = dateRange.end;
+    try {
+      const res = await fetch(`${API_URL}/analysis/summary/export`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      const blob = await res.blob();
+      downloadBlob(blob, "summary-table.xlsx");
+    } catch (err: any) {
+      toast.error(err?.message || "Failed to export summary table");
+    }
+  };
+
   const downloadStacked = async () => {
     if (!selectedModel || !timeCol || timeCol === TIME_COLUMN_PLACEHOLDER) return;
     const params = new URLSearchParams({
@@ -453,24 +489,28 @@ export default function AnalysisPage() {
 
 
   const groupedSeries = useMemo(() => {
-
     if (!stacked) return [];
-
     return stacked.index.map((label, idx) => {
-
       const row: Record<string, any> = { period: label };
-
       sortedSeries.forEach((series) => {
-
         row[series.key] = series.values[idx];
-
       });
-
       return row;
-
     });
-
   }, [stacked, sortedSeries]);
+
+  useEffect(() => {
+    if (!stacked || groupedSeries.length === 0) {
+      setChartSeries([]);
+      return;
+    }
+    setChartSeries((prev) => {
+      if (prev.length !== groupedSeries.length) {
+        return groupedSeries;
+      }
+      return prev.map((row, idx) => ({ ...row, ...groupedSeries[idx] }));
+    });
+  }, [stacked, groupedSeries]);
 
 
 
@@ -505,40 +545,94 @@ export default function AnalysisPage() {
     summary?.subgroups?.some((sg: any) => sg.subgroup_id && sg.subgroup_id !== "baseline") ?? false;
 
 
+  
+  const { tableRows, subtotalRows } = useMemo(() => {
 
-  const tableRows = useMemo(() => {
+    if (!summary) {
 
-    if (!summary) return [];
-
-    if (tableView === "group") return summary.groups;
-
-    if (tableView === "group_subgroup") {
-
-      if (hasSubgroups) return summary.subgroups;
-
-      return summary.groups.map((g: any, idx: number) => ({
-
-        subgroup_id: `group-fallback-${g.group_id ?? idx}`,
-
-        subgroup_name: DASH,
-
-        group_id: g.group_id,
-
-        group_name: g.group_name,
-
-        contribution: g.contribution,
-
-        percent: g.percent,
-
-      }));
+      return { tableRows: [], subtotalRows: [] };
 
     }
 
-    return summary.variables;
+    let baseRows: any[] = [];
+
+    if (tableView === "group") {
+
+      baseRows = summary.groups;
+
+    } else if (tableView === "group_subgroup") {
+
+      if (hasSubgroups) {
+
+        baseRows = summary.subgroups;
+
+      } else {
+
+        baseRows = summary.groups.map((g: any, idx: number) => ({
+
+          subgroup_id: `group-fallback-${g.group_id ?? idx}`,
+
+          subgroup_name: DASH,
+
+          group_id: g.group_id,
+
+          group_name: g.group_name,
+
+          contribution: g.contribution,
+
+          percent: g.percent,
+
+        }));
+
+      }
+
+    } else {
+
+      baseRows = summary.variables;
+
+    }
+
+    const subtotals =
+
+      summary.subtotals?.map((item) => {
+
+        const label = item.label || item.group_name || DASH;
+
+        return {
+
+          group_id: item.group_id ?? `subtotal-${item.key}`,
+
+          group_name: label,
+
+          subgroup_id: tableView !== "group" ? `subtotal-${item.key}-sub` : undefined,
+
+          subgroup_name: tableView !== "group" ? DASH : undefined,
+
+          name: tableView === "variable" ? label : undefined,
+
+          contribution: item.contribution,
+
+          percent: item.percent,
+
+          __isSubtotal: true,
+
+          key: item.key,
+
+        };
+
+      }) ?? [];
+
+    return { tableRows: baseRows, subtotalRows: subtotals };
 
   }, [summary, tableView, hasSubgroups]);
 
   const baselineGroup = summary?.groups.find((g: any) => g.group_id === "baseline");
+
+  const summaryColumnCount =
+    1 +
+    (tableView !== "group" ? 1 : 0) +
+    (tableView === "variable" ? 1 : 0) +
+    2;
 
   return (
     <section className="space-y-6">
@@ -628,22 +722,29 @@ export default function AnalysisPage() {
         ))}
       </div>
 
+      <div className="my-6 border-t border-[var(--color-border)]" />
+
       <Card className="space-y-4">
         <CardHeader title="Summary Table" subtitle="Variable contributions and group mapping" />
-        <div className="flex flex-wrap gap-3 text-sm">
-          <label className="flex items-center gap-2">
-            <input type="checkbox" checked={includeBaseline} onChange={(e) => setIncludeBaseline(e.target.checked)} />
-            Include baseline
-          </label>
-          <select
-            className="rounded-full border border-[var(--color-border)] px-3 py-1.5 bg-transparent"
-            value={tableView}
-            onChange={(e) => setTableView(e.target.value as any)}
-          >
-            <option value="group">Group</option>
-            <option value="group_subgroup">Group / Subgroup</option>
-            <option value="variable">Group / Subgroup / Variable</option>
-          </select>
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex flex-wrap gap-3 text-sm">
+            <label className="flex items-center gap-2">
+              <input type="checkbox" checked={includeBaseline} onChange={(e) => setIncludeBaseline(e.target.checked)} />
+              Include baseline
+            </label>
+            <select
+              className="rounded-full border border-[var(--color-border)] px-3 py-1.5 bg-transparent"
+              value={tableView}
+              onChange={(e) => setTableView(e.target.value as any)}
+            >
+              <option value="group">Group</option>
+              <option value="group_subgroup">Group / Subgroup</option>
+              <option value="variable">Group / Subgroup / Variable</option>
+            </select>
+          </div>
+          <Button variant="ghost" onClick={downloadSummaryTable} disabled={!summary}>
+            Export Excel
+          </Button>
         </div>
         {summary ? (
           <div className="overflow-auto max-h-[420px]">
@@ -659,14 +760,44 @@ export default function AnalysisPage() {
               </thead>
               <tbody>
                 {tableRows.map((row: any, idx: number) => (
-                  <tr key={`${row.group_id || row.subgroup_id || row.name}-${idx}`} className="odd:bg-transparent even:bg-[var(--color-border)]/20">
+                  <tr
+                    key={`${row.group_id || row.subgroup_id || row.name}-${idx}`}
+                    className="odd:bg-transparent even:bg-[var(--color-border)]/20"
+                  >
                     <td className="px-2 py-2">{row.group_name || DASH}</td>
                     {tableView !== "group" && <td className="px-2 py-2">{row.subgroup_name || DASH}</td>}
                     {tableView === "variable" && <td className="px-2 py-2">{row.name}</td>}
                     <td className="px-2 py-2">{formatNumber(row.contribution)}</td>
-                    <td className="px-2 py-2">{row.percent != null ? `${percentFormatter.format(row.percent)}%` : percentOfTotal(row.contribution)}</td>
+                    <td className="px-2 py-2">
+                      {row.percent != null
+                        ? `${percentFormatter.format(row.percent)}%`
+                        : percentOfTotal(row.contribution)}
+                    </td>
                   </tr>
                 ))}
+                {subtotalRows.length > 0 && (
+                  <>
+                    <tr>
+                      <td colSpan={summaryColumnCount} className="pt-2 border-t border-[var(--color-border)]" />
+                    </tr>
+                    {subtotalRows.map((row: any) => (
+                      <tr
+                        key={`subtotal-${row.key}`}
+                        className="bg-[var(--color-border)]/30 font-semibold text-[var(--color-foreground)]"
+                      >
+                        <td className="px-2 py-2">{row.group_name || row.label || DASH}</td>
+                        {tableView !== "group" && <td className="px-2 py-2">{row.subgroup_name || DASH}</td>}
+                        {tableView === "variable" && <td className="px-2 py-2">{row.name || DASH}</td>}
+                        <td className="px-2 py-2">{formatNumber(row.contribution)}</td>
+                        <td className="px-2 py-2">
+                          {row.percent != null
+                            ? `${percentFormatter.format(row.percent)}%`
+                            : percentOfTotal(row.contribution)}
+                        </td>
+                      </tr>
+                    ))}
+                  </>
+                )}
               </tbody>
             </table>
           </div>
@@ -742,74 +873,72 @@ export default function AnalysisPage() {
             Export Excel
           </Button>
         </div>
-        {stackedLoading && (
-          <p className="text-xs text-[var(--color-muted)]">Loading contributions…</p>
-        )}
-        {stackedError && !stackedLoading && (
-          <p className="text-xs text-red-500">Couldn’t load stacked contributions. Please try again.</p>
-        )}
-        {!stackedLoading && !stackedError && stacked && groupedSeries.length > 0 ? (
-          <div className="h-96 overflow-visible pl-4">
-            <ResponsiveContainer width="100%" height="100%">
-              <BarChart
-                data={groupedSeries}
-                stackOffset={stackOffset}
-                margin={{ top: 10, right: 24, left: 64, bottom: 16 }}
-                onMouseLeave={() => setHighlightedKey(null)}
-                onMouseMove={(state: any) => {
-                  const activeKey = state?.activePayload?.[0]?.dataKey;
-                  setHighlightedKey(
-                    typeof activeKey === "string"
-                      ? activeKey
-                      : activeKey != null
-                      ? String(activeKey)
-                      : null
-                  );
-                }}
-              >
-                <CartesianGrid strokeDasharray="3 3" />
-                <XAxis dataKey="period" tickMargin={8} />
-                <YAxis
-                  tickMargin={12}
-                  tickFormatter={(value) => formatStackedValue(value)}
-                  tick={{ dx: -4 }}
-                />
-                <Tooltip
-                  content={
-                    <StackChartTooltip
-                      percentMode={asPercent}
-                      onSeriesHover={setHighlightedKey}
-                    />
+        <div
+          className={`h-96 overflow-visible pl-4 transition-opacity duration-300 ${
+            stackedLoading ? "opacity-40 pointer-events-none" : "opacity-100"
+          }`}
+        >
+          <ResponsiveContainer width="100%" height="100%">
+            <BarChart
+              data={chartSeries.length ? chartSeries : [{ period: "" }]}
+              stackOffset={stackOffset}
+              margin={{ top: 10, right: 24, left: 64, bottom: 16 }}
+              onMouseLeave={() => setHighlightedKey(null)}
+              onMouseMove={(state: any) => {
+                const activeKey = state?.activePayload?.[0]?.dataKey;
+                setHighlightedKey(
+                  typeof activeKey === "string"
+                    ? activeKey
+                    : activeKey != null
+                    ? String(activeKey)
+                    : null
+                );
+              }}
+            >
+              <CartesianGrid strokeDasharray="3 3" />
+              <XAxis dataKey="period" tickMargin={8} />
+              <YAxis
+                tickMargin={12}
+                tickFormatter={(value) => formatStackedValue(value)}
+                tick={{ dx: -4 }}
+              />
+              <Tooltip
+                content={
+                  <StackChartTooltip percentMode={asPercent} onSeriesHover={setHighlightedKey} />
+                }
+              />
+              <Legend />
+              {sortedSeries.map((series) => (
+                <Bar
+                  key={series.key}
+                  dataKey={series.key}
+                  stackId={viewMode === "stacked" ? "a" : undefined}
+                  fill={colorFor(series.key)}
+                  stroke={colorFor(series.key)}
+                  fillOpacity={
+                    highlightedKey && highlightedKey !== series.key ? 0.25 : 1
                   }
+                  strokeOpacity={
+                    highlightedKey && highlightedKey !== series.key ? 0.4 : 1
+                  }
+                  isAnimationActive
+                  animationDuration={450}
+                  animationEasing="ease-in-out"
                 />
-                <Legend />
-                {sortedSeries.map((series) => (
-                  <Bar
-                    key={series.key}
-                    dataKey={series.key}
-                    stackId={viewMode === "stacked" ? "a" : undefined}
-                    fill={colorFor(series.key)}
-                    stroke={colorFor(series.key)}
-                    fillOpacity={
-                      highlightedKey && highlightedKey !== series.key ? 0.25 : 1
-                    }
-                    strokeOpacity={
-                      highlightedKey && highlightedKey !== series.key ? 0.4 : 1
-                    }
-                  />
-                ))}
-              </BarChart>
-            </ResponsiveContainer>
-          </div>
-        ) : (
-          !stackedLoading &&
-          !stackedError && (
-            <p className="text-sm text-[var(--color-muted)]">
-              {readyForStacked
-                ? "No data for the selected filters."
-                : "Select a dataset, model, and time column to view stacked contributions."}
-            </p>
-          )
+              ))}
+            </BarChart>
+          </ResponsiveContainer>
+        </div>
+        {stackedError && !stackedLoading && (
+          <p className="text-xs text-red-500">Couldn&rsquo;t load stacked contributions. Please try again.</p>
+        )}
+        {!stackedError && !stackedLoading && chartSeries.length === 0 && readyForStacked && (
+          <p className="text-sm text-[var(--color-muted)]">No data for the selected filters.</p>
+        )}
+        {!readyForStacked && (
+          <p className="text-sm text-[var(--color-muted)]">
+            Select a dataset, model, and time column to view stacked contributions.
+          </p>
         )}
       </Card>
     </section>

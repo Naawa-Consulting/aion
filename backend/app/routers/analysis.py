@@ -13,6 +13,13 @@ from sqlmodel import Session, select
 
 from ..db import get_session
 from ..models import Dataset, Model, ModelMetrics, Variable, Subgroup, Group
+from ..schemas import SummaryTableExportRequest
+from ..services.analysis import (
+    AnalysisCacheKey,
+    compute_contributions,
+    get_cached_view,
+    set_cached_view,
+)
 from ..utils.datasets import load_dataset_frame
 
 
@@ -26,6 +33,10 @@ def _parse_date(value: Optional[str]) -> Optional[pd.Timestamp]:
     if pd.isna(ts):
         raise HTTPException(status_code=400, detail=f"Invalid date: {value}")
     return ts
+
+
+def _ts_key(ts: Optional[pd.Timestamp]) -> str:
+    return ts.isoformat() if ts is not None else ""
 
 
 def _apply_date_filter(
@@ -137,40 +148,72 @@ def summary(
             raise HTTPException(
                 status_code=400, detail="No rows available for the selected date range"
             )
+    if filtered_df is None:
+        filtered_df = work
+
+    start_key = _ts_key(start_ts)
+    end_key = _ts_key(end_ts)
+    summary_cache_key = AnalysisCacheKey(
+        dataset_id=ds.id,
+        model_id=m.id,
+        start=start_key,
+        end=end_key,
+        view="summary",
+        extra=(include_intercept, as_percent),
+    )
+    cached_summary = get_cached_view(summary_cache_key)
+    if cached_summary is not None:
+        return cached_summary
+
+    time_field = getattr(ds, "time_variable", None)
+    contrib_result = compute_contributions(
+        dataset_id=ds.id,
+        model_id=m.id,
+        df=filtered_df,
+        time_column=time_field,
+        start=start_ts,
+        end=end_ts,
+        params=params,
+        predictors=list(X.columns),
+    )
+
     var_map, sg_map, g_map = _group_maps(session, ds.id)
     other_label = "Other"
     other_group_key = "__other__"
     other_sub_key = "__other_sub__"
 
-    if filtered_df is None:
-        filtered_df = work
-
     rows = []
     group_totals: Dict[str, float] = {}
     subgroup_totals: Dict[str, float] = {}
-    contributions: Dict[str, float] = {}
-    source_df = filtered_df
-    total_variables = 0.0
+    per_var_totals = contrib_result.per_variable_totals
+    total_variables = float(sum(per_var_totals.values()))
+    intercept = contrib_result.baseline_contribution if include_intercept else 0.0
+    total_contribution = float(total_variables + intercept)
+
+    def percent(value: float) -> float:
+        return float((value / total_contribution) * 100) if total_contribution else 0.0
+
+    source_df = contrib_result.frame
+
     for name in X.columns:
-        coef = float(params.get(name, 0.0))
-        if name not in source_df.columns:
+        if name not in per_var_totals:
             continue
+        coef = float(params.get(name, 0.0))
         series = pd.to_numeric(source_df[name], errors="coerce").fillna(0.0)
-        contrib = float((series * coef).sum())
-        contributions[name] = contrib
-        total_variables += contrib
+        contrib = float(per_var_totals.get(name, 0.0))
         mapping = var_map.get(name, {})
         sg_id = mapping.get("subgroup_id")
         gid = mapping.get("group_id")
         sg = sg_map.get(sg_id) if sg_id else None
         g = g_map.get(gid) if gid else (g_map.get(sg.group_id) if sg else None)
-        # Fallback: uncategorized variables are mapped to "Other" for reporting
+
         if sg:
             subgroup_id = sg.id
             subgroup_name = sg.name
         else:
             subgroup_id = other_sub_key
             subgroup_name = other_label
+
         if g:
             group_id = g.id
             group_name = g.name
@@ -181,6 +224,7 @@ def summary(
         else:
             group_id = other_group_key
             group_name = other_label
+
         rows.append(
             {
                 "name": name,
@@ -193,23 +237,16 @@ def summary(
                 "group_name": group_name,
             }
         )
+
         subgroup_totals[subgroup_id] = subgroup_totals.get(subgroup_id, 0.0) + contrib
         group_totals[group_id] = group_totals.get(group_id, 0.0) + contrib
-
-    intercept_beta = float(params.get("const", 0.0))
-    n_rows = len(source_df)
-    intercept = intercept_beta * n_rows if include_intercept else 0.0
-    total_contribution = float(total_variables + intercept)
-
-    def percent(value: float) -> float:
-        return float((value / total_contribution) * 100) if total_contribution else 0.0
 
     baseline_entry = None
     if include_intercept:
         baseline_entry = {
             "name": "baseline",
-            "coef": intercept_beta,
-            "mean": float(n_rows),
+            "coef": contrib_result.intercept_value,
+            "mean": float(len(source_df)),
             "contribution": intercept,
             "percent": percent(intercept),
             "group_id": "baseline",
@@ -233,6 +270,33 @@ def summary(
     for row in rows:
         row["value"] = float(row["contribution"])
         row["percent"] = percent(row["contribution"])
+
+    def _subtotal_entry(key: str, label: str, amount: float) -> dict[str, object]:
+        return {
+            "row_type": "subtotal",
+            "key": key,
+            "label": label,
+            "group_id": f"subtotal-{key}",
+            "group_name": label,
+            "subgroup_id": None,
+            "subgroup_name": None,
+            "name": None,
+            "contribution": float(amount),
+            "percent": percent(amount),
+        }
+
+    marketing_total = sum(
+        row["contribution"]
+        for row in rows
+        if isinstance(row.get("group_name"), str)
+        and row["group_name"].strip().lower() == "marketing"
+    )
+    other_total = sum(
+        row["contribution"]
+        for row in rows
+        if row.get("group_name") == other_label
+    )
+    baseline_total = float(intercept)
 
     group_rows = [
         {
@@ -302,7 +366,13 @@ def summary(
     non_baseline_subgroups.sort(key=lambda row: abs(row["contribution"]), reverse=True)
     subgroup_rows = non_baseline_subgroups + baseline_subgroups
 
-    return {
+    subtotals = [
+        _subtotal_entry("marketing", "∑ Marketing", marketing_total),
+        _subtotal_entry("baseline", "∑ Baseline", baseline_total),
+        _subtotal_entry("other", "∑ Other", other_total),
+    ]
+
+    response = {
         "model": {
             "id": m.id,
             "name": m.name,
@@ -317,7 +387,10 @@ def summary(
         "variables": rows,
         "groups": group_rows,
         "subgroups": subgroup_rows,
+        "subtotals": subtotals,
     }
+    set_cached_view(summary_cache_key, response)
+    return response
 
 
 @router.get("/{model_id}/stacked")
@@ -358,60 +431,58 @@ def stacked(
             raise HTTPException(
                 status_code=400,
                 detail="No complete rows available for the selected date range",
-            )
+        ) 
         work = numeric
+    if filtered_df is None:
+        filtered_df = work
+
+    start_key = _ts_key(start_ts)
+    end_key = _ts_key(end_ts)
+    stacked_cache_key = AnalysisCacheKey(
+        dataset_id=ds.id,
+        model_id=m.id,
+        start=start_key,
+        end=end_key,
+        view="stacked",
+        extra=(time_col, freq, by, include_intercept, as_percent),
+    )
+    cached_stacked = get_cached_view(stacked_cache_key)
+    if cached_stacked is not None:
+        return cached_stacked
+
+    contrib_result = compute_contributions(
+        dataset_id=ds.id,
+        model_id=m.id,
+        df=filtered_df,
+        time_column=time_col,
+        start=start_ts,
+        end=end_ts,
+        params=params,
+        predictors=list(X.columns),
+    )
+
     var_map, sg_map, g_map = _group_maps(session, ds.id)
-
-    if time_col not in work.columns:
-        if time_col in filtered_df.columns:
-            original = filtered_df[[time_col]]
-        else:
-            try:
-                original = load_dataset_frame(ds, columns=[time_col])
-            except Exception as exc:  # pragma: no cover
-                raise HTTPException(
-                    status_code=400, detail=f"time_col error: {exc}"
-                ) from exc
-            if time_col not in original.columns:
-                raise HTTPException(
-                    status_code=400, detail="time_col not found in dataset"
-                )
-        work = work.join(original, how="left")
-
-    if time_col not in work.columns:
-        raise HTTPException(status_code=400, detail="time_col not found in dataset")
-
-    ts = pd.to_datetime(work[time_col], errors="coerce")
-    if ts.isna().all():
-        raise HTTPException(
-            status_code=400, detail="time_col could not be parsed to datetime"
-        )
 
     freq_map = {"day": "D", "week": "W", "month": "M"}
     rule = freq_map.get(freq, "M")
-    periods = ts.dt.to_period(rule).astype(str)
+    periods = contrib_result.time_values.dt.to_period(rule).astype(str)
 
-    # Contributions per variable per row
-    contrib_df = pd.DataFrame(index=work.index)
-    for name in X.columns:
-        coef = float(params.get(name, 0.0))
-        contrib_df[name] = coef * pd.to_numeric(work[name], errors="coerce")
-
-    if include_intercept:
-        contrib_df["__intercept__"] = float(params.get("const", 0.0))
-
-    contrib_df["__period__"] = periods
+    contrib_df = contrib_result.per_row_contributions.copy()
+    if not include_intercept:
+        contrib_df = contrib_df.drop(columns="__intercept__", errors="ignore")
+    contrib_df["__period__"] = periods.reindex(contrib_df.index).astype(str)
 
     other_label = "Other"
     baseline_label = "Baseline"
+
+    predictor_columns = [col for col in contrib_df.columns if col not in {"__period__", "__intercept__"}]
 
     if by == "subgroup":
         # Map variable -> subgroup name or '_unassigned'
         def sg_key(var: str) -> str:
             sid = var_map.get(var, {}).get("subgroup_id")
             return sg_map[sid].name if sid and sid in sg_map else other_label
-
-        rename_map = {var: sg_key(var) for var in X.columns}
+        rename_map = {var: sg_key(var) for var in predictor_columns}
     else:
         # group
         def g_key(var: str) -> str:
@@ -424,14 +495,18 @@ def stacked(
                 return g_map[gid].name if gid in g_map else other_label
             return other_label
 
-        rename_map = {var: g_key(var) for var in X.columns}
+        rename_map = {var: g_key(var) for var in predictor_columns}
 
     if include_intercept:
         rename_map["__intercept__"] = baseline_label
 
+    value_columns = predictor_columns + (
+        ["__intercept__"] if include_intercept and "__intercept__" in contrib_df.columns else []
+    )
+
     melted = contrib_df.melt(
         id_vars=["__period__"],
-        value_vars=list(X.columns) + (["__intercept__"] if include_intercept else []),
+        value_vars=value_columns,
         var_name="key",
         value_name="value",
     )
@@ -454,7 +529,9 @@ def stacked(
         for c in pivot.columns
     ]
 
-    return {"index": index, "series": series}
+    response = {"index": index, "series": series}
+    set_cached_view(stacked_cache_key, response)
+    return response
 
 
 @router.get("/{model_id}/export/summary.xlsx")
@@ -483,6 +560,76 @@ def export_summary(
         buf,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": "attachment; filename=summary.xlsx"},
+    )
+
+
+@router.post("/summary/export")
+def export_summary_table_excel(
+    payload: SummaryTableExportRequest,
+    session: Session = Depends(get_session),
+):
+    data = summary(
+        payload.model_id,
+        payload.include_intercept,
+        False,
+        payload.start_date,
+        payload.end_date,
+        session,
+    )
+    model_info = data["model"]
+    dataset_id = model_info.get("dataset_id")
+    if payload.dataset_id and dataset_id and payload.dataset_id != dataset_id:
+        raise HTTPException(
+            status_code=400, detail="Model does not belong to the selected dataset"
+        )
+
+    mode = payload.group_mode
+    table_rows: List[dict] = []
+    if mode == "group":
+        for row in data["groups"]:
+            table_rows.append(
+                {
+                    "Group": row.get("group_name") or "-",
+                    "Contribution": float(row.get("contribution", 0.0)),
+                    "% of total": float(row.get("percent", 0.0)),
+                }
+            )
+    elif mode == "group_subgroup":
+        for row in data["subgroups"]:
+            table_rows.append(
+                {
+                    "Group": row.get("group_name") or "-",
+                    "Subgroup": row.get("subgroup_name") or "-",
+                    "Contribution": float(row.get("contribution", 0.0)),
+                    "% of total": float(row.get("percent", 0.0)),
+                }
+            )
+    elif mode == "variable":
+        for row in data["variables"]:
+            table_rows.append(
+                {
+                    "Group": row.get("group_name") or "-",
+                    "Subgroup": row.get("subgroup_name") or "-",
+                    "Variable": row.get("name") or "-",
+                    "Contribution": float(row.get("contribution", 0.0)),
+                    "% of total": float(row.get("percent", 0.0)),
+                }
+            )
+    else:
+        raise HTTPException(status_code=400, detail="Invalid group mode")
+
+    df = pd.DataFrame(table_rows)
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, sheet_name="Summary")
+    buf.seek(0)
+    filename = (
+        f"summary_table_{dataset_id or 'dataset'}_{model_info.get('id')}.xlsx"
+    )
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
 
