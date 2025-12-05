@@ -5,6 +5,7 @@ import { toast } from "sonner";
 
 import { Card, CardHeader } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import ScenarioGrid, { type MultipliersMap } from "@/components/predict/ScenarioGrid";
 
 type Dataset = { id: string; display_name: string; columns: { name: string; dtype: string }[] };
 type Model = { id: string; name: string; dataset_id: string; role?: string; is_hero: boolean };
@@ -44,6 +45,8 @@ type Scenario = {
   summary: ScenarioSummary;
 };
 
+const DEFAULT_MULTIPLIER = 1;
+
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
 export default function PredictPage() {
@@ -74,6 +77,15 @@ export default function PredictPage() {
 
   const periodLabels = useMemo(() => buildPeriodLabels(startDate, horizon, freq), [startDate, horizon, freq]);
   const displayPeriods = preview?.periods?.length ? preview.periods : periodLabels;
+  const editablePeriods = displayPeriods.length ? displayPeriods : periodLabels;
+  const gridVariables = useMemo(
+    () => variables.map((variable) => ({ name: variable.name, baselineMean: variable.baseline_mean })),
+    [variables]
+  );
+  const multipliersByVariable = useMemo(
+    () => buildMultipliersFromAdjustments(variables, editablePeriods, adjustments),
+    [variables, editablePeriods, adjustments]
+  );
 
   const fetchDatasets = useCallback(async () => {
     try {
@@ -175,15 +187,12 @@ export default function PredictPage() {
     ensureAdjustmentDefaults(periodLabels, variables, setAdjustments);
   }, [periodLabels, variables]);
 
-  const handleAdjustmentChange = (period: string, variable: string, mode: PeriodValue["mode"], value: number) => {
-    setAdjustments((prev) => {
-      const next = { ...prev };
-      const periodMap = { ...(next[period] || {}) };
-      periodMap[variable] = { mode, value };
-      next[period] = periodMap;
-      return next;
-    });
-  };
+  const handleGridMultipliersChange = useCallback(
+    (nextMultipliers: MultipliersMap) => {
+      setAdjustments(multipliersToAdjustments(nextMultipliers, editablePeriods, variables));
+    },
+    [editablePeriods, variables]
+  );
 
   const handleSaveScenario = async () => {
     if (!selectedModel) {
@@ -354,59 +363,12 @@ export default function PredictPage() {
       <Card className="space-y-4">
         <CardHeader title="Scenario builder" subtitle="Edit multipliers by period and variable" />
         {variables.length ? (
-          <div className="overflow-auto">
-            <table className="min-w-full text-sm">
-              <thead className="bg-[var(--color-bg)]/60">
-                <tr>
-                  <th className="px-3 py-2 text-left">Variable</th>
-                  <th className="px-3 py-2 text-left">Baseline mean</th>
-                  {displayPeriods.map((period) => (
-                    <th key={period} className="px-3 py-2 text-left whitespace-nowrap">
-                      {period}
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {variables.map((variable) => (
-                  <tr key={variable.name} className="odd:bg-transparent even:bg-[var(--color-border)]/20">
-                    <td className="px-3 py-2">{variable.name}</td>
-                    <td className="px-3 py-2">{formatNumber(numberFormatter, variable.baseline_mean)}</td>
-                    {displayPeriods.map((period) => {
-                      const entry = adjustments[period]?.[variable.name];
-                      const mode = entry?.mode || "multiplier";
-                      const value = entry?.value ?? 1;
-                      return (
-                        <td key={`${period}-${variable.name}`} className="px-3 py-2">
-                          <div className="flex items-center gap-1">
-                            <select
-                              className="rounded-md border border-[var(--color-border)] bg-transparent px-2 py-1 text-xs"
-                              value={mode}
-                              onChange={(e) =>
-                                handleAdjustmentChange(period, variable.name, e.target.value as PeriodValue["mode"], value)
-                              }
-                            >
-                              <option value="multiplier">×</option>
-                              <option value="value">Value</option>
-                            </select>
-                            <input
-                              type="number"
-                              step={mode === "multiplier" ? 0.1 : 1}
-                              className="w-24 rounded-md border border-[var(--color-border)] bg-transparent px-2 py-1"
-                              value={value}
-                              onChange={(e) =>
-                                handleAdjustmentChange(period, variable.name, mode, Number(e.target.value) || 0)
-                              }
-                            />
-                          </div>
-                        </td>
-                      );
-                    })}
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+          <ScenarioGrid
+            variables={gridVariables}
+            periods={editablePeriods}
+            multipliers={multipliersByVariable}
+            onMultipliersChange={handleGridMultipliersChange}
+          />
         ) : (
           <p className="text-sm text-[var(--color-muted)]">Select a model to load variables.</p>
         )}
@@ -511,6 +473,61 @@ function labelForDate(value: Date, freq: "day" | "week" | "month") {
     return `${year}-W${String(week).padStart(2, "0")}`;
   }
   return `${value.getFullYear()}-${String(value.getMonth() + 1).padStart(2, "0")}`;
+}
+
+function sanitizeMultiplierValue(value: number | undefined) {
+  const num = Number(value);
+  if (!Number.isFinite(num) || Number.isNaN(num)) return DEFAULT_MULTIPLIER;
+  if (num < 0) return 0;
+  if (num > 10) return 10;
+  return Number(num.toFixed(3));
+}
+
+function buildMultipliersFromAdjustments(
+  variables: VariableRow[],
+  periods: string[],
+  adjustments: Record<string, Record<string, PeriodValue>>
+): MultipliersMap {
+  const result: MultipliersMap = {};
+  const periodList = periods.length ? periods : [];
+  variables.forEach((variable) => {
+    const baseline = Number(variable.baseline_mean ?? 0);
+    const periodValues: Record<string, number> = {};
+    periodList.forEach((period) => {
+      const entry = adjustments[period]?.[variable.name];
+      if (!entry) {
+        periodValues[period] = DEFAULT_MULTIPLIER;
+      } else if (entry.mode === "value") {
+        if (baseline !== 0) {
+          periodValues[period] = sanitizeMultiplierValue(entry.value / baseline);
+        } else {
+          periodValues[period] = sanitizeMultiplierValue(entry.value);
+        }
+      } else {
+        periodValues[period] = sanitizeMultiplierValue(entry.value);
+      }
+    });
+    result[variable.name] = periodValues;
+  });
+  return result;
+}
+
+function multipliersToAdjustments(
+  multipliers: MultipliersMap,
+  periods: string[],
+  variables: VariableRow[]
+): Record<string, Record<string, PeriodValue>> {
+  const next: Record<string, Record<string, PeriodValue>> = {};
+  const periodList = periods.length ? periods : [];
+  periodList.forEach((period) => {
+    const mapping: Record<string, PeriodValue> = {};
+    variables.forEach((variable) => {
+      const value = sanitizeMultiplierValue(multipliers[variable.name]?.[period]);
+      mapping[variable.name] = { mode: "multiplier", value };
+    });
+    next[period] = mapping;
+  });
+  return next;
 }
 
 function getWeekNumber(date: Date) {

@@ -1,6 +1,7 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+@import "react-data-grid/lib/styles.css";
 
 :root {
   --color-bg: #f8fafc;
