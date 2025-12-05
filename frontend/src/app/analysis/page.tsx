@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { TooltipProps } from "recharts";
 import {
   Bar,
   BarChart,
@@ -116,6 +117,7 @@ export default function AnalysisPage() {
   const [groupBy, setGroupBy] = useState<"group" | "subgroup">("group");
   const [asPercent, setAsPercent] = useState(false);
   const [includeBaseline, setIncludeBaseline] = useState(true);
+  const [viewMode, setViewMode] = useState<"stacked" | "grouped">("stacked");
   const [tableView, setTableView] = useState<"group" | "group_subgroup" | "variable">("group");
   const [loading, setLoading] = useState(false);
   const [dateRange, setDateRange] = useState<{ start: string | null; end: string | null }>({
@@ -126,6 +128,7 @@ export default function AnalysisPage() {
   const [stackedLoading, setStackedLoading] = useState(false);
   const [stackedError, setStackedError] = useState<string | null>(null);
   const dateRangeInitializedRef = useRef(false);
+  const [highlightedKey, setHighlightedKey] = useState<string | null>(null);
 
   useEffect(() => {
     if (timeColumnDefault) {
@@ -303,12 +306,27 @@ export default function AnalysisPage() {
     dateRange.end,
   ]);
 
+  const stackDeps = [
+    selectedModel,
+    timeCol,
+    freq,
+    groupBy,
+    includeBaseline,
+    asPercent,
+    dateRange.start,
+    dateRange.end,
+  ];
+
   useEffect(() => {
     if (!selectedModel || !timeCol || timeCol === TIME_COLUMN_PLACEHOLDER) {
       return;
     }
-    fetchStacked();
-  }, [fetchStacked, selectedModel, timeCol]);
+    const handle = setTimeout(() => {
+      fetchStacked();
+    }, 250);
+    return () => clearTimeout(handle);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, stackDeps);
 
   const updateDateField = (field: "start" | "end", rawValue: string) => {
     setDateRange((prev) => {
@@ -397,14 +415,16 @@ export default function AnalysisPage() {
 
   const readyForStacked = Boolean(selectedModel && timeCol && timeCol !== TIME_COLUMN_PLACEHOLDER);
 
-  const formatStackedValue = (value: number | string | null | undefined) => {
+  const formatStackedValue = useCallback((value: number | string | null | undefined) => {
     const num = Number(value);
     if (!Number.isFinite(num)) {
-      return asPercent ? "0.00%" : "0.00";
+      return asPercent ? "0%" : "0";
     }
-    const formatted = num.toFixed(2);
-    return asPercent ? `${formatted}%` : formatted;
-  };
+    if (asPercent) {
+      return `${num.toFixed(1)}%`;
+    }
+    return Math.round(num).toLocaleString();
+  }, [asPercent]);
 
 
 
@@ -454,7 +474,7 @@ export default function AnalysisPage() {
 
 
 
-  const stackOffset = "sign";
+  const stackOffset = viewMode === "stacked" ? "sign" : undefined;
 
 
 
@@ -656,7 +676,7 @@ export default function AnalysisPage() {
       </Card>
 
       <Card className="space-y-4">
-        <CardHeader title="Stacked contributions over time" subtitle="Stride through periods and groups" />
+        <CardHeader title="Contributions over time" subtitle="Stride through periods and groups" />
         <div className="flex flex-wrap gap-3 text-sm">
           <select
             className="rounded-full border border-[var(--color-border)] px-3 py-1.5 bg-transparent"
@@ -691,13 +711,33 @@ export default function AnalysisPage() {
             <input type="checkbox" checked={asPercent} onChange={(e) => setAsPercent(e.target.checked)} />
             Percent mode
           </label>
-          <Button
-            variant="secondary"
-            onClick={fetchStacked}
-            disabled={!readyForStacked || stackedLoading}
-          >
-            {stackedLoading ? "Loading..." : "Generate"}
-          </Button>
+          <div className="flex items-center gap-2">
+            <span className="text-xs font-medium text-[var(--color-muted)]">View</span>
+            <div className="inline-flex overflow-hidden rounded-full border border-[var(--color-border)] text-xs">
+              <button
+                type="button"
+                className={`px-3 py-1 transition ${
+                  viewMode === "stacked"
+                    ? "bg-[var(--color-foreground)] text-white"
+                    : "text-[var(--color-muted)]"
+                }`}
+                onClick={() => setViewMode("stacked")}
+              >
+                Stacked
+              </button>
+              <button
+                type="button"
+                className={`px-3 py-1 transition ${
+                  viewMode === "grouped"
+                    ? "bg-[var(--color-foreground)] text-white"
+                    : "text-[var(--color-muted)]"
+                }`}
+                onClick={() => setViewMode("grouped")}
+              >
+                Grouped
+              </button>
+            </div>
+          </div>
           <Button variant="ghost" onClick={downloadStacked} disabled={!stacked || stackedLoading}>
             Export Excel
           </Button>
@@ -709,21 +749,53 @@ export default function AnalysisPage() {
           <p className="text-xs text-red-500">Couldn’t load stacked contributions. Please try again.</p>
         )}
         {!stackedLoading && !stackedError && stacked && groupedSeries.length > 0 ? (
-          <div className="h-96">
-            <ResponsiveContainer>
-              <BarChart data={groupedSeries} stackOffset={stackOffset}>
+          <div className="h-96 overflow-visible pl-4">
+            <ResponsiveContainer width="100%" height="100%">
+              <BarChart
+                data={groupedSeries}
+                stackOffset={stackOffset}
+                margin={{ top: 10, right: 24, left: 64, bottom: 16 }}
+                onMouseLeave={() => setHighlightedKey(null)}
+                onMouseMove={(state: any) => {
+                  const activeKey = state?.activePayload?.[0]?.dataKey;
+                  setHighlightedKey(
+                    typeof activeKey === "string"
+                      ? activeKey
+                      : activeKey != null
+                      ? String(activeKey)
+                      : null
+                  );
+                }}
+              >
                 <CartesianGrid strokeDasharray="3 3" />
-                <XAxis dataKey="period" />
-                <YAxis tickFormatter={(value) => formatStackedValue(value)} />
-                <Tooltip formatter={(value) => formatStackedValue(value)} />
+                <XAxis dataKey="period" tickMargin={8} />
+                <YAxis
+                  tickMargin={12}
+                  tickFormatter={(value) => formatStackedValue(value)}
+                  tick={{ dx: -4 }}
+                />
+                <Tooltip
+                  content={
+                    <StackChartTooltip
+                      percentMode={asPercent}
+                      onSeriesHover={setHighlightedKey}
+                    />
+                  }
+                />
                 <Legend />
                 {sortedSeries.map((series) => (
                   <Bar
                     key={series.key}
                     dataKey={series.key}
-                    stackId="a"
+                    stackId={viewMode === "stacked" ? "a" : undefined}
                     fill={colorFor(series.key)}
                     stroke={colorFor(series.key)}
+                    fillOpacity={
+                      highlightedKey && highlightedKey !== series.key ? 0.25 : 1
+                    }
+                    strokeOpacity={
+                      highlightedKey && highlightedKey !== series.key ? 0.4 : 1
+                    }
                   />
                 ))}
               </BarChart>
@@ -762,3 +834,74 @@ function downloadBlob(blob: Blob, filename: string) {
 }
 
 
+const formatStackedTooltipValue = (value: number | string | null | undefined, asPercent: boolean) => {
+  const num = Number(value);
+  if (!Number.isFinite(num)) {
+    return asPercent ? "0%" : "0";
+  }
+  if (asPercent) {
+    return num.toFixed(2);
+  }
+  return num.toFixed(2);
+};
+
+type CustomTooltipProps = TooltipProps<number, string> & {
+  percentMode: boolean;
+  onSeriesHover?: (key: string | null) => void;
+};
+
+const StackChartTooltip: React.FC<CustomTooltipProps> = ({
+  active,
+  payload,
+  label,
+  percentMode,
+  onSeriesHover,
+}) => {
+  if (!active || !payload || payload.length === 0) {
+    onSeriesHover?.(null);
+    return null;
+  }
+  const total = payload.reduce((sum, entry) => sum + (entry.value ?? 0), 0);
+  const formatValue = (value: number) =>
+    Number.isFinite(value)
+      ? value.toLocaleString(undefined, {
+          minimumFractionDigits: 2,
+          maximumFractionDigits: 2,
+        })
+      : "0.00";
+
+  return (
+    <div className="rounded-lg border border-black/10 bg-white/95 px-3 py-2 shadow-lg">
+      <div className="mb-1 text-xs font-semibold text-[var(--color-foreground)]">{label}</div>
+      <div className="space-y-1">
+        {payload.map((entry) => {
+          const key = entry.dataKey?.toString() ?? "";
+          const value = entry.value ?? 0;
+          const pct = total ? (value / total) * 100 : 0;
+          return (
+            <div key={key} className="flex items-center justify-between text-xs text-[var(--color-foreground)]">
+              <span className="inline-flex items-center gap-1">
+                <span
+                  className="inline-block h-2 w-2 rounded"
+                  style={{ backgroundColor: entry.color || entry.fill }}
+                />
+                {entry.name ?? key}
+              </span>
+              <span className="font-medium">
+                {formatValue(value)}
+                {percentMode && ` (${pct.toFixed(1)}%)`}
+              </span>
+            </div>
+          );
+        })}
+      </div>
+      <div className="mt-1 flex justify-between border-t border-[var(--color-border)] pt-1 text-xs font-semibold text-[var(--color-foreground)]">
+        <span>Total</span>
+        <span>
+          {formatValue(total)}
+          {percentMode && " (100%)"}
+        </span>
+      </div>
+    </div>
+  );
+};

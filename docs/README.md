@@ -99,3 +99,15 @@ This repository contains a modular analytics application with a Next.js frontend
 
 - Harden validations (e.g., scenario editing, limits, better error states)
 - Add PNG exports for charts if needed
+- Module 1: Hidde variables
+- Module 1: Set up dependent variable
+- Module 2: Correlations must be vs dependent variable
+- Module 2: Adstock optimization
+- Module 3: Modelling animation
+- Module 4: Set up conversion rate / template download / upload
+- Module 4: Set up average price / template download / upload
+- Module 4: Set up costs by group, subgroup and variable / template download / upload
+- Module 4: ROAS calculation, card and visualization
+- Module 5: Forecasting editable table
+- Module 6: Configuration Module (palette color, users)
+- Module 7: Profile (password)
