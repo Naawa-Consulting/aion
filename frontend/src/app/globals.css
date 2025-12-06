@@ -49,6 +49,10 @@ body {
   color: #fff;
 }
 
+.scenario-grid-cell-selected {
+  background: var(--color-accent-soft);
+}
+
 .glass-card {
   background: var(--color-card);
   border-radius: var(--radius-lg);

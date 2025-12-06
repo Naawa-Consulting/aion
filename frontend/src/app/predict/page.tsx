@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useCallback, useEffect, useMemo, useState } from "react";
+import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, ResponsiveContainer, Legend } from "recharts";
 import { toast } from "sonner";
 
 import { Card, CardHeader } from "@/components/ui/card";
@@ -8,7 +9,14 @@ import { Button } from "@/components/ui/button";
 import ScenarioGrid, { type MultipliersMap } from "@/components/predict/ScenarioGrid";
 
 type Dataset = { id: string; display_name: string; columns: { name: string; dtype: string }[] };
-type Model = { id: string; name: string; dataset_id: string; role?: string; is_hero: boolean };
+type Model = {
+  id: string;
+  name: string;
+  dataset_id: string;
+  role?: string;
+  is_hero: boolean;
+  y_var?: string;
+};
 
 type VariableRow = {
   name: string;
@@ -69,8 +77,16 @@ export default function PredictPage() {
   const [scenarioName, setScenarioName] = useState("Scenario 1");
   const [selectedScenario, setSelectedScenario] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const [editMode, setEditMode] = useState<"multipliers" | "absolute">("multipliers");
+  const [heroSeries, setHeroSeries] = useState<ScenarioSeriesPoint[]>([]);
+  const [heroLoading, setHeroLoading] = useState(false);
+  const [showProjectedTable, setShowProjectedTable] = useState(false);
 
   const numberFormatter = useMemo(
+    () => new Intl.NumberFormat(undefined, { minimumFractionDigits: 1, maximumFractionDigits: 1 }),
+    []
+  );
+  const percentFormatter = useMemo(
     () => new Intl.NumberFormat(undefined, { minimumFractionDigits: 1, maximumFractionDigits: 1 }),
     []
   );
@@ -86,6 +102,12 @@ export default function PredictPage() {
     () => buildMultipliersFromAdjustments(variables, editablePeriods, adjustments),
     [variables, editablePeriods, adjustments]
   );
+  const selectedModelInfo = useMemo(
+    () => models.find((model) => model.id === selectedModel),
+    [models, selectedModel]
+  );
+  const dependentLabel = selectedModelInfo?.y_var ?? "Y";
+  const freqLabel = freq === "day" ? "day" : freq === "week" ? "week" : "month";
 
   const fetchDatasets = useCallback(async () => {
     try {
@@ -106,24 +128,33 @@ export default function PredictPage() {
       const res = await fetch(`${API_URL}/models?dataset_id=${datasetId}`);
       if (!res.ok) throw new Error();
       const data = await res.json();
-      setModels(data);
-      const hero = data.find((m: any) => m.role === "hero" || m.is_hero) || data[0];
+      const normalized: Model[] = data.map((m: any) => ({
+        id: m.id,
+        name: m.name,
+        dataset_id: m.dataset_id,
+        role: m.role,
+        is_hero: Boolean(m.is_hero),
+        y_var: m.y_var,
+      }));
+      setModels(normalized);
+      const hero = normalized.find((m) => m.role === "hero" || m.is_hero) || normalized[0];
       if (hero) setSelectedModel(hero.id);
     } catch {
       toast.error("Failed to load models");
     }
   }, []);
 
-  const fetchPreview = useCallback(async () => {
-    if (!selectedModel) return;
-    setPreviewLoading(true);
-    try {
+  const requestScenarioSummary = useCallback(
+    async (customAdjustments: Record<string, Record<string, PeriodValue>>) => {
+      if (!selectedModel) {
+        throw new Error("Select a model first");
+      }
       const payload = {
         model_id: selectedModel,
         horizon,
         start_date: startDate,
         freq,
-        adjustments,
+        adjustments: customAdjustments,
       };
       const res = await fetch(`${API_URL}/predict/scenarios/preview`, {
         method: "POST",
@@ -132,13 +163,23 @@ export default function PredictPage() {
       });
       if (!res.ok) throw new Error(await res.text());
       const data: ScenarioSummary = await res.json();
+      return data;
+    },
+    [selectedModel, horizon, startDate, freq]
+  );
+
+  const fetchPreview = useCallback(async () => {
+    if (!selectedModel) return;
+    setPreviewLoading(true);
+    try {
+      const data = await requestScenarioSummary(adjustments);
       setPreview(data);
     } catch (error: any) {
       toast.error(error?.message || "Preview failed");
     } finally {
       setPreviewLoading(false);
     }
-  }, [selectedModel, horizon, startDate, freq, adjustments]);
+  }, [selectedModel, adjustments, requestScenarioSummary]);
 
   const fetchBaselineVariables = useCallback(async (modelId: string) => {
     try {
@@ -187,12 +228,39 @@ export default function PredictPage() {
     ensureAdjustmentDefaults(periodLabels, variables, setAdjustments);
   }, [periodLabels, variables]);
 
+  useEffect(() => {
+    if (!selectedModel || !variables.length || !editablePeriods.length) {
+      setHeroSeries([]);
+      return;
+    }
+    const baselineAdjustments = buildBaselineAdjustments(editablePeriods, variables);
+    setHeroLoading(true);
+    requestScenarioSummary(baselineAdjustments)
+      .then((data) => setHeroSeries(data.series || []))
+      .catch(() => setHeroSeries([]))
+      .finally(() => setHeroLoading(false));
+  }, [selectedModel, editablePeriods, variables, requestScenarioSummary]);
+
   const handleGridMultipliersChange = useCallback(
     (nextMultipliers: MultipliersMap) => {
       setAdjustments(multipliersToAdjustments(nextMultipliers, editablePeriods, variables));
     },
     [editablePeriods, variables]
   );
+  const handleResetAll = useCallback(() => {
+    if (!window.confirm("Reset scenario to baseline? This will overwrite all current adjustments.")) return;
+    setAdjustments((prev) => {
+      const next: Record<string, Record<string, PeriodValue>> = {};
+      editablePeriods.forEach((period) => {
+        const mapping: Record<string, PeriodValue> = {};
+        variables.forEach((variable) => {
+          mapping[variable.name] = { mode: "multiplier", value: 1 };
+        });
+        next[period] = mapping;
+      });
+      return next;
+    });
+  }, [editablePeriods, variables]);
 
   const handleSaveScenario = async () => {
     if (!selectedModel) {
@@ -245,8 +313,75 @@ export default function PredictPage() {
     }
   };
 
-  const topGroups = preview?.groups?.slice(0, 3) || [];
-  const chartSeries = preview?.series || [];
+  const scenarioSeries = useMemo(() => preview?.series ?? [], [preview?.series]);
+  const groups = preview?.groups ?? [];
+  const baselineContribution =
+    groups.find((group) => group.id === "baseline" || group.name?.toLowerCase() === "baseline")?.value ?? 0;
+  const marketingContribution = groups
+    .filter((group) => group.name && group.name.toLowerCase().includes("marketing"))
+    .reduce((sum, group) => sum + group.value, 0);
+  const otherContribution = groups
+    .filter((group) => !group.id && (!group.name || group.name.toLowerCase() === "other"))
+    .reduce((sum, group) => sum + group.value, 0);
+  const projectedTotal = preview?.total ?? null;
+  const marketingPercent = projectedTotal ? (marketingContribution / projectedTotal) * 100 : 0;
+  const otherPercent = projectedTotal ? (otherContribution / projectedTotal) * 100 : 0;
+  const chartData = useMemo(() => {
+    const map = new Map<string, { hero?: number | null; scenario?: number | null }>();
+    scenarioSeries.forEach((point) => {
+      const entry = map.get(point.period) || {};
+      entry.scenario = point.y_pred;
+      map.set(point.period, entry);
+    });
+    heroSeries.forEach((point) => {
+      const entry = map.get(point.period) || {};
+      entry.hero = point.y_pred;
+      map.set(point.period, entry);
+    });
+    const ordered = displayPeriods.length ? displayPeriods : Array.from(map.keys());
+    return ordered.map((period) => {
+      const entry = map.get(period) || {};
+      return {
+        period,
+        hero: entry.hero ?? null,
+        scenario: entry.scenario ?? null,
+      };
+    });
+  }, [scenarioSeries, heroSeries, displayPeriods]);
+  const hasChartData = chartData.some((row) => row.hero !== null || row.scenario !== null);
+  const renderTimeseriesTooltip = useCallback(
+    ({ active, payload, label }: any) => {
+      if (!active || !payload?.length) return null;
+      return (
+        <div className="rounded-md border bg-white px-3 py-2 text-xs shadow">
+          <p className="font-semibold">{label}</p>
+          {payload.map((item: any) => (
+            <p key={item.dataKey} className="flex items-center justify-between gap-4 capitalize text-[var(--color-muted)]">
+              <span>{item.name}</span>
+              <span className="font-semibold text-[var(--color-foreground)]">
+                {formatNumber(numberFormatter, typeof item.value === "number" ? item.value : Number(item.value))}
+              </span>
+            </p>
+          ))}
+        </div>
+      );
+    },
+    [numberFormatter]
+  );
+  const handleExportTimeseries = useCallback(() => {
+    if (!chartData.length) return;
+    const rows = chartData.map((row) => `${row.period},${row.hero ?? ""},${row.scenario ?? ""}`);
+    const csv = ["Period,Hero,Scenario", ...rows].join("\n");
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `projected_totals_${dependentLabel}.csv`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+  }, [chartData, dependentLabel]);
 
   return (
     <section className="space-y-6">
@@ -341,32 +476,78 @@ export default function PredictPage() {
         </div>
       </Card>
 
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-5">
         <Card padding="sm">
-          <CardHeader title="Projected total" subtitle="Y forecast" />
-          <p className="text-lg font-semibold">{preview ? formatNumber(numberFormatter, preview.total) : "–"}</p>
-        </Card>
-        <Card padding="sm">
-          <CardHeader title="Average per period" subtitle={freq} />
+          <CardHeader title="Projected total" subtitle={`Forecast: ${dependentLabel}`} />
           <p className="text-lg font-semibold">
-            {preview ? formatNumber(numberFormatter, preview.average_per_period) : "–"}
+            {preview ? formatNumber(numberFormatter, preview.total) : "-"}
           </p>
         </Card>
-        {topGroups.map((group) => (
-          <Card key={group.id || group.name} padding="sm">
-            <CardHeader title={group.name || "Group"} subtitle="Contribution" />
-            <p className="text-lg font-semibold">{formatNumber(numberFormatter, group.value)}</p>
-          </Card>
-        ))}
+        <Card padding="sm">
+          <CardHeader title="Average per period" subtitle={freqLabel} />
+          <p className="text-lg font-semibold">
+            {preview ? formatNumber(numberFormatter, preview.average_per_period) : "-"}
+          </p>
+        </Card>
+        <Card padding="sm">
+          <CardHeader title="Baseline" subtitle="Intercept + non-marketing" />
+          <p className="text-lg font-semibold">
+            {preview ? formatNumber(numberFormatter, baselineContribution) : "-"}
+          </p>
+        </Card>
+        <Card padding="sm">
+          <CardHeader title="Marketing" subtitle="Sum of marketing contributions" />
+          <p className="text-lg font-semibold">
+            {preview ? formatNumber(numberFormatter, marketingContribution) : "-"}
+          </p>
+          <p className="text-xs text-[var(--color-muted)]">
+            {preview && projectedTotal ? `${percentFormatter.format(marketingPercent)}% of total` : "-"}
+          </p>
+        </Card>
+        <Card padding="sm">
+          <CardHeader title="Other" subtitle="Residual / ungrouped" />
+          <p className="text-lg font-semibold">
+            {preview ? formatNumber(numberFormatter, otherContribution) : "-"}
+          </p>
+          <p className="text-xs text-[var(--color-muted)]">
+            {preview && projectedTotal ? `${percentFormatter.format(otherPercent)}% of total` : "-"}
+          </p>
+        </Card>
       </div>
 
       <Card className="space-y-4">
         <CardHeader title="Scenario builder" subtitle="Edit multipliers by period and variable" />
+        <div className="flex flex-wrap items-center justify-between gap-3 text-sm">
+          <div className="inline-flex rounded-full border border-[var(--color-border)] bg-[var(--color-bg)] p-0.5">
+            <button
+              type="button"
+              onClick={() => setEditMode("multipliers")}
+              className={`rounded-full px-3 py-1 text-xs font-medium transition ${
+                editMode === "multipliers" ? "bg-[var(--color-foreground)] text-white shadow" : "text-[var(--color-muted)]"
+              }`}
+            >
+              Multipliers
+            </button>
+            <button
+              type="button"
+              onClick={() => setEditMode("absolute")}
+              className={`rounded-full px-3 py-1 text-xs font-medium transition ${
+                editMode === "absolute" ? "bg-[var(--color-foreground)] text-white shadow" : "text-[var(--color-muted)]"
+              }`}
+            >
+              Absolute values
+            </button>
+          </div>
+          <Button variant="ghost" size="sm" onClick={handleResetAll}>
+            Reset scenario to baseline
+          </Button>
+        </div>
         {variables.length ? (
           <ScenarioGrid
             variables={gridVariables}
             periods={editablePeriods}
             multipliers={multipliersByVariable}
+            editMode={editMode}
             onMultipliersChange={handleGridMultipliersChange}
           />
         ) : (
@@ -376,27 +557,78 @@ export default function PredictPage() {
 
       <Card className="space-y-4">
         <CardHeader title="Projected totals" subtitle="Hero vs scenario" />
-        {chartSeries.length ? (
-          <div className="overflow-auto">
-            <table className="min-w-full text-sm">
-              <thead className="bg-[var(--color-bg)]/60">
-                <tr>
-                  <th className="px-3 py-2 text-left">Period</th>
-                  <th className="px-3 py-2 text-left">Projected Y</th>
-                </tr>
-              </thead>
-              <tbody>
-                {chartSeries.map((point) => (
-                  <tr key={point.period} className="odd:bg-transparent even:bg-[var(--color-border)]/20">
-                    <td className="px-3 py-2">{point.period}</td>
-                    <td className="px-3 py-2">{formatNumber(numberFormatter, point.y_pred)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+        {hasChartData ? (
+          <>
+            <div className="h-80 w-full">
+              <ResponsiveContainer width="100%" height="100%">
+                <LineChart data={chartData} margin={{ top: 10, right: 20, bottom: 10, left: 0 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="rgba(148, 163, 184, 0.4)" />
+                  <XAxis dataKey="period" tick={{ fontSize: 12 }} />
+                  <YAxis tick={{ fontSize: 12 }} tickFormatter={(value) => formatNumber(numberFormatter, Number(value))} />
+                  <RechartsTooltip content={renderTimeseriesTooltip} />
+                  <Legend />
+                  <Line
+                    type="monotone"
+                    dataKey="hero"
+                    name="Hero"
+                    stroke="var(--color-muted)"
+                    strokeWidth={2}
+                    dot={false}
+                    connectNulls
+                  />
+                  <Line
+                    type="monotone"
+                    dataKey="scenario"
+                    name="Scenario"
+                    stroke="var(--color-accent)"
+                    strokeWidth={2}
+                    dot={false}
+                    connectNulls
+                  />
+                </LineChart>
+              </ResponsiveContainer>
+            </div>
+            <div className="flex flex-wrap items-center justify-between gap-3 text-sm">
+              <label className="inline-flex items-center gap-2 text-xs text-[var(--color-muted)]">
+                <input
+                  type="checkbox"
+                  className="rounded border border-[var(--color-border)]"
+                  checked={showProjectedTable}
+                  onChange={(event) => setShowProjectedTable(event.target.checked)}
+                />
+                Show table
+              </label>
+              <Button variant="ghost" size="sm" onClick={handleExportTimeseries} disabled={!chartData.length}>
+                Export Excel
+              </Button>
+            </div>
+            {showProjectedTable && (
+              <div className="overflow-auto">
+                <table className="min-w-full text-sm">
+                  <thead className="bg-[var(--color-bg)]/60">
+                    <tr>
+                      <th className="px-3 py-2 text-left">Period</th>
+                      <th className="px-3 py-2 text-left">Hero</th>
+                      <th className="px-3 py-2 text-left">Scenario</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {chartData.map((row) => (
+                      <tr key={row.period} className="odd:bg-transparent even:bg-[var(--color-border)]/20">
+                        <td className="px-3 py-2">{row.period}</td>
+                        <td className="px-3 py-2">{row.hero !== null ? formatNumber(numberFormatter, row.hero) : "-"}</td>
+                        <td className="px-3 py-2">{row.scenario !== null ? formatNumber(numberFormatter, row.scenario) : "-"}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </>
         ) : (
-          <p className="text-sm text-[var(--color-muted)]">Preview the scenario to see projections.</p>
+          <p className="text-sm text-[var(--color-muted)]">
+            {previewLoading || heroLoading ? "Loading projections..." : "Preview the scenario to see projections."}
+          </p>
         )}
       </Card>
 
@@ -406,7 +638,7 @@ export default function PredictPage() {
           <div className="grid gap-4 md:grid-cols-3">
             {scenarios.map((scenario) => (
               <Card key={scenario.id} className={`space-y-2 ${selectedScenario === scenario.id ? "border-[var(--color-accent)]" : ""}`}>
-                <CardHeader title={scenario.name} subtitle={`${scenario.horizon} periods · ${scenario.freq}`} />
+                <CardHeader title={scenario.name} subtitle={`${scenario.horizon} periods \u2022 ${scenario.freq}`} />
                 <div className="px-4 pb-2 text-sm">
                   <p className="text-[var(--color-muted)]">Projected total</p>
                   <p className="text-lg font-semibold">{formatNumber(numberFormatter, scenario.summary.total)}</p>
@@ -431,7 +663,7 @@ export default function PredictPage() {
 }
 
 function formatNumber(formatter: Intl.NumberFormat, value: number | null | undefined) {
-  if (value === null || value === undefined || Number.isNaN(value)) return "–";
+  if (value === null || value === undefined || Number.isNaN(value)) return "-";
   return formatter.format(value);
 }
 
@@ -588,3 +820,19 @@ function cloneAdjustments(source: Record<string, Record<string, PeriodValue>>) {
   });
   return clone;
 }
+
+function buildBaselineAdjustments(periods: string[], variables: VariableRow[]) {
+  const result: Record<string, Record<string, PeriodValue>> = {};
+  periods.forEach((period) => {
+    const mapping: Record<string, PeriodValue> = {};
+    variables.forEach((variable) => {
+      mapping[variable.name] = { mode: "multiplier", value: 1 };
+    });
+    result[period] = mapping;
+  });
+  return result;
+}
+
+
+
+
