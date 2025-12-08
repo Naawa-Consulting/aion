@@ -380,12 +380,16 @@ class ScenarioSummary(BaseModel):
 class ScenarioOut(BaseModel):
     id: str
     model_id: str
+    dataset_id: Optional[str] = None
     name: str
     horizon: int
     start_date: date
     freq: Literal["day", "week", "month"]
     adjustments: ScenarioAdjustments
     summary: ScenarioSummary
+    last_edited_at: datetime
+    base_total: Optional[float] = None
+    delta_pct_vs_base: Optional[float] = None
 
 
 class ScenarioTimeseriesSlice(BaseModel):
@@ -400,3 +404,19 @@ class ScenarioTimeseriesResponse(BaseModel):
     model_id: str
     periods: list[str]
     series: list[ScenarioTimeseriesSlice]
+
+
+class ScenarioAssumptionsExportRequest(ScenarioPreviewRequest):
+    mode: Literal["multipliers", "absolute"] = "multipliers"
+    scenario_name: Optional[str] = None
+
+
+class ScenarioProjectedExportRequest(ScenarioPreviewRequest):
+    scenario_name: Optional[str] = None
+    include_hero: bool = True
+
+
+# Rebuild models so FastAPI/Pydantic resolve forward references with future annotations
+ScenarioPreviewRequest.model_rebuild()
+ScenarioAssumptionsExportRequest.model_rebuild()
+ScenarioProjectedExportRequest.model_rebuild()

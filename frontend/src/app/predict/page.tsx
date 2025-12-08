@@ -45,12 +45,16 @@ type ScenarioSummary = {
 type Scenario = {
   id: string;
   model_id: string;
+  dataset_id?: string | null;
   name: string;
   horizon: number;
   start_date: string;
   freq: "day" | "week" | "month";
   adjustments: Record<string, Record<string, PeriodValue>>;
   summary: ScenarioSummary;
+  last_edited_at: string;
+  base_total?: number | null;
+  delta_pct_vs_base?: number | null;
 };
 
 const DEFAULT_MULTIPLIER = 1;
@@ -75,12 +79,16 @@ export default function PredictPage() {
 
   const [scenarios, setScenarios] = useState<Scenario[]>([]);
   const [scenarioName, setScenarioName] = useState("Scenario 1");
-  const [selectedScenario, setSelectedScenario] = useState<string | null>(null);
+  const [currentScenarioId, setCurrentScenarioId] = useState<string | null>(null);
+  const [renamingScenarioId, setRenamingScenarioId] = useState<string | null>(null);
+  const [renameValue, setRenameValue] = useState("");
   const [saving, setSaving] = useState(false);
   const [editMode, setEditMode] = useState<"multipliers" | "absolute">("multipliers");
   const [heroSeries, setHeroSeries] = useState<ScenarioSeriesPoint[]>([]);
   const [heroLoading, setHeroLoading] = useState(false);
   const [showProjectedTable, setShowProjectedTable] = useState(false);
+  const [assumptionsExporting, setAssumptionsExporting] = useState(false);
+  const [totalsExporting, setTotalsExporting] = useState(false);
 
   const numberFormatter = useMemo(
     () => new Intl.NumberFormat(undefined, { minimumFractionDigits: 1, maximumFractionDigits: 1 }),
@@ -89,6 +97,16 @@ export default function PredictPage() {
   const percentFormatter = useMemo(
     () => new Intl.NumberFormat(undefined, { minimumFractionDigits: 1, maximumFractionDigits: 1 }),
     []
+  );
+  const dateFormatter = useMemo(() => new Intl.DateTimeFormat(undefined, { dateStyle: "medium" }), []);
+  const formatScenarioDate = useCallback(
+    (value: string | null | undefined) => {
+      if (!value) return "-";
+      const date = new Date(value);
+      if (Number.isNaN(date.getTime())) return "-";
+      return dateFormatter.format(date);
+    },
+    [dateFormatter]
   );
 
   const periodLabels = useMemo(() => buildPeriodLabels(startDate, horizon, freq), [startDate, horizon, freq]);
@@ -108,6 +126,9 @@ export default function PredictPage() {
   );
   const dependentLabel = selectedModelInfo?.y_var ?? "Y";
   const freqLabel = freq === "day" ? "day" : freq === "week" ? "week" : "month";
+  const SCENARIO_LIMIT = 5;
+  const reachedScenarioLimit = !currentScenarioId && scenarios.length >= SCENARIO_LIMIT;
+  const saveButtonLabel = currentScenarioId ? "Save changes" : "Save scenario";
 
   const fetchDatasets = useCallback(async () => {
     try {
@@ -219,10 +240,23 @@ export default function PredictPage() {
   }, [selectedDataset, fetchModels]);
 
   useEffect(() => {
+    setCurrentScenarioId(null);
+    setRenamingScenarioId(null);
+    setRenameValue("");
+    setScenarioName("Scenario 1");
+  }, [selectedModel]);
+
+  useEffect(() => {
     if (!selectedModel) return;
     fetchBaselineVariables(selectedModel);
     fetchScenarios(selectedModel);
   }, [selectedModel, fetchBaselineVariables, fetchScenarios]);
+
+  useEffect(() => {
+    if (currentScenarioId && !scenarios.some((scenario) => scenario.id === currentScenarioId)) {
+      setCurrentScenarioId(null);
+    }
+  }, [scenarios, currentScenarioId]);
 
   useEffect(() => {
     ensureAdjustmentDefaults(periodLabels, variables, setAdjustments);
@@ -260,6 +294,9 @@ export default function PredictPage() {
       });
       return next;
     });
+    setCurrentScenarioId(null);
+    setRenamingScenarioId(null);
+    setRenameValue("");
   }, [editablePeriods, variables]);
 
   const handleSaveScenario = async () => {
@@ -267,22 +304,41 @@ export default function PredictPage() {
       toast.error("Select a model first");
       return;
     }
+    if (!currentScenarioId && scenarios.length >= SCENARIO_LIMIT) {
+      toast.error(`Maximum ${SCENARIO_LIMIT} saved scenarios. Delete one to save a new scenario.`);
+      return;
+    }
     setSaving(true);
     try {
-      const res = await fetch(`${API_URL}/predict/scenarios`, {
-        method: "POST",
+      const payload = {
+        model_id: selectedModel,
+        name: scenarioName || "Scenario",
+        horizon,
+        start_date: startDate,
+        freq,
+        adjustments,
+      };
+      const url = currentScenarioId
+        ? `${API_URL}/predict/scenarios/${currentScenarioId}`
+        : `${API_URL}/predict/scenarios`;
+      const method = currentScenarioId ? "PATCH" : "POST";
+      const res = await fetch(url, {
+        method,
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          model_id: selectedModel,
-          name: scenarioName || "Scenario",
-          horizon,
-          start_date: startDate,
-          freq,
-          adjustments,
-        }),
+        body: JSON.stringify(payload),
       });
       if (!res.ok) throw new Error(await res.text());
-      toast.success("Scenario saved");
+      const data: Scenario = await res.json();
+      setScenarioName(data.name);
+      setHorizon(data.horizon);
+      setStartDate(data.start_date);
+      setFreq(data.freq);
+      setAdjustments(cloneAdjustments(data.adjustments));
+      setPreview(data.summary);
+      setCurrentScenarioId(data.id);
+      setRenamingScenarioId(null);
+      setRenameValue("");
+      toast.success(currentScenarioId ? "Scenario updated" : "Scenario saved");
       await fetchScenarios(selectedModel);
     } catch (error: any) {
       toast.error(error?.message || "Unable to save scenario");
@@ -297,35 +353,177 @@ export default function PredictPage() {
     setStartDate(scenario.start_date);
     setFreq(scenario.freq);
     setAdjustments(cloneAdjustments(scenario.adjustments));
-    setSelectedScenario(scenario.id);
+    setCurrentScenarioId(scenario.id);
+    setRenamingScenarioId(null);
+    setRenameValue("");
     setPreview(scenario.summary);
   };
 
   const handleDeleteScenario = async (scenarioId: string) => {
+    if (!window.confirm("Delete this scenario? This cannot be undone.")) return;
     try {
       const res = await fetch(`${API_URL}/predict/scenarios/${scenarioId}`, { method: "DELETE" });
       if (!res.ok) throw new Error(await res.text());
       toast.success("Scenario deleted");
-      if (selectedScenario === scenarioId) setSelectedScenario(null);
+      if (currentScenarioId === scenarioId) {
+        setCurrentScenarioId(null);
+      }
+      if (renamingScenarioId === scenarioId) {
+        setRenamingScenarioId(null);
+        setRenameValue("");
+      }
       if (selectedModel) fetchScenarios(selectedModel);
     } catch (error: any) {
       toast.error(error?.message || "Unable to delete scenario");
     }
   };
 
-  const scenarioSeries = useMemo(() => preview?.series ?? [], [preview?.series]);
-  const groups = preview?.groups ?? [];
-  const baselineContribution =
-    groups.find((group) => group.id === "baseline" || group.name?.toLowerCase() === "baseline")?.value ?? 0;
-  const marketingContribution = groups
-    .filter((group) => group.name && group.name.toLowerCase().includes("marketing"))
-    .reduce((sum, group) => sum + group.value, 0);
-  const otherContribution = groups
-    .filter((group) => !group.id && (!group.name || group.name.toLowerCase() === "other"))
-    .reduce((sum, group) => sum + group.value, 0);
+  const cancelRename = useCallback(() => {
+    setRenamingScenarioId(null);
+    setRenameValue("");
+  }, []);
+
+  const handleStartRename = (scenario: Scenario) => {
+    setRenamingScenarioId(scenario.id);
+    setRenameValue(scenario.name);
+  };
+
+  const submitRename = useCallback(
+    async (scenarioId: string, newName: string) => {
+      if (!selectedModel) return;
+      const trimmed = newName.trim();
+      if (!trimmed) {
+        cancelRename();
+        return;
+      }
+      try {
+        const res = await fetch(`${API_URL}/predict/scenarios/${scenarioId}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name: trimmed }),
+        });
+        if (!res.ok) throw new Error(await res.text());
+        toast.success("Scenario renamed");
+        if (currentScenarioId === scenarioId) {
+          setScenarioName(trimmed);
+        }
+        await fetchScenarios(selectedModel);
+      } catch (error: any) {
+        toast.error(error?.message || "Unable to rename scenario");
+      } finally {
+        cancelRename();
+      }
+    },
+    [selectedModel, currentScenarioId, fetchScenarios, cancelRename]
+  );
+
+  const handleRenameBlur = (scenario: Scenario) => {
+    const trimmed = renameValue.trim();
+    if (!trimmed || trimmed === scenario.name) {
+      cancelRename();
+      return;
+    }
+    submitRename(scenario.id, trimmed);
+  };
+
+  const handleRenameKeyDown = (event: React.KeyboardEvent<HTMLInputElement>, scenario: Scenario) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      handleRenameBlur(scenario);
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      cancelRename();
+    }
+  };
+
+  const scenarioSeries = useMemo(() => preview?.series ?? [], [preview]);
+  const groups = useMemo(() => preview?.groups ?? [], [preview]);
   const projectedTotal = preview?.total ?? null;
-  const marketingPercent = projectedTotal ? (marketingContribution / projectedTotal) * 100 : 0;
-  const otherPercent = projectedTotal ? (otherContribution / projectedTotal) * 100 : 0;
+  const baselineEntry = groups.find(
+    (group) => group.id === "baseline" || group.name?.toLowerCase() === "baseline"
+  );
+  const otherEntry = groups.find(
+    (group) => !group.id && (!group.name || group.name.toLowerCase() === "other")
+  );
+  const baselineContribution = baselineEntry?.value ?? null;
+  const otherContribution = otherEntry?.value ?? null;
+  const dynamicGroupSlices = useMemo(
+    () =>
+      groups
+        .filter((group) => {
+          const normalized = group.name?.toLowerCase() ?? "";
+          if (group.id === "baseline" || normalized === "baseline") return false;
+          if (!group.id && (!group.name || normalized === "other")) return false;
+          return true;
+        })
+        .sort((a, b) => Math.abs(b.value) - Math.abs(a.value)),
+    [groups]
+  );
+  const shareOfTotal = useCallback(
+    (value: number | null | undefined) => {
+      if (!projectedTotal || projectedTotal === 0 || value === null || value === undefined) return null;
+      return (value / projectedTotal) * 100;
+    },
+    [projectedTotal]
+  );
+  const formatShareLabel = useCallback(
+    (value: number | null | undefined) => {
+      const share = shareOfTotal(value);
+      return share !== null ? `${percentFormatter.format(share)}% of total` : undefined;
+    },
+    [shareOfTotal, percentFormatter]
+  );
+  const contributionCards = useMemo(() => {
+    const items: { key: string; title: string; value: number | null | undefined; subtitle?: string }[] = [
+      {
+        key: "projected-total",
+        title: "Projected total",
+        value: preview?.total ?? null,
+        subtitle: `Forecast: ${dependentLabel}`,
+      },
+      {
+        key: "average-period",
+        title: "Average per period",
+        value: preview?.average_per_period ?? null,
+        subtitle: freqLabel,
+      },
+    ];
+    if (baselineEntry) {
+      items.push({
+        key: "baseline",
+        title: "Baseline",
+        value: baselineContribution,
+        subtitle: formatShareLabel(baselineContribution),
+      });
+    }
+    dynamicGroupSlices.forEach((slice, index) => {
+      items.push({
+        key: `group-${slice.id ?? slice.name ?? index}`,
+        title: slice.name || "Group",
+        value: slice.value,
+        subtitle: formatShareLabel(slice.value),
+      });
+    });
+    if (otherEntry && otherEntry.value !== undefined && otherEntry.value !== null && Math.abs(otherEntry.value) > 1e-9) {
+      items.push({
+        key: "other",
+        title: otherEntry.name || "Other",
+        value: otherContribution,
+        subtitle: formatShareLabel(otherContribution),
+      });
+    }
+    return items;
+  }, [
+    preview,
+    dependentLabel,
+    freqLabel,
+    baselineEntry,
+    baselineContribution,
+    dynamicGroupSlices,
+    otherEntry,
+    otherContribution,
+    formatShareLabel,
+  ]);
   const chartData = useMemo(() => {
     const map = new Map<string, { hero?: number | null; scenario?: number | null }>();
     scenarioSeries.forEach((point) => {
@@ -368,20 +566,100 @@ export default function PredictPage() {
     },
     [numberFormatter]
   );
-  const handleExportTimeseries = useCallback(() => {
-    if (!chartData.length) return;
-    const rows = chartData.map((row) => `${row.period},${row.hero ?? ""},${row.scenario ?? ""}`);
-    const csv = ["Period,Hero,Scenario", ...rows].join("\n");
-    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = `projected_totals_${dependentLabel}.csv`;
-    document.body.appendChild(link);
-    link.click();
-    link.remove();
-    URL.revokeObjectURL(url);
-  }, [chartData, dependentLabel]);
+  const handleExportAssumptions = useCallback(async () => {
+    if (!selectedModel) {
+      toast.error("Select a model first");
+      return;
+    }
+    if (!variables.length || !editablePeriods.length) {
+      toast.error("Nothing to export yet");
+      return;
+    }
+    setAssumptionsExporting(true);
+    try {
+      const payload = {
+        model_id: selectedModel,
+        horizon,
+        start_date: startDate,
+        freq,
+        adjustments,
+        mode: editMode,
+        scenario_name: scenarioName || dependentLabel,
+      };
+      const res = await fetch(`${API_URL}/predict/scenarios/assumptions/export`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      if (!res.ok) {
+        const message = await res.text();
+        throw new Error(message || "Failed to export assumptions");
+      }
+      const fallback = buildExportFilename(scenarioName || dependentLabel || "scenario", "assumptions");
+      const filename = extractFilenameFromResponse(res, fallback);
+      const blob = await res.blob();
+      downloadBlob(blob, filename);
+    } catch (error: any) {
+      toast.error(error?.message || "Failed to export assumptions");
+    } finally {
+      setAssumptionsExporting(false);
+    }
+  }, [
+    selectedModel,
+    variables.length,
+    editablePeriods.length,
+    horizon,
+    startDate,
+    freq,
+    adjustments,
+    editMode,
+    scenarioName,
+    dependentLabel,
+  ]);
+  const handleExportTimeseries = useCallback(async () => {
+    if (!selectedModel || !chartData.length) {
+      toast.error("Preview the scenario before exporting");
+      return;
+    }
+    setTotalsExporting(true);
+    try {
+      const payload = {
+        model_id: selectedModel,
+        horizon,
+        start_date: startDate,
+        freq,
+        adjustments,
+        scenario_name: scenarioName || dependentLabel,
+        include_hero: true,
+      };
+      const res = await fetch(`${API_URL}/predict/scenarios/projected/export`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      if (!res.ok) {
+        const message = await res.text();
+        throw new Error(message || "Failed to export totals");
+      }
+      const fallback = buildExportFilename(scenarioName || dependentLabel || "scenario", "projected");
+      const filename = extractFilenameFromResponse(res, fallback);
+      const blob = await res.blob();
+      downloadBlob(blob, filename);
+    } catch (error: any) {
+      toast.error(error?.message || "Failed to export totals");
+    } finally {
+      setTotalsExporting(false);
+    }
+  }, [
+    selectedModel,
+    chartData.length,
+    horizon,
+    startDate,
+    freq,
+    adjustments,
+    scenarioName,
+    dependentLabel,
+  ]);
 
   return (
     <section className="space-y-6">
@@ -466,53 +744,36 @@ export default function PredictPage() {
             />
           </label>
         </div>
-        <div className="flex gap-3">
+        <div className="flex gap-3 flex-wrap">
           <Button onClick={fetchPreview} disabled={previewLoading || !selectedModel}>
             {previewLoading ? "Recalculating..." : "Preview scenario"}
           </Button>
-          <Button variant="secondary" onClick={handleSaveScenario} disabled={saving || !selectedModel}>
-            {saving ? "Saving..." : "Save scenario"}
+          <Button
+            variant="secondary"
+            onClick={handleSaveScenario}
+            disabled={saving || !selectedModel || reachedScenarioLimit}
+          >
+            {saving ? "Saving..." : saveButtonLabel}
           </Button>
         </div>
+        {reachedScenarioLimit && (
+          <p className="text-xs text-red-500">
+            Maximum of {SCENARIO_LIMIT} saved scenarios reached. Delete one to save a new scenario.
+          </p>
+        )}
       </Card>
 
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-5">
-        <Card padding="sm">
-          <CardHeader title="Projected total" subtitle={`Forecast: ${dependentLabel}`} />
-          <p className="text-lg font-semibold">
-            {preview ? formatNumber(numberFormatter, preview.total) : "-"}
-          </p>
-        </Card>
-        <Card padding="sm">
-          <CardHeader title="Average per period" subtitle={freqLabel} />
-          <p className="text-lg font-semibold">
-            {preview ? formatNumber(numberFormatter, preview.average_per_period) : "-"}
-          </p>
-        </Card>
-        <Card padding="sm">
-          <CardHeader title="Baseline" subtitle="Intercept + non-marketing" />
-          <p className="text-lg font-semibold">
-            {preview ? formatNumber(numberFormatter, baselineContribution) : "-"}
-          </p>
-        </Card>
-        <Card padding="sm">
-          <CardHeader title="Marketing" subtitle="Sum of marketing contributions" />
-          <p className="text-lg font-semibold">
-            {preview ? formatNumber(numberFormatter, marketingContribution) : "-"}
-          </p>
-          <p className="text-xs text-[var(--color-muted)]">
-            {preview && projectedTotal ? `${percentFormatter.format(marketingPercent)}% of total` : "-"}
-          </p>
-        </Card>
-        <Card padding="sm">
-          <CardHeader title="Other" subtitle="Residual / ungrouped" />
-          <p className="text-lg font-semibold">
-            {preview ? formatNumber(numberFormatter, otherContribution) : "-"}
-          </p>
-          <p className="text-xs text-[var(--color-muted)]">
-            {preview && projectedTotal ? `${percentFormatter.format(otherPercent)}% of total` : "-"}
-          </p>
-        </Card>
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+        {contributionCards.map((card) => (
+          <Card key={card.key} padding="sm">
+            <CardHeader title={card.title} subtitle={card.subtitle} />
+            <p className="text-lg font-semibold">
+              {card.value !== null && card.value !== undefined
+                ? formatNumber(numberFormatter, card.value)
+                : "-"}
+            </p>
+          </Card>
+        ))}
       </div>
 
       <Card className="space-y-4">
@@ -538,9 +799,19 @@ export default function PredictPage() {
               Absolute values
             </button>
           </div>
-          <Button variant="ghost" size="sm" onClick={handleResetAll}>
-            Reset scenario to baseline
-          </Button>
+          <div className="flex flex-wrap items-center gap-2">
+            <Button variant="ghost" size="sm" onClick={handleResetAll}>
+              Reset scenario to baseline
+            </Button>
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={handleExportAssumptions}
+              disabled={assumptionsExporting || !variables.length}
+            >
+              {assumptionsExporting ? "Exporting..." : "Export Excel"}
+            </Button>
+          </div>
         </div>
         {variables.length ? (
           <ScenarioGrid
@@ -556,7 +827,7 @@ export default function PredictPage() {
       </Card>
 
       <Card className="space-y-4">
-        <CardHeader title="Projected totals" subtitle="Hero vs scenario" />
+        <CardHeader title="Projected totals" subtitle="Base Scenario vs Scenario" />
         {hasChartData ? (
           <>
             <div className="h-80 w-full">
@@ -570,7 +841,7 @@ export default function PredictPage() {
                   <Line
                     type="monotone"
                     dataKey="hero"
-                    name="Hero"
+                    name="Base Scenario"
                     stroke="var(--color-muted)"
                     strokeWidth={2}
                     dot={false}
@@ -598,8 +869,13 @@ export default function PredictPage() {
                 />
                 Show table
               </label>
-              <Button variant="ghost" size="sm" onClick={handleExportTimeseries} disabled={!chartData.length}>
-                Export Excel
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={handleExportTimeseries}
+                disabled={!chartData.length || totalsExporting}
+              >
+                {totalsExporting ? "Exporting..." : "Export Excel"}
               </Button>
             </div>
             {showProjectedTable && (
@@ -608,7 +884,7 @@ export default function PredictPage() {
                   <thead className="bg-[var(--color-bg)]/60">
                     <tr>
                       <th className="px-3 py-2 text-left">Period</th>
-                      <th className="px-3 py-2 text-left">Hero</th>
+                      <th className="px-3 py-2 text-left">Base Scenario</th>
                       <th className="px-3 py-2 text-left">Scenario</th>
                     </tr>
                   </thead>
@@ -633,26 +909,81 @@ export default function PredictPage() {
       </Card>
 
       <Card className="space-y-4">
-        <CardHeader title="Saved scenarios" subtitle="Load, compare or delete (max 3)" />
+        <CardHeader title="Saved scenarios" subtitle="Load, rename or delete (max 5)" />
         {scenarios.length ? (
           <div className="grid gap-4 md:grid-cols-3">
-            {scenarios.map((scenario) => (
-              <Card key={scenario.id} className={`space-y-2 ${selectedScenario === scenario.id ? "border-[var(--color-accent)]" : ""}`}>
-                <CardHeader title={scenario.name} subtitle={`${scenario.horizon} periods \u2022 ${scenario.freq}`} />
-                <div className="px-4 pb-2 text-sm">
-                  <p className="text-[var(--color-muted)]">Projected total</p>
-                  <p className="text-lg font-semibold">{formatNumber(numberFormatter, scenario.summary.total)}</p>
-                </div>
-                <div className="flex gap-2 px-4 pb-4">
-                  <Button variant="secondary" onClick={() => handleLoadScenario(scenario)}>
-                    Load
-                  </Button>
-                  <Button variant="ghost" onClick={() => handleDeleteScenario(scenario.id)}>
-                    Delete
-                  </Button>
-                </div>
-              </Card>
-            ))}
+            {scenarios.map((scenario) => {
+              const isActive = currentScenarioId === scenario.id;
+              const isRenaming = renamingScenarioId === scenario.id;
+              const freqLabelCard = scenario.freq === "day" ? "day" : scenario.freq === "week" ? "week" : "month";
+              const delta = typeof scenario.delta_pct_vs_base === "number" ? scenario.delta_pct_vs_base : null;
+              const deltaLabel =
+                delta !== null ? `${delta > 0 ? "+" : delta < 0 ? "" : ""}${delta.toFixed(1)}% vs Base scenario` : null;
+              const deltaClass =
+                delta === null
+                  ? ""
+                  : delta > 0
+                  ? "text-emerald-600"
+                  : delta < 0
+                  ? "text-red-500"
+                  : "text-[var(--color-muted)]";
+              return (
+                <Card
+                  key={scenario.id}
+                  className={`space-y-3 border transition ${isActive ? "border-[var(--color-accent)] bg-[var(--color-accent)]/5" : ""}`}
+                >
+                  <div className="space-y-2 px-4 pt-4">
+                    {isRenaming ? (
+                      <input
+                        type="text"
+                        autoFocus
+                        value={renameValue}
+                        onChange={(event) => setRenameValue(event.target.value)}
+                        onBlur={() => handleRenameBlur(scenario)}
+                        onKeyDown={(event) => handleRenameKeyDown(event, scenario)}
+                        className="w-full rounded-lg border border-[var(--color-border)] bg-transparent px-2 py-1 text-sm"
+                      />
+                    ) : (
+                      <div className="flex items-start justify-between gap-2">
+                        <p className="font-semibold text-sm text-[var(--color-foreground)]">{scenario.name}</p>
+                        <button
+                          type="button"
+                          className="text-xs text-[var(--color-muted)] hover:text-[var(--color-foreground)]"
+                          onClick={() => handleStartRename(scenario)}
+                        >
+                          Rename
+                        </button>
+                      </div>
+                    )}
+                    <div className="space-y-0.5">
+                      <p className="text-xs uppercase tracking-wide text-[var(--color-muted)]">Projected total</p>
+                      <p className="text-[1.35rem] font-semibold leading-tight text-[var(--color-foreground)] sm:text-[1.45rem]">
+                        {formatNumber(numberFormatter, scenario.summary.total)}
+                      </p>
+                      {deltaLabel && (
+                        <p className={`text-xs font-medium ${deltaClass}`}>
+                          {deltaLabel}
+                        </p>
+                      )}
+                    </div>
+                    <p className="text-xs text-[var(--color-muted)]">
+                      {scenario.horizon} periods - {freqLabelCard}
+                    </p>
+                    <p className="text-xs text-[var(--color-muted)]">
+                      Last edited: {formatScenarioDate(scenario.last_edited_at)}
+                    </p>
+                  </div>
+                  <div className="flex gap-2 px-4 pb-4">
+                    <Button variant="secondary" onClick={() => handleLoadScenario(scenario)}>
+                      Load
+                    </Button>
+                    <Button variant="ghost" onClick={() => handleDeleteScenario(scenario.id)}>
+                      Delete
+                    </Button>
+                  </div>
+                </Card>
+              );
+            })}
           </div>
         ) : (
           <p className="text-sm text-[var(--color-muted)]">No saved scenarios yet.</p>
@@ -760,6 +1091,36 @@ function multipliersToAdjustments(
     next[period] = mapping;
   });
   return next;
+}
+
+function downloadBlob(blob: Blob, filename: string) {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
+function extractFilenameFromResponse(response: Response, fallback: string) {
+  const disposition = response.headers.get("Content-Disposition");
+  if (!disposition) return fallback;
+  const match = /filename="?([^";]+)"?/i.exec(disposition);
+  return match?.[1] ?? fallback;
+}
+
+function buildExportFilename(base: string, suffix: string) {
+  const safe = sanitizeFilenameFragment(base);
+  const stamp = new Date().toISOString().replace(/[-:]/g, "").split(".")[0];
+  return `${safe}-${suffix}-${stamp}.xlsx`;
+}
+
+function sanitizeFilenameFragment(value: string) {
+  const trimmed = value?.trim() || "scenario";
+  const safe = trimmed.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
+  return (safe || "scenario").toLowerCase();
 }
 
 function getWeekNumber(date: Date) {

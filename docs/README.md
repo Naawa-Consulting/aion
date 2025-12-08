@@ -104,10 +104,15 @@ This repository contains a modular analytics application with a Next.js frontend
 - Module 2: Correlations must be vs dependent variable
 - Module 2: Adstock optimization
 - Module 3: Modelling animation
+- Module 3: Add other alorithms (NN, Random Forest, XGBoost, etc...)
 - Module 4: Set up conversion rate / template download / upload
 - Module 4: Set up average price / template download / upload
 - Module 4: Set up costs by group, subgroup and variable / template download / upload
 - Module 4: ROAS calculation, card and visualization
 - Module 5: Forecasting editable table
+- Module 5: Fix mean calc. by week, month,...
+- Module 5: Add actual (last period selected) in projected chart
+- Module 5: Forecast with original variable, backend transform before prediction
+- Module 5: Select and compare scenarios
 - Module 6: Configuration Module (palette color, users)
 - Module 7: Profile (password)

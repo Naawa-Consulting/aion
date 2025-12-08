@@ -89,7 +89,9 @@ class ModelMetrics(SQLModel, table=True):
 class Scenario(SQLModel, table=True):
     id: str = Field(primary_key=True)
     model_id: str
+    dataset_id: str | None = Field(default=None, nullable=True)
     name: str
     adjustments_json: str  # JSON array of {variable, multiplier}
     results_json: str  # cached summary result
     created_at: datetime = Field(default_factory=datetime.utcnow, nullable=False)
+    last_edited_at: datetime = Field(default_factory=utcnow, nullable=False)
