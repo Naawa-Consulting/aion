@@ -120,6 +120,10 @@ export default function PredictPage() {
     () => buildMultipliersFromAdjustments(variables, editablePeriods, adjustments),
     [variables, editablePeriods, adjustments]
   );
+  const absoluteValuesByVariable = useMemo(
+    () => buildAbsoluteValuesFromAdjustments(variables, editablePeriods, adjustments),
+    [variables, editablePeriods, adjustments]
+  );
   const selectedModelInfo = useMemo(
     () => models.find((model) => model.id === selectedModel),
     [models, selectedModel]
@@ -276,13 +280,15 @@ export default function PredictPage() {
   }, [selectedModel, editablePeriods, variables, requestScenarioSummary]);
 
   const handleGridMultipliersChange = useCallback(
-    (nextMultipliers: MultipliersMap) => {
-      setAdjustments(multipliersToAdjustments(nextMultipliers, editablePeriods, variables));
+    (nextMultipliers: MultipliersMap, absoluteOverrides?: Record<string, Record<string, number>>) => {
+      setAdjustments(
+        multipliersToAdjustments(nextMultipliers, editablePeriods, variables, absoluteOverrides)
+      );
     },
     [editablePeriods, variables]
   );
   const handleResetAll = useCallback(() => {
-    if (!window.confirm("Reset scenario to baseline? This will overwrite all current adjustments.")) return;
+    if (!window.confirm("Reset to base scenario? This will overwrite all current adjustments.")) return;
     setAdjustments((prev) => {
       const next: Record<string, Record<string, PeriodValue>> = {};
       editablePeriods.forEach((period) => {
@@ -801,7 +807,7 @@ export default function PredictPage() {
           </div>
           <div className="flex flex-wrap items-center gap-2">
             <Button variant="ghost" size="sm" onClick={handleResetAll}>
-              Reset scenario to baseline
+              Reset to base scenario
             </Button>
             <Button
               variant="secondary"
@@ -818,6 +824,7 @@ export default function PredictPage() {
             variables={gridVariables}
             periods={editablePeriods}
             multipliers={multipliersByVariable}
+            absoluteValues={absoluteValuesByVariable}
             editMode={editMode}
             onMultipliersChange={handleGridMultipliersChange}
           />
@@ -1042,8 +1049,8 @@ function sanitizeMultiplierValue(value: number | undefined) {
   const num = Number(value);
   if (!Number.isFinite(num) || Number.isNaN(num)) return DEFAULT_MULTIPLIER;
   if (num < 0) return 0;
-  if (num > 10) return 10;
-  return Number(num.toFixed(3));
+  if (num > 1_000_000) return 1_000_000;
+  return Number(num);
 }
 
 function buildMultipliersFromAdjustments(
@@ -1058,14 +1065,12 @@ function buildMultipliersFromAdjustments(
     const periodValues: Record<string, number> = {};
     periodList.forEach((period) => {
       const entry = adjustments[period]?.[variable.name];
+      const fallback = DEFAULT_MULTIPLIER;
       if (!entry) {
-        periodValues[period] = DEFAULT_MULTIPLIER;
+        periodValues[period] = fallback;
       } else if (entry.mode === "value") {
-        if (baseline !== 0) {
-          periodValues[period] = sanitizeMultiplierValue(entry.value / baseline);
-        } else {
-          periodValues[period] = sanitizeMultiplierValue(entry.value);
-        }
+        const safeBaseline = baseline === 0 ? 1 : baseline;
+        periodValues[period] = sanitizeMultiplierValue(entry.value / safeBaseline);
       } else {
         periodValues[period] = sanitizeMultiplierValue(entry.value);
       }
@@ -1078,7 +1083,8 @@ function buildMultipliersFromAdjustments(
 function multipliersToAdjustments(
   multipliers: MultipliersMap,
   periods: string[],
-  variables: VariableRow[]
+  variables: VariableRow[],
+  absoluteOverrides?: Record<string, Record<string, number>>
 ): Record<string, Record<string, PeriodValue>> {
   const next: Record<string, Record<string, PeriodValue>> = {};
   const periodList = periods.length ? periods : [];
@@ -1086,11 +1092,46 @@ function multipliersToAdjustments(
     const mapping: Record<string, PeriodValue> = {};
     variables.forEach((variable) => {
       const value = sanitizeMultiplierValue(multipliers[variable.name]?.[period]);
-      mapping[variable.name] = { mode: "multiplier", value };
+      const absoluteValue = absoluteOverrides?.[variable.name]?.[period];
+      if (typeof absoluteValue === "number" && Number.isFinite(absoluteValue)) {
+        mapping[variable.name] = { mode: "value", value: absoluteValue };
+      } else {
+        mapping[variable.name] = { mode: "multiplier", value };
+      }
     });
     next[period] = mapping;
   });
   return next;
+}
+
+function buildAbsoluteValuesFromAdjustments(
+  variables: VariableRow[],
+  periods: string[],
+  adjustments: Record<string, Record<string, PeriodValue>>
+): Record<string, Record<string, number>> {
+  const result: Record<string, Record<string, number>> = {};
+  const periodList = periods.length ? periods : [];
+  variables.forEach((variable) => {
+    const baseline = Number(variable.baseline_mean ?? 0);
+    const mapping: Record<string, number> = {};
+    periodList.forEach((period) => {
+      const entry = adjustments[period]?.[variable.name];
+      if (!entry) return;
+      if (entry.mode === "value") {
+        mapping[period] = roundAbsoluteValue(entry.value);
+      } else {
+        const multiplier = sanitizeMultiplierValue(entry.value);
+        mapping[period] = roundAbsoluteValue(baseline * multiplier);
+      }
+    });
+    result[variable.name] = mapping;
+  });
+  return result;
+}
+
+function roundAbsoluteValue(value: number) {
+  if (!Number.isFinite(value)) return 0;
+  return Number(value.toFixed(2));
 }
 
 function downloadBlob(blob: Blob, filename: string) {
