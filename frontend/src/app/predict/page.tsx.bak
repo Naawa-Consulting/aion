@@ -6,7 +6,7 @@ import { toast } from "sonner";
 
 import { Card, CardHeader } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import ScenarioSheetGlide, { type MultipliersMap } from "@/components/predict/ScenarioSheetGlide";
+import ScenarioGrid, { type MultipliersMap } from "@/components/predict/ScenarioGrid";
 
 type Dataset = { id: string; display_name: string; columns: { name: string; dtype: string }[] };
 type Model = {
@@ -83,6 +83,7 @@ export default function PredictPage() {
   const [renamingScenarioId, setRenamingScenarioId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState("");
   const [saving, setSaving] = useState(false);
+  const [editMode, setEditMode] = useState<"multipliers" | "absolute">("multipliers");
   const [heroSeries, setHeroSeries] = useState<ScenarioSeriesPoint[]>([]);
   const [heroLoading, setHeroLoading] = useState(false);
   const [showProjectedTable, setShowProjectedTable] = useState(false);
@@ -112,12 +113,7 @@ export default function PredictPage() {
   const displayPeriods = preview?.periods?.length ? preview.periods : periodLabels;
   const editablePeriods = displayPeriods.length ? displayPeriods : periodLabels;
   const gridVariables = useMemo(
-    () =>
-      variables.map((variable) => ({
-        name: variable.name,
-        baselineMean: variable.baseline_mean,
-        group: variable.group_name ?? "Other",
-      })),
+    () => variables.map((variable) => ({ name: variable.name, baselineMean: variable.baseline_mean })),
     [variables]
   );
   const multipliersByVariable = useMemo(
@@ -134,7 +130,6 @@ export default function PredictPage() {
   );
   const dependentLabel = selectedModelInfo?.y_var ?? "Y";
   const freqLabel = freq === "day" ? "day" : freq === "week" ? "week" : "month";
-  const editMode: "absolute" = "absolute";
   const SCENARIO_LIMIT = 5;
   const reachedScenarioLimit = !currentScenarioId && scenarios.length >= SCENARIO_LIMIT;
   const saveButtonLabel = currentScenarioId ? "Save changes" : "Save scenario";
@@ -788,11 +783,28 @@ export default function PredictPage() {
       </div>
 
       <Card className="space-y-4">
-        <CardHeader title="Scenario builder" subtitle="Edit absolute values by period and variable" />
+        <CardHeader title="Scenario builder" subtitle="Edit multipliers by period and variable" />
         <div className="flex flex-wrap items-center justify-between gap-3 text-sm">
-          <p className="text-xs font-semibold uppercase tracking-wide text-[var(--color-muted)]">
-            Mode: Absolute values
-          </p>
+          <div className="inline-flex rounded-full border border-[var(--color-border)] bg-[var(--color-bg)] p-0.5">
+            <button
+              type="button"
+              onClick={() => setEditMode("multipliers")}
+              className={`rounded-full px-3 py-1 text-xs font-medium transition ${
+                editMode === "multipliers" ? "bg-[var(--color-foreground)] text-white shadow" : "text-[var(--color-muted)]"
+              }`}
+            >
+              Multipliers
+            </button>
+            <button
+              type="button"
+              onClick={() => setEditMode("absolute")}
+              className={`rounded-full px-3 py-1 text-xs font-medium transition ${
+                editMode === "absolute" ? "bg-[var(--color-foreground)] text-white shadow" : "text-[var(--color-muted)]"
+              }`}
+            >
+              Absolute values
+            </button>
+          </div>
           <div className="flex flex-wrap items-center gap-2">
             <Button variant="ghost" size="sm" onClick={handleResetAll}>
               Reset to base scenario
@@ -808,7 +820,7 @@ export default function PredictPage() {
           </div>
         </div>
         {variables.length ? (
-          <ScenarioSheetGlide
+          <ScenarioGrid
             variables={gridVariables}
             periods={editablePeriods}
             multipliers={multipliersByVariable}

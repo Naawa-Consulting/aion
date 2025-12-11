@@ -6,6 +6,7 @@ import DataGrid, { type Column, type EditorProps, type RowsChangeData } from "re
 type ScenarioVariable = {
   name: string;
   baselineMean: number;
+  group?: string | null;
 };
 
 export type MultipliersMap = Record<string, Record<string, number>>;
@@ -640,17 +641,24 @@ const ScenarioGrid: React.FC<ScenarioGridProps> = ({
     [currentSelection, multipliers, rows, periodKeys, onMultipliersChange, editMode, buildAbsoluteValueMap]
   );
 
+  // Move the active cell by deltaRow/deltaCol. When `extend` is true the selection
+  // is extended from the anchor cell (the corner set when shift-selection began).
   const moveActive = useCallback(
     (deltaRow: number, deltaCol: number, extend: boolean) => {
       if (!rows.length || !periodKeys.length) return;
-      const current =
+
+      const current: CellCoord =
         activeCell ??
-        selection?.end ??
-        ({
+        selection?.end ?? {
           row: 0,
           col: 0,
-        } as CellCoord);
-      const next = clampCell({ row: current.row + deltaRow, col: current.col + deltaCol });
+        };
+
+      const next = clampCell({
+        row: current.row + deltaRow,
+        col: current.col + deltaCol,
+      });
+
       if (extend) {
         const anchor = anchorCell ?? current;
         setAnchorCell(anchor);
@@ -663,7 +671,15 @@ const ScenarioGrid: React.FC<ScenarioGridProps> = ({
         setSelection({ start: next, end: next });
       }
     },
-    [activeCell, anchorCell, clampCell, clampSelectionRange, periodKeys.length, rows.length, selection]
+    [
+      activeCell,
+      anchorCell,
+      clampCell,
+      clampSelectionRange,
+      periodKeys.length,
+      rows.length,
+      selection,
+    ]
   );
 
   const handleKeyDown = useCallback(
@@ -681,16 +697,17 @@ const ScenarioGrid: React.FC<ScenarioGridProps> = ({
         event.key === "ArrowRight";
       if (!isArrow) return;
       event.preventDefault();
+
       const extend = event.shiftKey;
-      if (extend) {
-        if (!shiftSelectingRef.current) {
-          const start = activeCell ?? selection?.end ?? { row: 0, col: 0 };
-          setAnchorCell(start);
-          shiftSelectingRef.current = true;
-        }
-      } else {
+      if (extend && !shiftSelectingRef.current) {
+        const start = activeCell ?? selection?.end ?? { row: 0, col: 0 };
+        setAnchorCell(start);
+        shiftSelectingRef.current = true;
+      }
+      if (!extend) {
         shiftSelectingRef.current = false;
       }
+
       switch (event.key) {
         case "ArrowUp":
           moveActive(-1, 0, extend);
