@@ -35,8 +35,21 @@ y desplegar:**
 - [x] Flujo completo real probado desde el navegador (subir dataset, crear modelo, analysis,
       predict) contra Supabase real — sin errores, persistencia confirmada tras reload. Ver
       historial de hoy.
-- [ ] **Siguiente paso**: desplegar backend en Render y frontend en Vercel con las mismas
-      variables de entorno usadas en local.
+- [x] Backend desplegado en Render (`https://aion-etd6.onrender.com`). Requirió cambiar
+      `AION_DATABASE_URL` de la conexión directa de Supabase (IPv6-only, no llega desde Render) al
+      Session pooler (`aws-0-<region>.pooler.supabase.com:5432`, usuario `postgres.<project-ref>`).
+      Ver historial de hoy.
+- [x] Frontend desplegado en Vercel (`https://aion-seven-pink.vercel.app`), `AION_ALLOWED_ORIGINS`
+      en Render actualizado (incluye `http://localhost:3000` + la URL de Vercel). Login,
+      transformaciones y modelos probados en producción y funcionan.
+- [ ] Dominio propio para el frontend en Vercel — pendiente, el usuario lo definirá en los
+      próximos días. Por ahora se usa el subdominio `.vercel.app` por default.
+- [ ] **Bug abierto**: preview de transformación en `/transform` (gráfico + stats) muestra
+      "Failed to fetch" en producción (Vercel), consistente tras Retry y reload — no reproduce en
+      local. Se descartaron CORS y timeout del free tier de Render (probado directo con
+      curl: OPTIONS y POST al endpoint responden bien desde el origen de Vercel, dataset de
+      prueba es chico — 226 filas). Falta inspeccionar la request real desde DevTools del
+      navegador del usuario para aislar la causa.
 - [ ] `render.yaml` (infra-as-code) — fast-follow no bloqueante, configurar primero por
       dashboard.
 - [ ] RLS en Supabase: descartado para esta fase (la autorización real vive en la capa de
@@ -95,6 +108,35 @@ y desplegar:**
 ~~Módulo 2: optimización de adstock~~ — resuelto por el rediseño de modelado (adstock automático).
 
 ## Historial
+
+### 2026-08-03 (2) — Primer deploy a Render/Vercel: 3 bugs encontrados y corregidos
+
+Todo el trabajo de Fase 1 (auth + multi-tenancy + storage) seguía sin commitear en `main` desde
+que se implementó — se hizo el commit (`8b99b15`) y push antes de poder desplegar, ya que
+Render/Vercel despliegan desde GitHub.
+
+1. **Conexión directa de Supabase es IPv6-only**: `AION_DATABASE_URL` apuntaba a
+   `db.<ref>.supabase.co:5432` (conexión directa), que resuelve solo a IPv6. Render no tiene
+   salida IPv6 → `alembic upgrade head` fallaba con `Network is unreachable` en cada deploy.
+   Arreglado usando el **Session pooler** de Supabase (Connect → Session pooler → formato
+   SQLAlchemy): `postgresql://postgres.<project-ref>:<password>@aws-0-<region>.pooler.supabase.com:5432/postgres`.
+   Este es el patrón a usar siempre que se conecte a Supabase Postgres desde un host sin salida
+   IPv6 (Render, y probablemente otros).
+2. **CORS bloqueando el frontend en Vercel**: `AION_ALLOWED_ORIGINS` en Render se dejó como
+   placeholder (`http://localhost:3000`) durante el deploy del backend — pendiente actualizar con
+   la URL real de Vercel una vez asignada.
+3. **El middleware de auth nunca estuvo activo, ni en local**: `middleware.ts` vivía en
+   `frontend/middleware.ts` (raíz del proyecto Next), pero Next.js exige que el archivo esté
+   dentro de `src/` cuando el proyecto usa una carpeta `src/` (este caso) — si no, se ignora en
+   silencio, sin error. Efecto: cualquier visitante caía directo en `/datasets` (por el
+   `redirect()` incondicional en `(app)/page.tsx`) sin pasar nunca por `/login`, incluso en las
+   pruebas locales previas — lo que parecía funcionar solo porque el usuario navegaba
+   manualmente a `/login`. Corregido moviendo el archivo a `frontend/src/middleware.ts`
+   (`523e5bf`); verificado que una request sin sesión a `/` ahora sí redirige a `/login`.
+
+**Nota para futuros deploys**: si se usa Next.js con carpeta `src/`, cualquier archivo de
+convención especial de Next (middleware, instrumentation, etc.) debe ir dentro de `src/`, no en
+la raíz del paquete — revisar esto explícitamente la próxima vez que se agregue uno.
 
 ### 2026-08-03 — Flujo completo probado end-to-end contra Supabase real
 

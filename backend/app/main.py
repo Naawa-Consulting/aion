@@ -1,10 +1,15 @@
-from fastapi import Depends, FastAPI
+import logging
+
+from fastapi import Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from .auth import get_current_membership
 from .config import settings
 from .routers import admin, datasets, me
 from .routers import variables, groups, models as models_router, analysis as analysis_router, predict as predict_router
+
+logger = logging.getLogger("uvicorn.error")
 
 
 def create_app() -> FastAPI:
@@ -17,6 +22,16 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    # Starlette's ServerErrorMiddleware (which builds the default 500 response for an
+    # unhandled exception) sits above CORSMiddleware in the stack, so that default 500
+    # never gets CORS headers — the browser blocks it from JS and reports a generic
+    # "Failed to fetch" instead of the real status/error. Catching it here routes the
+    # response back through CORSMiddleware normally.
+    @app.exception_handler(Exception)
+    async def unhandled_exception_handler(request: Request, exc: Exception):
+        logger.exception("Unhandled exception on %s %s", request.method, request.url.path)
+        return JSONResponse(status_code=500, content={"detail": "Internal server error"})
 
     tenant_dependency = [Depends(get_current_membership)]  # belt-and-suspenders: every tenant route needs a valid membership
     app.include_router(datasets.router, prefix="/datasets", tags=["datasets"], dependencies=tenant_dependency)

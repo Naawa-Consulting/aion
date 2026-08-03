@@ -435,7 +435,7 @@ def preview_transformation(
         ordering = pd.to_datetime(df[time_col], errors="coerce")
         combined = pd.DataFrame({"time": ordering, "original": series, "transformed": result})
         combined = combined.sort_values("time").head(limit)
-        time_values = combined["time"].fillna(method="ffill").fillna(method="bfill").astype(str).tolist()
+        time_values = combined["time"].ffill().bfill().astype(str).tolist()
         original_values = combined["original"].tolist()
         transformed_values = combined["transformed"].tolist()
     else:
