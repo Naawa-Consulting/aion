@@ -11,6 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from sqlmodel import Session, select
 
+from ..auth import CurrentMembership, get_current_membership
 from ..db import get_session
 from ..models import Dataset, Model, ModelMetrics, Variable, Subgroup, Group
 from ..schemas import SummaryTableExportRequest
@@ -20,6 +21,7 @@ from ..services.analysis import (
     get_cached_view,
     set_cached_view,
 )
+from ..tenancy import get_scoped
 from ..utils.datasets import load_dataset_frame
 
 
@@ -63,16 +65,13 @@ def _apply_date_filter(
 def _fit_from_model(
     session: Session,
     model_id: str,
+    company_id: str,
     time_column: Optional[str] = None,
     start: Optional[pd.Timestamp] = None,
     end: Optional[pd.Timestamp] = None,
 ):
-    m = session.get(Model, model_id)
-    if not m:
-        raise HTTPException(status_code=404, detail="Model not found")
-    ds = session.get(Dataset, m.dataset_id)
-    if not ds:
-        raise HTTPException(status_code=404, detail="Dataset not found")
+    m = get_scoped(session, Model, model_id, company_id)
+    ds = get_scoped(session, Dataset, m.dataset_id, company_id)
     try:
         df = load_dataset_frame(ds)
     except ValueError as exc:
@@ -94,20 +93,24 @@ def _fit_from_model(
     return m, ds, work, X, Xc, y, params, df
 
 
-def _group_maps(session: Session, dataset_id: str):
+def _group_maps(session: Session, dataset_id: str, company_id: str):
     vars_ = session.exec(
-        select(Variable).where(Variable.dataset_id == dataset_id)
+        select(Variable).where(Variable.dataset_id == dataset_id, Variable.company_id == company_id)
     ).all()
     sg_ids = {v.subgroup_id for v in vars_ if v.subgroup_id}
     sgs = (
-        session.exec(select(Subgroup).where(Subgroup.id.in_(list(sg_ids)))).all()
+        session.exec(
+            select(Subgroup).where(Subgroup.id.in_(list(sg_ids)), Subgroup.company_id == company_id)
+        ).all()
         if sg_ids
         else []
     )
     g_ids = {sg.group_id for sg in sgs}
     g_ids.update({v.group_id for v in vars_ if v.group_id})
     gs = (
-        session.exec(select(Group).where(Group.id.in_(list(g_ids)))).all()
+        session.exec(
+            select(Group).where(Group.id.in_(list(g_ids)), Group.company_id == company_id)
+        ).all()
         if g_ids
         else []
     )
@@ -126,6 +129,7 @@ def summary(
     as_percent: bool = Query(False),
     start_date: Optional[str] = Query(default=None),
     end_date: Optional[str] = Query(default=None),
+    membership: CurrentMembership = Depends(get_current_membership),
     session: Session = Depends(get_session),
 ):
     start_ts = _parse_date(start_date)
@@ -133,14 +137,14 @@ def summary(
     filtered_df: pd.DataFrame | None = None
     try:
         m, ds, work, X, Xc, y, params, filtered_df = _fit_from_model(
-            session, model_id, None, start_ts, end_ts
+            session, model_id, membership.company_id, None, start_ts, end_ts
         )
     except HTTPException as exc:
         if exc.detail != "Insufficient rows after cleaning for analysis" or (
             start_ts is None and end_ts is None
         ):
             raise
-        m, ds, work, X, Xc, y, params, full_df = _fit_from_model(session, model_id)
+        m, ds, work, X, Xc, y, params, full_df = _fit_from_model(session, model_id, membership.company_id)
         filtered_df = _apply_date_filter(
             full_df.copy(), getattr(ds, "time_variable", None), start_ts, end_ts
         )
@@ -177,7 +181,7 @@ def summary(
         predictors=list(X.columns),
     )
 
-    var_map, sg_map, g_map = _group_maps(session, ds.id)
+    var_map, sg_map, g_map = _group_maps(session, ds.id, membership.company_id)
     other_label = "Other"
     other_group_key = "__other__"
     other_sub_key = "__other_sub__"
@@ -369,20 +373,21 @@ def stacked(
     as_percent: bool = Query(False),
     start_date: Optional[str] = Query(default=None),
     end_date: Optional[str] = Query(default=None),
+    membership: CurrentMembership = Depends(get_current_membership),
     session: Session = Depends(get_session),
 ):
     start_ts = _parse_date(start_date)
     end_ts = _parse_date(end_date)
     try:
         m, ds, work, X, Xc, y, params, filtered_df = _fit_from_model(
-            session, model_id, time_col, start_ts, end_ts
+            session, model_id, membership.company_id, time_col, start_ts, end_ts
         )
     except HTTPException as exc:
         if exc.detail != "Insufficient rows after cleaning for analysis" or (
             start_ts is None and end_ts is None
         ):
             raise
-        m, ds, work, X, Xc, y, params, full_df = _fit_from_model(session, model_id)
+        m, ds, work, X, Xc, y, params, full_df = _fit_from_model(session, model_id, membership.company_id)
         filtered_df = _apply_date_filter(full_df.copy(), time_col, start_ts, end_ts)
         if filtered_df.empty:
             raise HTTPException(
@@ -397,7 +402,7 @@ def stacked(
             raise HTTPException(
                 status_code=400,
                 detail="No complete rows available for the selected date range",
-        ) 
+        )
         work = numeric
     if filtered_df is None:
         filtered_df = work
@@ -427,7 +432,7 @@ def stacked(
         predictors=list(X.columns),
     )
 
-    var_map, sg_map, g_map = _group_maps(session, ds.id)
+    var_map, sg_map, g_map = _group_maps(session, ds.id, membership.company_id)
 
     freq_map = {"day": "D", "week": "W", "month": "M"}
     rule = freq_map.get(freq, "M")
@@ -507,10 +512,11 @@ def export_summary(
     as_percent: bool = Query(False),
     start_date: Optional[str] = Query(default=None),
     end_date: Optional[str] = Query(default=None),
+    membership: CurrentMembership = Depends(get_current_membership),
     session: Session = Depends(get_session),
 ):
     data = summary(
-        model_id, include_intercept, as_percent, start_date, end_date, session
+        model_id, include_intercept, as_percent, start_date, end_date, membership, session
     )
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
@@ -532,6 +538,7 @@ def export_summary(
 @router.post("/summary/export")
 def export_summary_table_excel(
     payload: SummaryTableExportRequest,
+    membership: CurrentMembership = Depends(get_current_membership),
     session: Session = Depends(get_session),
 ):
     data = summary(
@@ -540,6 +547,7 @@ def export_summary_table_excel(
         False,
         payload.start_date,
         payload.end_date,
+        membership,
         session,
     )
     model_info = data["model"]
@@ -609,6 +617,7 @@ def export_stacked(
     as_percent: bool = Query(False),
     start_date: Optional[str] = Query(default=None),
     end_date: Optional[str] = Query(default=None),
+    membership: CurrentMembership = Depends(get_current_membership),
     session: Session = Depends(get_session),
 ):
     data = stacked(
@@ -620,6 +629,7 @@ def export_stacked(
         as_percent,
         start_date,
         end_date,
+        membership,
         session,
     )
     buf = io.BytesIO()

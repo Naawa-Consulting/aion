@@ -21,6 +21,8 @@ import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { useGlobalStore } from "@/lib/store";
 import { useKeyboardShortcut } from "@/hooks/useKeyboardShortcut";
+import { apiFetch, ApiError } from "@/lib/api";
+import { useCanEdit } from "@/hooks/useCanEdit";
 
 type Dataset = { id: string; display_name: string; columns: { name: string; dtype: string }[] };
 
@@ -50,10 +52,9 @@ type PreviewPayload = {
 
 type HistoryItem = { id: string; op: string; params: Record<string, any>; created_at: string };
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
-
 export default function TransformPage() {
   const { datasetId, setDatasetId } = useGlobalStore();
+  const canEdit = useCanEdit();
   const [datasets, setDatasets] = useState<Dataset[]>([]);
   const [variables, setVariables] = useState<Variable[]>([]);
   const [filteredVariables, setFilteredVariables] = useState<Variable[]>([]);
@@ -139,29 +140,18 @@ const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
       setPreviewLoading(true);
       setPreviewError("");
       try {
-        const res = await fetch(`${API_URL}/variables/transform/preview`, {
+        const data = await apiFetch<typeof previewData>("/variables/transform/preview", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(payload),
           signal,
         });
-        if (!res.ok) {
-          let message = "Unable to load preview";
-          try {
-            const errData = await res.json();
-            message = errData?.detail || errData?.error || message;
-          } catch {
-            message = await res.text();
-          }
-          throw new Error(message);
-        }
-        const data = await res.json();
         setPreviewData(data);
       } catch (error: any) {
         if (error?.name === "AbortError") {
           return;
         }
-        setPreviewError(error?.message || "Unable to load preview");
+        setPreviewError((error as Error)?.message || "Unable to load preview");
         setPreviewData(null);
       } finally {
         setPreviewLoading(false);
@@ -268,9 +258,7 @@ const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
 
     const fetchDatasets = useCallback(async () => {
       try {
-        const res = await fetch(`${API_URL}/datasets`);
-        if (!res.ok) throw new Error();
-        const data = await res.json();
+        const data = await apiFetch<Dataset[]>("/datasets");
         setDatasets(data);
         if (!datasetId && data.length) {
           setDatasetId(data[0].id);
@@ -282,9 +270,7 @@ const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
 
     const fetchVariables = async (dataset: string) => {
       try {
-        const res = await fetch(`${API_URL}/variables?dataset_id=${dataset}`);
-        if (!res.ok) throw new Error();
-        const data = await res.json();
+        const data = await apiFetch<Variable[]>(`/variables?dataset_id=${dataset}`);
         setVariables(data);
       } catch {
         toast.error("Failed to load variables");
@@ -293,9 +279,7 @@ const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
 
     const fetchGroups = useCallback(async () => {
       try {
-        const res = await fetch(`${API_URL}/groups`);
-        if (!res.ok) throw new Error();
-        const data = await res.json();
+        const data = await apiFetch<Group[]>("/groups");
         setGroups(data);
       } catch {
         toast.error("Failed to load groups");
@@ -333,29 +317,19 @@ const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
     }
     setRenamingGroupId(editingGroupId);
     try {
-      const res = await fetch(`${API_URL}/groups/${editingGroupId}`, {
+      await apiFetch(`/groups/${editingGroupId}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ name: trimmed }),
       });
-      if (!res.ok) {
-        let message = "Failed to rename group";
-        try {
-          const data = await res.json();
-          message = data?.error || data?.detail || message;
-        } catch {
-          message = await res.text();
-        }
-        setGroupError(message || "Failed to rename group");
-        return;
-      }
       setGroups((prev) =>
         prev.map((g) => (g.id === editingGroupId ? { ...g, name: trimmed } : g))
       );
       toast.success(`Group renamed to "${trimmed}"`);
       cancelGroupRename();
     } catch (error: any) {
-      setGroupError(error?.message || "Failed to rename group");
+      const detail = error instanceof ApiError ? error.detail : null;
+      setGroupError(detail?.error || detail?.detail || error?.message || "Failed to rename group");
     } finally {
       setRenamingGroupId(null);
     }
@@ -390,22 +364,11 @@ const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
     }
     setRenamingSubgroupId(editingSubgroupId);
     try {
-      const res = await fetch(`${API_URL}/groups/subgroups/${editingSubgroupId}`, {
+      await apiFetch(`/groups/subgroups/${editingSubgroupId}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ name: trimmed }),
       });
-      if (!res.ok) {
-        let message = "Failed to rename subgroup";
-        try {
-          const data = await res.json();
-          message = data?.error || data?.detail || message;
-        } catch {
-          message = await res.text();
-        }
-        setSubgroupError(message || "Failed to rename subgroup");
-        return;
-      }
       setGroups((prev) =>
         prev.map((g) =>
           g.id === editingSubgroupGroupId
@@ -421,7 +384,8 @@ const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
       toast.success(`Subgroup renamed to "${trimmed}"`);
       cancelSubgroupRename();
     } catch (error: any) {
-      setSubgroupError(error?.message || "Failed to rename subgroup");
+      const detail = error instanceof ApiError ? error.detail : null;
+      setSubgroupError(detail?.error || detail?.detail || error?.message || "Failed to rename subgroup");
     } finally {
       setRenamingSubgroupId(null);
     }
@@ -432,14 +396,9 @@ const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
     setGroupDeleteLoading(true);
     setGroupDeleteError("");
     try {
-      const res = await fetch(`${API_URL}/groups/${groupToDelete.id}?reassign=uncategorized`, {
+      const summary = await apiFetch<any>(`/groups/${groupToDelete.id}?reassign=uncategorized`, {
         method: "DELETE",
       });
-      if (!res.ok) {
-        const detail = await safeParseJSON(await res.text());
-        throw new Error(detail?.error || detail?.detail || "Failed to delete group");
-      }
-      const summary = await res.json().catch(() => null);
       setGroups((prev) => prev.filter((g) => g.id !== groupToDelete.id));
       setVariables((prev) =>
         prev.map((variable) =>
@@ -461,7 +420,8 @@ const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
       );
       closeGroupDeleteModal();
     } catch (error: any) {
-      setGroupDeleteError(error?.message || "Failed to delete group");
+      const detail = error instanceof ApiError ? error.detail : null;
+      setGroupDeleteError(detail?.error || detail?.detail || error?.message || "Failed to delete group");
     } finally {
       setGroupDeleteLoading(false);
     }
@@ -482,14 +442,9 @@ const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
     setSubgroupDeleteLoading(true);
     setSubgroupDeleteError("");
     try {
-      const res = await fetch(`${API_URL}/groups/subgroups/${subgroupToDelete.subgroup.id}`, {
+      const summary = await apiFetch<any>(`/groups/subgroups/${subgroupToDelete.subgroup.id}`, {
         method: "DELETE",
       });
-      if (!res.ok) {
-        const detail = await safeParseJSON(await res.text());
-        throw new Error(detail?.error || detail?.detail || "Failed to delete subgroup");
-      }
-      const summary = await res.json().catch(() => null);
       setGroups((prev) =>
         prev.map((group) =>
           group.id === subgroupToDelete.group.id
@@ -511,7 +466,8 @@ const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
       );
       closeSubgroupDeleteModal();
     } catch (error: any) {
-      setSubgroupDeleteError(error?.message || "Failed to delete subgroup");
+      const detail = error instanceof ApiError ? error.detail : null;
+      setSubgroupDeleteError(detail?.error || detail?.detail || error?.message || "Failed to delete subgroup");
     } finally {
       setSubgroupDeleteLoading(false);
     }
@@ -534,18 +490,16 @@ const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
         payload.left = left;
         payload.right = right;
       }
-      const res = await fetch(`${API_URL}/variables/transform`, {
+      await apiFetch<Variable>("/variables/transform", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
-      if (!res.ok) throw new Error(await res.text());
-      const data = await res.json();
       await fetchVariables(activeDatasetId);
       setNewName("");
       toast.success("Variable created");
     } catch (err: any) {
-      toast.error(err?.message || "Transformation failed");
+      toast.error((err as Error)?.message || "Transformation failed");
     } finally {
       setLoading(false);
     }
@@ -553,26 +507,22 @@ const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
 
   const handleCategorize = async (variableId: string, groupId?: string | null, subgroupId?: string | null) => {
     try {
-      const res = await fetch(`${API_URL}/variables/${variableId}/categorization`, {
+      const updated = await apiFetch<Variable>(`/variables/${variableId}/categorization`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ group_id: groupId, subgroup_id: subgroupId }),
       });
-      if (!res.ok) throw new Error(await res.text());
-      const updated = await res.json();
       setVariables((prev) => prev.map((v) => (v.id === updated.id ? updated : v)));
       fetchGroups();
       toast.success("Categorization updated");
     } catch (err: any) {
-      toast.error(err?.message || "Failed to categorize");
+      toast.error((err as Error)?.message || "Failed to categorize");
     }
   };
 
   const openHistory = async (variable: Variable) => {
     try {
-      const res = await fetch(`${API_URL}/variables/${variable.id}/history`);
-      if (!res.ok) throw new Error(await res.text());
-      const data = await res.json();
+      const data = await apiFetch<HistoryItem[]>(`/variables/${variable.id}/history`);
       setHistory(data);
       setHistoryVar(variable);
     } catch (err: any) {
@@ -592,11 +542,11 @@ const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
       return;
     }
     try {
-      await fetch(`${API_URL}/variables/${latest.id}/undo`, { method: "POST" });
+      await apiFetch(`/variables/${latest.id}/undo`, { method: "POST" });
       if (activeDatasetId) fetchVariables(activeDatasetId);
       toast.success(`Removed ${latest.name}`);
     } catch (err: any) {
-      toast.error(err?.message || "Failed to undo");
+      toast.error((err as Error)?.message || "Failed to undo");
     }
   };
 
@@ -632,7 +582,13 @@ const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
               </option>
             ))}
           </select>
-          <Button variant="secondary" size="sm" onClick={handleUndo}>
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={handleUndo}
+            disabled={!canEdit}
+            title={!canEdit ? "Solo lectura: tu rol es Visualizador" : undefined}
+          >
             Undo last
           </Button>
         </div>
@@ -768,7 +724,11 @@ const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
               )}
             </div>
             <div className="flex justify-end">
-              <Button onClick={handleTransform} disabled={loading || !newName}>
+              <Button
+                onClick={handleTransform}
+                disabled={!canEdit || loading || !newName}
+                title={!canEdit ? "Solo lectura: tu rol es Visualizador" : undefined}
+              >
                 {loading ? "Creating..." : "Create variable"}
               </Button>
             </div>
@@ -820,20 +780,21 @@ const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
                   <Input value={newGroupName} onChange={(e) => setNewGroupName(e.target.value)} placeholder="Group name" />
                   <Button
                     size="sm"
+                    disabled={!canEdit}
+                    title={!canEdit ? "Solo lectura: tu rol es Visualizador" : undefined}
                     onClick={async () => {
                       if (!newGroupName.trim()) return;
                       try {
-                        const res = await fetch(`${API_URL}/groups`, {
+                        await apiFetch("/groups", {
                           method: "POST",
                           headers: { "Content-Type": "application/json" },
                           body: JSON.stringify({ name: newGroupName }),
                         });
-                        if (!res.ok) throw new Error(await res.text());
                         setNewGroupName("");
                         fetchGroups();
                         toast.success("Group created");
                       } catch (err: any) {
-                        toast.error(err?.message || "Failed to create group");
+                        toast.error((err as Error)?.message || "Failed to create group");
                       }
                     }}
                   >
@@ -859,20 +820,21 @@ const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
                   <Input value={newSubgroupName} onChange={(e) => setNewSubgroupName(e.target.value)} placeholder="Subgroup" />
                   <Button
                     size="sm"
+                    disabled={!canEdit}
+                    title={!canEdit ? "Solo lectura: tu rol es Visualizador" : undefined}
                     onClick={async () => {
                       if (!newSubgroupParent || !newSubgroupName.trim()) return;
                       try {
-                        const res = await fetch(`${API_URL}/groups/subgroups`, {
+                        await apiFetch("/groups/subgroups", {
                           method: "POST",
                           headers: { "Content-Type": "application/json" },
                           body: JSON.stringify({ group_id: newSubgroupParent, name: newSubgroupName }),
                         });
-                        if (!res.ok) throw new Error(await res.text());
                         setNewSubgroupName("");
                         fetchGroups();
                         toast.success("Subgroup created");
                       } catch (err: any) {
-                        toast.error(err?.message || "Failed to create subgroup");
+                        toast.error((err as Error)?.message || "Failed to create subgroup");
                       }
                     }}
                   >
@@ -944,8 +906,10 @@ const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
                         <div className="flex items-center gap-2">
                           <button
                             type="button"
-                            className="flex items-center gap-2 group cursor-pointer text-left"
+                            className="flex items-center gap-2 group cursor-pointer text-left disabled:cursor-not-allowed disabled:opacity-60"
                             onClick={() => startGroupRename(group)}
+                            disabled={!canEdit}
+                            title={!canEdit ? "Solo lectura: tu rol es Visualizador" : undefined}
                           >
                             <span className="font-medium truncate max-w-[220px]">{group.name}</span>
                             <Pencil
@@ -955,12 +919,14 @@ const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
                           </button>
                           <button
                             type="button"
-                            className="rounded-full p-1 text-[var(--color-muted)] hover:text-red-500 transition"
+                            className="rounded-full p-1 text-[var(--color-muted)] hover:text-red-500 transition disabled:cursor-not-allowed disabled:opacity-60"
                             onClick={() => {
                               setGroupToDelete(group);
                               setGroupDeleteMode("uncategorized");
                               setGroupDeleteError("");
                             }}
+                            disabled={!canEdit}
+                            title={!canEdit ? "Solo lectura: tu rol es Visualizador" : undefined}
                           >
                             <Trash2 size={16} />
                           </button>
@@ -1015,8 +981,10 @@ const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
                           <div className="flex items-center justify-between gap-2">
                             <button
                               type="button"
-                              className="flex-1 flex items-center gap-2 group text-left"
+                              className="flex-1 flex items-center gap-2 group text-left disabled:cursor-not-allowed disabled:opacity-60"
                               onClick={() => startSubgroupRename(group.id, sub)}
+                              disabled={!canEdit}
+                              title={!canEdit ? "Solo lectura: tu rol es Visualizador" : undefined}
                             >
                               <span className="truncate">{sub.name}</span>
                               <Pencil
@@ -1026,11 +994,13 @@ const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
                             </button>
                             <button
                               type="button"
-                              className="rounded-full p-1 text-[var(--color-muted)] hover:text-red-500 transition"
+                              className="rounded-full p-1 text-[var(--color-muted)] hover:text-red-500 transition disabled:cursor-not-allowed disabled:opacity-60"
                               onClick={() => {
                                 setSubgroupToDelete({ group, subgroup: sub });
                                 setSubgroupDeleteError("");
                               }}
+                              disabled={!canEdit}
+                              title={!canEdit ? "Solo lectura: tu rol es Visualizador" : undefined}
                             >
                               <Trash2 size={14} />
                             </button>
@@ -1099,7 +1069,8 @@ const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
                 variant="secondary"
                 className="bg-red-600 text-white hover:bg-red-600/90"
                 onClick={confirmDeleteGroup}
-                disabled={groupDeleteLoading}
+                disabled={!canEdit || groupDeleteLoading}
+                title={!canEdit ? "Solo lectura: tu rol es Visualizador" : undefined}
               >
                 {groupDeleteLoading ? "Deleting..." : "Delete group"}
               </Button>
@@ -1133,7 +1104,8 @@ const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
                 variant="secondary"
                 className="bg-red-600 text-white hover:bg-red-600/90"
                 onClick={confirmDeleteSubgroup}
-                disabled={subgroupDeleteLoading}
+                disabled={!canEdit || subgroupDeleteLoading}
+                title={!canEdit ? "Solo lectura: tu rol es Visualizador" : undefined}
               >
                 {subgroupDeleteLoading ? "Deleting..." : "Delete subgroup"}
               </Button>
@@ -1231,13 +1203,4 @@ function PreviewChart({
       </ResponsiveContainer>
     </div>
   );
-}
-
-function safeParseJSON(payload: string | null) {
-  if (!payload) return {};
-  try {
-    return JSON.parse(payload);
-  } catch {
-    return {};
-  }
 }

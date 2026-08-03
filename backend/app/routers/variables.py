@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import io
 import json
 import uuid
-from pathlib import Path
 from typing import Iterable
 
 import numpy as np
@@ -10,9 +10,12 @@ import pandas as pd
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlmodel import Session, select, delete
 
+from ..auth import CurrentMembership, get_current_membership, require_write_access
 from ..db import get_session
 from ..models import Dataset, Variable, VariableHistory, Subgroup, Group
+from ..tenancy import get_scoped
 from ..utils.datasets import load_dataset_frame
+from ..utils.storage import get_storage
 from ..schemas import (
     TransformRequest,
     TransformResponse,
@@ -37,21 +40,25 @@ def _read_df(ds: Dataset) -> pd.DataFrame:
 
 
 def _write_df(ds: Dataset, df: pd.DataFrame) -> None:
-    p = Path(ds.path)
     try:
-        df.to_parquet(p, index=False)
+        buf = io.BytesIO()
+        df.to_parquet(buf, index=False)
+        get_storage().write_bytes(ds.storage_key, buf.getvalue())
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed writing parquet: {e}")
 
 
 def _sync_variables_with_dataset(session: Session, ds: Dataset, df: pd.DataFrame) -> list[Variable]:
-    vars_ = session.exec(select(Variable).where(Variable.dataset_id == ds.id)).all()
+    vars_ = session.exec(
+        select(Variable).where(Variable.dataset_id == ds.id, Variable.company_id == ds.company_id)
+    ).all()
     existing = {v.name for v in vars_}
     created = False
     for col in df.columns:
         if col not in existing:
             v = Variable(
                 id=str(uuid.uuid4()),
+                company_id=ds.company_id,
                 dataset_id=ds.id,
                 name=str(col),
                 dtype=str(df[col].dtype),
@@ -65,16 +72,20 @@ def _sync_variables_with_dataset(session: Session, ds: Dataset, df: pd.DataFrame
     return vars_
 
 
-def _maps_for_variables(session: Session, vars_: Iterable[Variable]):
+def _maps_for_variables(session: Session, vars_: Iterable[Variable], company_id: str):
     group_ids = {v.group_id for v in vars_ if v.group_id}
     subgroup_ids = {v.subgroup_id for v in vars_ if v.subgroup_id}
     groups = (
-        session.exec(select(Group).where(Group.id.in_(list(group_ids)))).all()
+        session.exec(
+            select(Group).where(Group.id.in_(list(group_ids)), Group.company_id == company_id)
+        ).all()
         if group_ids
         else []
     )
     subgroups = (
-        session.exec(select(Subgroup).where(Subgroup.id.in_(list(subgroup_ids)))).all()
+        session.exec(
+            select(Subgroup).where(Subgroup.id.in_(list(subgroup_ids)), Subgroup.company_id == company_id)
+        ).all()
         if subgroup_ids
         else []
     )
@@ -106,11 +117,10 @@ def list_variables(
     search: str | None = Query(None),
     dtype: str | None = Query(None),
     derived: bool | None = Query(None),
+    membership: CurrentMembership = Depends(get_current_membership),
     session: Session = Depends(get_session),
 ):
-    ds = session.get(Dataset, dataset_id)
-    if not ds:
-        raise HTTPException(status_code=404, detail="Dataset not found")
+    ds = get_scoped(session, Dataset, dataset_id, membership.company_id)
 
     df = _read_df(ds)
     vars_ = _sync_variables_with_dataset(session, ds, df)
@@ -125,7 +135,7 @@ def list_variables(
         dt = dtype.lower()
         results = [v for v in results if dt in v.dtype.lower()]
 
-    g_map, sg_map = _maps_for_variables(session, vars_)
+    g_map, sg_map = _maps_for_variables(session, vars_, membership.company_id)
     return [_variable_to_out(v, g_map, sg_map) for v in results]
 
 
@@ -150,9 +160,10 @@ def _safe_float(value):
         return None
 
 
-def _record_history(session: Session, dataset_id: str, variable_id: str, op: str, payload: dict):
+def _record_history(session: Session, company_id: str, dataset_id: str, variable_id: str, op: str, payload: dict):
     history = VariableHistory(
         id=str(uuid.uuid4()),
+        company_id=company_id,
         dataset_id=dataset_id,
         variable_id=variable_id,
         op=op,
@@ -162,10 +173,12 @@ def _record_history(session: Session, dataset_id: str, variable_id: str, op: str
 
 
 @router.post("/transform", response_model=TransformResponse)
-def create_transformation(body: TransformRequest, session: Session = Depends(get_session)):
-    ds = session.get(Dataset, body.dataset_id)
-    if not ds:
-        raise HTTPException(status_code=404, detail="Dataset not found")
+def create_transformation(
+    body: TransformRequest,
+    membership: CurrentMembership = Depends(require_write_access),
+    session: Session = Depends(get_session),
+):
+    ds = get_scoped(session, Dataset, body.dataset_id, membership.company_id)
 
     df = _read_df(ds)
 
@@ -233,6 +246,7 @@ def create_transformation(body: TransformRequest, session: Session = Depends(get
     spec = body.model_dump()
     var = Variable(
         id=str(uuid.uuid4()),
+        company_id=membership.company_id,
         dataset_id=ds.id,
         name=new_name,
         dtype=str(df[new_name].dtype),
@@ -240,11 +254,13 @@ def create_transformation(body: TransformRequest, session: Session = Depends(get
         source_spec_json=json.dumps(spec),
     )
     session.add(var)
-    _record_history(session, ds.id, var.id, body.op, spec)
+    _record_history(session, membership.company_id, ds.id, var.id, body.op, spec)
     session.commit()
 
-    vars_for_maps = session.exec(select(Variable).where(Variable.dataset_id == ds.id)).all()
-    g_map, sg_map = _maps_for_variables(session, vars_for_maps)
+    vars_for_maps = session.exec(
+        select(Variable).where(Variable.dataset_id == ds.id, Variable.company_id == membership.company_id)
+    ).all()
+    g_map, sg_map = _maps_for_variables(session, vars_for_maps, membership.company_id)
 
     preview_source = None
     if body.column and body.column in df.columns:
@@ -257,43 +273,46 @@ def create_transformation(body: TransformRequest, session: Session = Depends(get
 
 
 @router.patch("/{variable_id}/categorization", response_model=VariableOut)
-def categorize_variable(variable_id: str, body: CategorizeRequest, session: Session = Depends(get_session)):
-    var = session.get(Variable, variable_id)
-    if not var:
-        raise HTTPException(status_code=404, detail="Variable not found")
-    ds = session.get(Dataset, var.dataset_id)
-    if not ds:
-        raise HTTPException(status_code=404, detail="Dataset not found")
+def categorize_variable(
+    variable_id: str,
+    body: CategorizeRequest,
+    membership: CurrentMembership = Depends(require_write_access),
+    session: Session = Depends(get_session),
+):
+    var = get_scoped(session, Variable, variable_id, membership.company_id)
+    ds = get_scoped(session, Dataset, var.dataset_id, membership.company_id)
 
-    group = session.get(Group, body.group_id) if body.group_id else None
-    subgroup = session.get(Subgroup, body.subgroup_id) if body.subgroup_id else None
+    group = get_scoped(session, Group, body.group_id, membership.company_id) if body.group_id else None
+    subgroup = get_scoped(session, Subgroup, body.subgroup_id, membership.company_id) if body.subgroup_id else None
 
     if subgroup and group and subgroup.group_id != group.id:
         raise HTTPException(status_code=400, detail="Subgroup does not belong to selected group")
     if subgroup and not group:
-        group = session.get(Group, subgroup.group_id)
-    if body.group_id and not group:
-        raise HTTPException(status_code=404, detail="Group not found")
-    if body.subgroup_id and not subgroup:
-        raise HTTPException(status_code=404, detail="Subgroup not found")
+        group = get_scoped(session, Group, subgroup.group_id, membership.company_id)
 
     var.group_id = group.id if group else None
     var.subgroup_id = subgroup.id if subgroup else None
     session.add(var)
     session.commit()
 
-    vars_for_maps = session.exec(select(Variable).where(Variable.dataset_id == ds.id)).all()
-    g_map, sg_map = _maps_for_variables(session, vars_for_maps)
+    vars_for_maps = session.exec(
+        select(Variable).where(Variable.dataset_id == ds.id, Variable.company_id == membership.company_id)
+    ).all()
+    g_map, sg_map = _maps_for_variables(session, vars_for_maps, membership.company_id)
     return _variable_to_out(var, g_map, sg_map)
 
 
 @router.get("/{variable_id}/history", response_model=list[VariableHistoryItem])
-def variable_history(variable_id: str, session: Session = Depends(get_session)):
-    var = session.get(Variable, variable_id)
-    if not var:
-        raise HTTPException(status_code=404, detail="Variable not found")
+def variable_history(
+    variable_id: str,
+    membership: CurrentMembership = Depends(get_current_membership),
+    session: Session = Depends(get_session),
+):
+    var = get_scoped(session, Variable, variable_id, membership.company_id)
     history = session.exec(
-        select(VariableHistory).where(VariableHistory.variable_id == variable_id).order_by(VariableHistory.created_at.desc())
+        select(VariableHistory)
+        .where(VariableHistory.variable_id == var.id, VariableHistory.company_id == membership.company_id)
+        .order_by(VariableHistory.created_at.desc())
     ).all()
     return [
         VariableHistoryItem(
@@ -307,19 +326,20 @@ def variable_history(variable_id: str, session: Session = Depends(get_session)):
 
 
 @router.post("/{variable_id}/undo")
-def undo_variable(variable_id: str, session: Session = Depends(get_session)):
-    var = session.get(Variable, variable_id)
-    if not var:
-        raise HTTPException(status_code=404, detail="Variable not found")
+def undo_variable(
+    variable_id: str,
+    membership: CurrentMembership = Depends(require_write_access),
+    session: Session = Depends(get_session),
+):
+    var = get_scoped(session, Variable, variable_id, membership.company_id)
     if not var.is_derived:
         raise HTTPException(status_code=400, detail="Only derived variables can be undone")
-    ds = session.get(Dataset, var.dataset_id)
-    if not ds:
-        raise HTTPException(status_code=404, detail="Dataset not found")
+    ds = get_scoped(session, Dataset, var.dataset_id, membership.company_id)
 
     dependents = session.exec(
         select(Variable).where(
             (Variable.dataset_id == ds.id)
+            & (Variable.company_id == membership.company_id)
             & (Variable.id != var.id)
             & (Variable.source_spec_json.is_not(None))
         )
@@ -348,10 +368,12 @@ def undo_variable(variable_id: str, session: Session = Depends(get_session)):
 
 
 @router.post("/transform/preview")
-def preview_transformation(body: TransformPreviewRequest, session: Session = Depends(get_session)):
-    ds = session.get(Dataset, body.dataset_id)
-    if not ds:
-        raise HTTPException(status_code=404, detail="Dataset not found")
+def preview_transformation(
+    body: TransformPreviewRequest,
+    membership: CurrentMembership = Depends(get_current_membership),
+    session: Session = Depends(get_session),
+):
+    ds = get_scoped(session, Dataset, body.dataset_id, membership.company_id)
     df = _read_df(ds)
 
     params = body.params or {}

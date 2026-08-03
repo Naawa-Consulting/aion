@@ -1,6 +1,5 @@
 import './globals.css'
 import React from 'react'
-import Header from '@/components/Header'
 import { ThemeProvider } from '@/components/providers/theme-provider'
 import { Toaster } from 'sonner'
 import { Inter } from 'next/font/google'
@@ -17,10 +16,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
     <html lang="en" suppressHydrationWarning>
       <body className={`${inter.variable} antialiased`}>
         <ThemeProvider>
-          <Header />
-          <main className="max-w-7xl mx-auto px-6 py-6 space-y-6">
-            {children}
-          </main>
+          {children}
           <Toaster richColors position="top-right" closeButton duration={4000} />
         </ThemeProvider>
       </body>

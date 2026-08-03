@@ -5,10 +5,8 @@ import json
 import re
 import uuid
 import hashlib
-import shutil
-from pathlib import Path
 from datetime import date, datetime, timezone
-from typing import List, Optional
+from typing import List, Literal, Optional
 
 import pandas as pd
 from pandas.api.types import is_datetime64_any_dtype
@@ -16,9 +14,12 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, Q
 from sqlalchemy import func
 from sqlmodel import Session, select, delete
 
-from ..db import DATA_ROOT, get_session
+from ..auth import CurrentMembership, get_current_membership, require_write_access
+from ..db import get_session
 from ..models import Dataset, Variable, Model, ModelMetrics, Scenario
 from ..services.analysis import invalidate_cache_for_dataset
+from ..tenancy import get_scoped
+from ..utils.storage import StorageNotFoundError, get_storage
 from ..schemas import (
     ColumnInfo,
     DatasetOut,
@@ -58,13 +59,19 @@ def _infer_columns(df: pd.DataFrame) -> list[dict]:
     return [{"name": str(c), "dtype": str(dt)} for c, dt in df.dtypes.items()]
 
 
-def _dependency_counts(session: Session, dataset_id: str) -> DatasetDependencyInfo:
+def _dependency_counts(session: Session, dataset_id: str, company_id: str) -> DatasetDependencyInfo:
     var_count = session.exec(
         select(func.count())
         .select_from(Variable)
-        .where(Variable.dataset_id == dataset_id, Variable.is_derived == True)
+        .where(
+            Variable.dataset_id == dataset_id,
+            Variable.company_id == company_id,
+            Variable.is_derived == True,
+        )
     ).one()
-    model_rows = session.exec(select(Model.id).where(Model.dataset_id == dataset_id)).all()
+    model_rows = session.exec(
+        select(Model.id).where(Model.dataset_id == dataset_id, Model.company_id == company_id)
+    ).all()
     model_ids = [
         row[0] if isinstance(row, tuple) else row
         for row in model_rows
@@ -75,7 +82,7 @@ def _dependency_counts(session: Session, dataset_id: str) -> DatasetDependencyIn
         scenario_count = session.exec(
             select(func.count())
             .select_from(Scenario)
-            .where(Scenario.model_id.in_(model_ids))
+            .where(Scenario.model_id.in_(model_ids), Scenario.company_id == company_id)
         ).one()
     var_total = var_count[0] if isinstance(var_count, tuple) else var_count or 0
     scenario_total = (
@@ -88,14 +95,8 @@ def _dependency_counts(session: Session, dataset_id: str) -> DatasetDependencyIn
     )
 
 
-def _dataset_storage_dir(dataset_id: str) -> Path:
-    base = Path(DATA_ROOT) / "datasets" / dataset_id
-    base.mkdir(parents=True, exist_ok=True)
-    return base
-
-
-def _version_path(dataset_id: str, version: int) -> Path:
-    return _dataset_storage_dir(dataset_id) / f"v{version}.parquet"
+def _version_key(company_id: str, dataset_id: str, version: int) -> str:
+    return f"{company_id}/{dataset_id}/v{version}.parquet"
 
 
 def _read_uploaded_file(filename: str | None, content: bytes) -> pd.DataFrame:
@@ -113,9 +114,16 @@ def _read_uploaded_file(filename: str | None, content: bytes) -> pd.DataFrame:
     return df
 
 
+def _read_dataset_bytes(storage_key: str) -> bytes:
+    try:
+        return get_storage().read_bytes(storage_key)
+    except StorageNotFoundError:
+        raise HTTPException(status_code=500, detail="Dataset file missing")
+
+
 def _dataset_out(session: Session, ds: Dataset) -> DatasetOut:
     cols = [ColumnInfo(**c) for c in json.loads(ds.columns_json)]
-    deps = _dependency_counts(session, ds.id)
+    deps = _dependency_counts(session, ds.id, ds.company_id)
     column_names = {col.name for col in cols}
     if ds.time_variable and ds.time_variable not in column_names:
         ds.time_variable = None
@@ -146,11 +154,9 @@ def _dataset_out(session: Session, ds: Dataset) -> DatasetOut:
 def _dataset_time_range(ds: Dataset) -> tuple[date | None, date | None, bool]:
     if not ds.time_variable:
         return None, None, False
-    path = Path(ds.path)
-    if not path.exists():
-        return None, None, False
     try:
-        series = pd.read_parquet(path, columns=[ds.time_variable])[ds.time_variable]
+        raw = get_storage().read_bytes(ds.storage_key)
+        series = pd.read_parquet(io.BytesIO(raw), columns=[ds.time_variable])[ds.time_variable]
     except Exception:
         return None, None, False
     if ds.sample_size:
@@ -180,14 +186,13 @@ def _dataset_time_range(ds: Dataset) -> tuple[date | None, date | None, bool]:
 async def upload_datasets(
     files: List[UploadFile] = File(...),
     force: bool = Query(False, description="Allow duplicate uploads based on checksum"),
+    membership: CurrentMembership = Depends(require_write_access),
     session: Session = Depends(get_session),
 ):
     if not files:
         raise HTTPException(status_code=400, detail="No files uploaded")
 
     saved: list[DatasetOut] = []
-    datasets_dir = Path(DATA_ROOT) / "datasets"
-    datasets_dir.mkdir(parents=True, exist_ok=True)
 
     for f in files:
         ds_id = str(uuid.uuid4())
@@ -197,7 +202,11 @@ async def upload_datasets(
         file_name = f.filename or f"dataset-{ds_id}"
 
         duplicate = session.exec(
-            select(Dataset).where(Dataset.file_name == file_name, Dataset.checksum == checksum)
+            select(Dataset).where(
+                Dataset.company_id == membership.company_id,
+                Dataset.file_name == file_name,
+                Dataset.checksum == checksum,
+            )
         ).first()
         if duplicate and not force:
             raise HTTPException(
@@ -209,9 +218,11 @@ async def upload_datasets(
                 },
             )
 
-        parquet_path = _version_path(ds_id, 1)
+        storage_key = _version_key(membership.company_id, ds_id, 1)
         try:
-            df.to_parquet(parquet_path, index=False)
+            buf = io.BytesIO()
+            df.to_parquet(buf, index=False)
+            get_storage().write_bytes(storage_key, buf.getvalue())
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Failed to save parquet: {e}")
 
@@ -219,11 +230,12 @@ async def upload_datasets(
         now = datetime.now(timezone.utc)
         ds = Dataset(
             id=ds_id,
+            company_id=membership.company_id,
             name=file_name,
             display_name=file_name,
             file_name=file_name,
             checksum=checksum,
-            path=str(parquet_path),
+            storage_key=storage_key,
             n_rows=int(df.shape[0]),
             n_cols=int(df.shape[1]),
             columns_json=json.dumps(cols),
@@ -241,23 +253,30 @@ async def upload_datasets(
 
 
 @router.get("", response_model=list[DatasetOut])
-def list_datasets(session: Session = Depends(get_session)):
-    ds_list = session.exec(select(Dataset).order_by(Dataset.created_at.desc())).all()
+def list_datasets(
+    membership: CurrentMembership = Depends(get_current_membership),
+    session: Session = Depends(get_session),
+):
+    ds_list = session.exec(
+        select(Dataset)
+        .where(Dataset.company_id == membership.company_id)
+        .order_by(Dataset.created_at.desc())
+    ).all()
     return [_dataset_out(session, ds) for ds in ds_list]
 
 
 @router.get("/{dataset_id}/preview", response_model=PreviewResponse)
-def preview_dataset(dataset_id: str, rows: int = Query(20, ge=1, le=1000), session: Session = Depends(get_session)):
-    ds = session.get(Dataset, dataset_id)
-    if not ds:
-        raise HTTPException(status_code=404, detail="Dataset not found")
+def preview_dataset(
+    dataset_id: str,
+    rows: int = Query(20, ge=1, le=1000),
+    membership: CurrentMembership = Depends(get_current_membership),
+    session: Session = Depends(get_session),
+):
+    ds = get_scoped(session, Dataset, dataset_id, membership.company_id)
 
-    path = Path(ds.path)
-    if not path.exists():
-        raise HTTPException(status_code=500, detail="Dataset file missing")
-
+    raw = _read_dataset_bytes(ds.storage_key)
     try:
-        df = pd.read_parquet(path)
+        df = pd.read_parquet(io.BytesIO(raw))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to read parquet: {e}")
 
@@ -270,17 +289,17 @@ def preview_dataset(dataset_id: str, rows: int = Query(20, ge=1, le=1000), sessi
 
 
 @router.patch("/{dataset_id}/columns", response_model=DatasetOut)
-def rename_columns(dataset_id: str, body: ColumnRenameRequest, session: Session = Depends(get_session)):
-    ds = session.get(Dataset, dataset_id)
-    if not ds:
-        raise HTTPException(status_code=404, detail="Dataset not found")
+def rename_columns(
+    dataset_id: str,
+    body: ColumnRenameRequest,
+    membership: CurrentMembership = Depends(require_write_access),
+    session: Session = Depends(get_session),
+):
+    ds = get_scoped(session, Dataset, dataset_id, membership.company_id)
 
-    path = Path(ds.path)
-    if not path.exists():
-        raise HTTPException(status_code=500, detail="Dataset file missing")
-
+    raw = _read_dataset_bytes(ds.storage_key)
     try:
-        df = pd.read_parquet(path)
+        df = pd.read_parquet(io.BytesIO(raw))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to read parquet: {e}")
 
@@ -288,7 +307,9 @@ def rename_columns(dataset_id: str, body: ColumnRenameRequest, session: Session 
     df = df.rename(columns=rename_map)
 
     try:
-        df.to_parquet(path, index=False)
+        buf = io.BytesIO()
+        df.to_parquet(buf, index=False)
+        get_storage().write_bytes(ds.storage_key, buf.getvalue())
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to write parquet: {e}")
 
@@ -303,10 +324,13 @@ def rename_columns(dataset_id: str, body: ColumnRenameRequest, session: Session 
 
 
 @router.patch("/{dataset_id}/rename", response_model=DatasetOut)
-def rename_dataset(dataset_id: str, body: DatasetRenameRequest, session: Session = Depends(get_session)):
-    ds = session.get(Dataset, dataset_id)
-    if not ds:
-        raise HTTPException(status_code=404, detail="Dataset not found")
+def rename_dataset(
+    dataset_id: str,
+    body: DatasetRenameRequest,
+    membership: CurrentMembership = Depends(require_write_access),
+    session: Session = Depends(get_session),
+):
+    ds = get_scoped(session, Dataset, dataset_id, membership.company_id)
     new_name = body.display_name.strip()
     if not new_name:
         raise HTTPException(status_code=400, detail="Display name cannot be empty")
@@ -318,10 +342,13 @@ def rename_dataset(dataset_id: str, body: DatasetRenameRequest, session: Session
 
 
 @router.patch("/{dataset_id}/sample_size", response_model=DatasetOut)
-def update_sample_size(dataset_id: str, body: DatasetSampleSizeRequest, session: Session = Depends(get_session)):
-    ds = session.get(Dataset, dataset_id)
-    if not ds:
-        raise HTTPException(status_code=404, detail="Dataset not found")
+def update_sample_size(
+    dataset_id: str,
+    body: DatasetSampleSizeRequest,
+    membership: CurrentMembership = Depends(require_write_access),
+    session: Session = Depends(get_session),
+):
+    ds = get_scoped(session, Dataset, dataset_id, membership.company_id)
 
     target = body.sample_size
     if target is not None:
@@ -343,12 +370,15 @@ def update_sample_size(dataset_id: str, body: DatasetSampleSizeRequest, session:
 
 
 @router.get("/{dataset_id}/time_candidates", response_model=TimeCandidateResponse)
-def time_candidates(dataset_id: str, session: Session = Depends(get_session)):
-    ds = session.get(Dataset, dataset_id)
-    if not ds:
-        raise HTTPException(status_code=404, detail="Dataset not found")
+def time_candidates(
+    dataset_id: str,
+    membership: CurrentMembership = Depends(get_current_membership),
+    session: Session = Depends(get_session),
+):
+    ds = get_scoped(session, Dataset, dataset_id, membership.company_id)
+    raw = _read_dataset_bytes(ds.storage_key)
     try:
-        df = pd.read_parquet(ds.path)
+        df = pd.read_parquet(io.BytesIO(raw))
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Failed to read dataset: {exc}")
     candidates = _detect_time_candidates(df)
@@ -363,10 +393,13 @@ def time_candidates(dataset_id: str, session: Session = Depends(get_session)):
 
 
 @router.patch("/{dataset_id}/time_variable", response_model=DatasetOut)
-def update_time_variable(dataset_id: str, body: TimeVariableRequest, session: Session = Depends(get_session)):
-    ds = session.get(Dataset, dataset_id)
-    if not ds:
-        raise HTTPException(status_code=404, detail="Dataset not found")
+def update_time_variable(
+    dataset_id: str,
+    body: TimeVariableRequest,
+    membership: CurrentMembership = Depends(require_write_access),
+    session: Session = Depends(get_session),
+):
+    ds = get_scoped(session, Dataset, dataset_id, membership.company_id)
 
     column = body.column
     if not column:
@@ -378,8 +411,9 @@ def update_time_variable(dataset_id: str, body: TimeVariableRequest, session: Se
         session.refresh(ds)
         return _dataset_out(session, ds)
 
+    raw = _read_dataset_bytes(ds.storage_key)
     try:
-        df = pd.read_parquet(ds.path, columns=[column])
+        df = pd.read_parquet(io.BytesIO(raw), columns=[column])
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Failed to read dataset: {exc}")
 
@@ -407,11 +441,10 @@ async def update_dataset_file(
     dataset_id: str,
     replace_strategy: Literal["strict", "force"] = Form("strict"),
     file: UploadFile = File(...),
+    membership: CurrentMembership = Depends(require_write_access),
     session: Session = Depends(get_session),
 ):
-    ds = session.get(Dataset, dataset_id)
-    if not ds:
-        raise HTTPException(status_code=404, detail="Dataset not found")
+    ds = get_scoped(session, Dataset, dataset_id, membership.company_id)
     content = await file.read()
     if not content:
         raise HTTPException(status_code=400, detail="Empty file")
@@ -429,30 +462,31 @@ async def update_dataset_file(
 
     old_version = ds.version or 1
     new_version = old_version + 1
-    dataset_dir = _dataset_storage_dir(ds.id)
-    archive_path = _version_path(ds.id, old_version)
-    old_path = Path(ds.path)
-    if old_path.exists():
-        if old_path != archive_path:
+    archive_key = _version_key(ds.company_id, ds.id, old_version)
+    storage = get_storage()
+    if storage.exists(ds.storage_key):
+        if ds.storage_key != archive_key:
             try:
-                shutil.move(old_path, archive_path)
+                storage.move(ds.storage_key, archive_key)
             except Exception as exc:
                 raise HTTPException(status_code=500, detail=f"Failed to archive previous version: {exc}")
-    elif not archive_path.exists():
+    elif not storage.exists(archive_key):
         raise HTTPException(status_code=500, detail="Previous dataset file missing")
 
-    new_path = _version_path(ds.id, new_version)
+    new_key = _version_key(ds.company_id, ds.id, new_version)
     try:
-        df_new.to_parquet(new_path, index=False)
+        buf = io.BytesIO()
+        df_new.to_parquet(buf, index=False)
+        storage.write_bytes(new_key, buf.getvalue())
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Failed to write new dataset: {exc}")
 
-    ds.path = str(new_path)
+    ds.storage_key = new_key
     ds.n_rows = int(df_new.shape[0])
     ds.n_cols = int(df_new.shape[1])
     ds.columns_json = json.dumps(new_cols)
     ds.version = new_version
-    ds.previous_version_id = str(archive_path)
+    ds.previous_version_id = archive_key
     ds.checksum = hashlib.md5(content).hexdigest()
     ds.last_used_at = datetime.now(timezone.utc)
     session.add(ds)
@@ -472,26 +506,33 @@ async def update_dataset_file(
 
 
 @router.get("/{dataset_id}/versions", response_model=DatasetVersionsResponse)
-def get_dataset_versions(dataset_id: str, session: Session = Depends(get_session)):
-    ds = session.get(Dataset, dataset_id)
-    if not ds:
-        raise HTTPException(status_code=404, detail="Dataset not found")
+def get_dataset_versions(
+    dataset_id: str,
+    membership: CurrentMembership = Depends(get_current_membership),
+    session: Session = Depends(get_session),
+):
+    ds = get_scoped(session, Dataset, dataset_id, membership.company_id)
     versions: list[DatasetVersionInfo] = []
     max_version = ds.version or 1
+    storage = get_storage()
     for version in range(1, max_version + 1):
-        path = _version_path(ds.id, version)
-        if not path.exists():
+        key = _version_key(ds.company_id, ds.id, version)
+        info = storage.stat(key)
+        if not info:
             continue
-        created_at = datetime.fromtimestamp(path.stat().st_mtime)
+        created_raw = info.get("updated_at") or info.get("created_at")
+        created_at = pd.to_datetime(created_raw).to_pydatetime() if created_raw else datetime.now(timezone.utc)
         versions.append(DatasetVersionInfo(version=version, created_at=created_at))
     return DatasetVersionsResponse(versions=versions)
 
 
 @router.get("/{dataset_id}/meta", response_model=DatasetMeta)
-def get_dataset_meta(dataset_id: str, session: Session = Depends(get_session)):
-    ds = session.get(Dataset, dataset_id)
-    if not ds:
-        raise HTTPException(status_code=404, detail="Dataset not found")
+def get_dataset_meta(
+    dataset_id: str,
+    membership: CurrentMembership = Depends(get_current_membership),
+    session: Session = Depends(get_session),
+):
+    ds = get_scoped(session, Dataset, dataset_id, membership.company_id)
     date_min, date_max, has_valid_dates = _dataset_time_range(ds)
     return DatasetMeta(
         id=ds.id,
@@ -508,12 +549,15 @@ def get_dataset_meta(dataset_id: str, session: Session = Depends(get_session)):
 
 
 @router.get("/{dataset_id}/summary")
-def dataset_summary(dataset_id: str, session: Session = Depends(get_session)):
-    ds = session.get(Dataset, dataset_id)
-    if not ds:
-        raise HTTPException(status_code=404, detail="Dataset not found")
+def dataset_summary(
+    dataset_id: str,
+    membership: CurrentMembership = Depends(get_current_membership),
+    session: Session = Depends(get_session),
+):
+    ds = get_scoped(session, Dataset, dataset_id, membership.company_id)
+    raw = _read_dataset_bytes(ds.storage_key)
     try:
-        df = pd.read_parquet(ds.path)
+        df = pd.read_parquet(io.BytesIO(raw))
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Failed to read dataset: {exc}")
 
@@ -542,7 +586,8 @@ def dataset_summary(dataset_id: str, session: Session = Depends(get_session)):
             "samples": samples,
         })
 
-    file_ext = Path(ds.file_name or "").suffix.lstrip(".")
+    file_ext_source = ds.file_name or ""
+    file_ext = file_ext_source.rsplit(".", 1)[-1] if "." in file_ext_source else ""
     return {
         "name": ds.display_name,
         "version": ds.version,
@@ -557,12 +602,16 @@ def dataset_summary(dataset_id: str, session: Session = Depends(get_session)):
 
 
 @router.get("/{dataset_id}/models-with-roles", response_model=List[ModelWithRole])
-def models_with_roles(dataset_id: str, session: Session = Depends(get_session)):
-    ds = session.get(Dataset, dataset_id)
-    if not ds:
-        raise HTTPException(status_code=404, detail="Dataset not found")
+def models_with_roles(
+    dataset_id: str,
+    membership: CurrentMembership = Depends(get_current_membership),
+    session: Session = Depends(get_session),
+):
+    ds = get_scoped(session, Dataset, dataset_id, membership.company_id)
     models = session.exec(
-        select(Model).where(Model.dataset_id == dataset_id).order_by(Model.created_at.desc())
+        select(Model)
+        .where(Model.dataset_id == dataset_id, Model.company_id == membership.company_id)
+        .order_by(Model.created_at.desc())
     ).all()
     allowed_roles = {"hero", "challenger1", "challenger2"}
     items: list[ModelWithRole] = []
@@ -588,28 +637,33 @@ def models_with_roles(dataset_id: str, session: Session = Depends(get_session)):
 
 
 @router.delete("/{dataset_id}")
-def delete_dataset(dataset_id: str, cascade: bool = Query(True, description="Delete dependent transforms/models"), session: Session = Depends(get_session)):
-    ds = session.get(Dataset, dataset_id)
-    if not ds:
-        raise HTTPException(status_code=404, detail="Dataset not found")
+def delete_dataset(
+    dataset_id: str,
+    cascade: bool = Query(True, description="Delete dependent transforms/models"),
+    membership: CurrentMembership = Depends(require_write_access),
+    session: Session = Depends(get_session),
+):
+    ds = get_scoped(session, Dataset, dataset_id, membership.company_id)
 
-    deps = _dependency_counts(session, ds.id)
+    deps = _dependency_counts(session, ds.id, ds.company_id)
     has_deps = any([deps.variables, deps.models, deps.scenarios])
     if has_deps and not cascade:
         raise HTTPException(status_code=400, detail={"message": "Dataset has dependencies", "dependencies": deps.dict()})
 
     if cascade:
-        session.exec(delete(Variable).where(Variable.dataset_id == ds.id))
-        model_ids = session.exec(select(Model.id).where(Model.dataset_id == ds.id)).all()
+        session.exec(delete(Variable).where(Variable.dataset_id == ds.id, Variable.company_id == ds.company_id))
+        model_ids = session.exec(
+            select(Model.id).where(Model.dataset_id == ds.id, Model.company_id == ds.company_id)
+        ).all()
         if model_ids:
             session.exec(delete(Scenario).where(Scenario.model_id.in_(model_ids)))
             session.exec(delete(ModelMetrics).where(ModelMetrics.model_id.in_(model_ids)))
             session.exec(delete(Model).where(Model.id.in_(model_ids)))
 
-    path = Path(ds.path)
-    if path.exists():
+    storage = get_storage()
+    for version in range(1, (ds.version or 1) + 1):
         try:
-            path.unlink()
+            storage.delete(_version_key(ds.company_id, ds.id, version))
         except Exception:
             pass
 

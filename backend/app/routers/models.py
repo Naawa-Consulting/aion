@@ -12,9 +12,11 @@ from sqlmodel import Session, select, delete
 from statsmodels.stats.outliers_influence import variance_inflation_factor
 from statsmodels.stats.stattools import durbin_watson
 
+from ..auth import CurrentMembership, get_current_membership, require_write_access
 from ..db import get_session
 from ..models import Dataset, Model, ModelMetrics, Scenario, Variable, Group, Subgroup
 from ..services.analysis import invalidate_cache_for_model
+from ..tenancy import get_scoped
 from ..utils.datasets import load_dataset_frame
 from ..schemas import (
     CorrelationResponse,
@@ -50,25 +52,38 @@ def correlations(
     dataset_id: str = Query(...),
     y: str = Query(...),
     model_id: Optional[str] = Query(default=None),
+    membership: CurrentMembership = Depends(get_current_membership),
     session: Session = Depends(get_session),
 ):
-    ds = session.get(Dataset, dataset_id)
-    if not ds:
-        raise HTTPException(status_code=404, detail="Dataset not found")
+    ds = get_scoped(session, Dataset, dataset_id, membership.company_id)
     df = _load_df(ds)
     if y not in df.columns:
         raise HTTPException(status_code=400, detail="Dependent variable not in dataset")
 
-    vars_data = session.exec(select(Variable).where(Variable.dataset_id == dataset_id)).all()
+    vars_data = session.exec(
+        select(Variable).where(Variable.dataset_id == dataset_id, Variable.company_id == membership.company_id)
+    ).all()
     group_ids = {v.group_id for v in vars_data if v.group_id}
     subgroup_ids = {v.subgroup_id for v in vars_data if v.subgroup_id}
     group_map = (
-        {g.id: g.name for g in session.exec(select(Group).where(Group.id.in_(list(group_ids)))).all()}
+        {
+            g.id: g.name
+            for g in session.exec(
+                select(Group).where(Group.id.in_(list(group_ids)), Group.company_id == membership.company_id)
+            ).all()
+        }
         if group_ids
         else {}
     )
     subgroup_map = (
-        {sg.id: sg for sg in session.exec(select(Subgroup).where(Subgroup.id.in_(list(subgroup_ids)))).all()}
+        {
+            sg.id: sg
+            for sg in session.exec(
+                select(Subgroup).where(
+                    Subgroup.id.in_(list(subgroup_ids)), Subgroup.company_id == membership.company_id
+                )
+            ).all()
+        }
         if subgroup_ids
         else {}
     )
@@ -87,16 +102,11 @@ def correlations(
     if y not in numeric_df.columns:
         raise HTTPException(status_code=400, detail="Dependent variable must be numeric")
 
-    derived_lookup = {
-        var.name: var.is_derived
-        for var in session.exec(select(Variable).where(Variable.dataset_id == dataset_id)).all()
-    }
+    derived_lookup = {var.name: var.is_derived for var in vars_data}
 
     residual_series: Optional[pd.Series] = None
     if model_id:
-        model = session.get(Model, model_id)
-        if not model:
-            raise HTTPException(status_code=404, detail="Model not found")
+        model = get_scoped(session, Model, model_id, membership.company_id)
         if model.dataset_id != dataset_id:
             raise HTTPException(status_code=400, detail="Model does not belong to this dataset")
         if model.y_var != y:
@@ -231,7 +241,10 @@ def _fit_and_store_metrics(session: Session, model: Model, df: pd.DataFrame, x_v
 
     mm = session.get(ModelMetrics, model.id)
     if not mm:
-        mm = ModelMetrics(model_id=model.id, r2=0, adj_r2=0, durbin_watson=0, mae=0, rmse=0, mape=None, vif_json="[]")
+        mm = ModelMetrics(
+            model_id=model.id, company_id=model.company_id,
+            r2=0, adj_r2=0, durbin_watson=0, mae=0, rmse=0, mape=None, vif_json="[]",
+        )
     mm.r2 = metrics["r2"]
     mm.adj_r2 = metrics["adj_r2"]
     mm.durbin_watson = metrics["durbin_watson"]
@@ -243,10 +256,12 @@ def _fit_and_store_metrics(session: Session, model: Model, df: pd.DataFrame, x_v
     return work, y, X, X_const, result
 
 
-def _generate_unique_name(session: Session, dataset_id: str, base_name: str) -> str:
+def _generate_unique_name(session: Session, dataset_id: str, company_id: str, base_name: str) -> str:
     existing = {
         m.name
-        for m in session.exec(select(Model).where(Model.dataset_id == dataset_id)).all()
+        for m in session.exec(
+            select(Model).where(Model.dataset_id == dataset_id, Model.company_id == company_id)
+        ).all()
     }
     if base_name not in existing:
         return base_name
@@ -310,13 +325,16 @@ def _stepwise_selection(
 
 
 @router.post("", response_model=ModelOut)
-def create_model(body: CreateModelRequest, session: Session = Depends(get_session)):
-    ds = session.get(Dataset, body.dataset_id)
-    if not ds:
-        raise HTTPException(status_code=404, detail="Dataset not found")
+def create_model(
+    body: CreateModelRequest,
+    membership: CurrentMembership = Depends(require_write_access),
+    session: Session = Depends(get_session),
+):
+    ds = get_scoped(session, Dataset, body.dataset_id, membership.company_id)
     df = _load_df(ds)
     m = Model(
         id=str(uuid.uuid4()),
+        company_id=membership.company_id,
         name=body.name,
         dataset_id=body.dataset_id,
         y_var=body.y_var,
@@ -336,8 +354,16 @@ def create_model(body: CreateModelRequest, session: Session = Depends(get_sessio
 
 
 @router.get("", response_model=List[ModelOut])
-def list_models(dataset_id: str = Query(...), session: Session = Depends(get_session)):
-    ms = session.exec(select(Model).where(Model.dataset_id == dataset_id).order_by(Model.created_at.desc())).all()
+def list_models(
+    dataset_id: str = Query(...),
+    membership: CurrentMembership = Depends(get_current_membership),
+    session: Session = Depends(get_session),
+):
+    ms = session.exec(
+        select(Model)
+        .where(Model.dataset_id == dataset_id, Model.company_id == membership.company_id)
+        .order_by(Model.created_at.desc())
+    ).all()
     out: list[ModelOut] = []
     for m in ms:
         mm = session.get(ModelMetrics, m.id)
@@ -348,13 +374,14 @@ def list_models(dataset_id: str = Query(...), session: Session = Depends(get_ses
 
 
 @router.patch("/{model_id}", response_model=ModelOut)
-def update_model(model_id: str, body: UpdateModelRequest, session: Session = Depends(get_session)):
-    m = session.get(Model, model_id)
-    if not m:
-        raise HTTPException(status_code=404, detail="Model not found")
-    ds = session.get(Dataset, m.dataset_id)
-    if not ds:
-        raise HTTPException(status_code=404, detail="Dataset not found")
+def update_model(
+    model_id: str,
+    body: UpdateModelRequest,
+    membership: CurrentMembership = Depends(require_write_access),
+    session: Session = Depends(get_session),
+):
+    m = get_scoped(session, Model, model_id, membership.company_id)
+    ds = get_scoped(session, Dataset, m.dataset_id, membership.company_id)
     df = _load_df(ds)
 
     if body.name:
@@ -373,16 +400,19 @@ def update_model(model_id: str, body: UpdateModelRequest, session: Session = Dep
 
 
 @router.post("/{model_id}/duplicate", response_model=ModelOut)
-def duplicate_model(model_id: str, session: Session = Depends(get_session)):
-    original = session.get(Model, model_id)
-    if not original:
-        raise HTTPException(status_code=404, detail="Model not found")
+def duplicate_model(
+    model_id: str,
+    membership: CurrentMembership = Depends(require_write_access),
+    session: Session = Depends(get_session),
+):
+    original = get_scoped(session, Model, model_id, membership.company_id)
     metrics = session.get(ModelMetrics, original.id)
     if not metrics:
         raise HTTPException(status_code=400, detail="Original model metrics missing")
-    new_name = _generate_unique_name(session, original.dataset_id, f"{original.name} - copy")
+    new_name = _generate_unique_name(session, original.dataset_id, membership.company_id, f"{original.name} - copy")
     new_model = Model(
         id=str(uuid.uuid4()),
+        company_id=membership.company_id,
         name=new_name,
         dataset_id=original.dataset_id,
         y_var=original.y_var,
@@ -394,6 +424,7 @@ def duplicate_model(model_id: str, session: Session = Depends(get_session)):
     session.commit()
     new_metrics = ModelMetrics(
         model_id=new_model.id,
+        company_id=membership.company_id,
         r2=metrics.r2,
         adj_r2=metrics.adj_r2,
         durbin_watson=metrics.durbin_watson,
@@ -409,13 +440,13 @@ def duplicate_model(model_id: str, session: Session = Depends(get_session)):
 
 
 @router.post("/{model_id}/best_stepwise", response_model=ModelOut)
-def create_best_stepwise_model(model_id: str, session: Session = Depends(get_session)):
-    original = session.get(Model, model_id)
-    if not original:
-        raise HTTPException(status_code=404, detail="Model not found")
-    ds = session.get(Dataset, original.dataset_id)
-    if not ds:
-        raise HTTPException(status_code=404, detail="Dataset not found")
+def create_best_stepwise_model(
+    model_id: str,
+    membership: CurrentMembership = Depends(require_write_access),
+    session: Session = Depends(get_session),
+):
+    original = get_scoped(session, Model, model_id, membership.company_id)
+    ds = get_scoped(session, Dataset, original.dataset_id, membership.company_id)
     df = _load_df(ds)
     original_x = json.loads(original.x_vars_json)
     work, y_arr, X = _prepare_training_frame(df, original.y_var, original_x)
@@ -423,9 +454,10 @@ def create_best_stepwise_model(model_id: str, session: Session = Depends(get_ses
     selected_predictors = _stepwise_selection(X, y_series, original_x)
     if not selected_predictors:
         selected_predictors = original_x
-    new_name = _generate_unique_name(session, original.dataset_id, f"{original.name} - Best")
+    new_name = _generate_unique_name(session, original.dataset_id, membership.company_id, f"{original.name} - Best")
     new_model = Model(
         id=str(uuid.uuid4()),
+        company_id=membership.company_id,
         name=new_name,
         dataset_id=original.dataset_id,
         y_var=original.y_var,
@@ -445,23 +477,27 @@ def create_best_stepwise_model(model_id: str, session: Session = Depends(get_ses
 
 
 @router.delete("/{model_id}")
-def delete_model(model_id: str, session: Session = Depends(get_session)):
-    m = session.get(Model, model_id)
-    if not m:
-        raise HTTPException(status_code=404, detail="Model not found")
-    session.exec(delete(Scenario).where(Scenario.model_id == model_id))
-    session.exec(delete(ModelMetrics).where(ModelMetrics.model_id == model_id))
+def delete_model(
+    model_id: str,
+    membership: CurrentMembership = Depends(require_write_access),
+    session: Session = Depends(get_session),
+):
+    m = get_scoped(session, Model, model_id, membership.company_id)
+    session.exec(delete(Scenario).where(Scenario.model_id == model_id, Scenario.company_id == membership.company_id))
+    session.exec(delete(ModelMetrics).where(ModelMetrics.model_id == model_id, ModelMetrics.company_id == membership.company_id))
     session.delete(m)
     session.commit()
     invalidate_cache_for_model(model_id)
     return {"status": "deleted"}
 
 
-def _apply_role(session: Session, model: Model, role: str):
+def _apply_role(session: Session, model: Model, role: str, company_id: str):
     if role not in ROLE_CHOICES:
         raise HTTPException(status_code=400, detail="Invalid role")
     # Clear hero/challenger slots
-    dataset_models = session.exec(select(Model).where(Model.dataset_id == model.dataset_id)).all()
+    dataset_models = session.exec(
+        select(Model).where(Model.dataset_id == model.dataset_id, Model.company_id == company_id)
+    ).all()
     if role == "hero":
         for other in dataset_models:
             if other.role == "hero":
@@ -485,33 +521,38 @@ def _apply_role(session: Session, model: Model, role: str):
 
 
 @router.post("/{model_id}/role")
-def set_role(model_id: str, body: ModelRoleRequest, session: Session = Depends(get_session)):
-    m = session.get(Model, model_id)
-    if not m:
-        raise HTTPException(status_code=404, detail="Model not found")
-    _apply_role(session, m, body.role)
+def set_role(
+    model_id: str,
+    body: ModelRoleRequest,
+    membership: CurrentMembership = Depends(require_write_access),
+    session: Session = Depends(get_session),
+):
+    m = get_scoped(session, Model, model_id, membership.company_id)
+    _apply_role(session, m, body.role, membership.company_id)
     session.commit()
     return {"status": "ok"}
 
 
 @router.post("/{model_id}/hero")
-def mark_hero(model_id: str, session: Session = Depends(get_session)):
-    m = session.get(Model, model_id)
-    if not m:
-        raise HTTPException(status_code=404, detail="Model not found")
-    _apply_role(session, m, "hero")
+def mark_hero(
+    model_id: str,
+    membership: CurrentMembership = Depends(require_write_access),
+    session: Session = Depends(get_session),
+):
+    m = get_scoped(session, Model, model_id, membership.company_id)
+    _apply_role(session, m, "hero", membership.company_id)
     session.commit()
     return {"status": "ok"}
 
 
 @router.get("/{model_id}/summary", response_model=ModelSummaryResponse)
-def model_summary(model_id: str, session: Session = Depends(get_session)):
-    m = session.get(Model, model_id)
-    if not m:
-        raise HTTPException(status_code=404, detail="Model not found")
-    ds = session.get(Dataset, m.dataset_id)
-    if not ds:
-        raise HTTPException(status_code=404, detail="Dataset not found")
+def model_summary(
+    model_id: str,
+    membership: CurrentMembership = Depends(get_current_membership),
+    session: Session = Depends(get_session),
+):
+    m = get_scoped(session, Model, model_id, membership.company_id)
+    ds = get_scoped(session, Dataset, m.dataset_id, membership.company_id)
     df = _load_df(ds)
     x_vars = json.loads(m.x_vars_json)
     work, y, X = _prepare_training_frame(df, m.y_var, x_vars)
@@ -585,14 +626,11 @@ def model_predictions(
     model_id: str,
     granularity: str = Query("auto", regex="^(auto|weekly|monthly)$"),
     time_col: Optional[str] = Query(None),
+    membership: CurrentMembership = Depends(get_current_membership),
     session: Session = Depends(get_session),
 ):
-    m = session.get(Model, model_id)
-    if not m:
-        raise HTTPException(status_code=404, detail="Model not found")
-    ds = session.get(Dataset, m.dataset_id)
-    if not ds:
-        raise HTTPException(status_code=404, detail="Dataset not found")
+    m = get_scoped(session, Model, model_id, membership.company_id)
+    ds = get_scoped(session, Dataset, m.dataset_id, membership.company_id)
     df = _load_df(ds)
     x_vars = json.loads(m.x_vars_json)
     work, y, X = _prepare_training_frame(df, m.y_var, x_vars)

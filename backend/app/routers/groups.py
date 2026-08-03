@@ -7,8 +7,10 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func
 from sqlmodel import Session, select, delete
 
+from ..auth import CurrentMembership, get_current_membership, require_write_access
 from ..db import get_session
 from ..models import Group, Subgroup, Dataset, Variable
+from ..tenancy import get_scoped
 from ..schemas import (
     GroupOut,
     SubgroupOut,
@@ -24,10 +26,17 @@ router = APIRouter()
 
 
 @router.get("", response_model=List[GroupOut])
-def list_groups(session: Session = Depends(get_session)):
-    groups = session.exec(select(Group)).all()
+def list_groups(
+    membership: CurrentMembership = Depends(get_current_membership),
+    session: Session = Depends(get_session),
+):
+    groups = session.exec(select(Group).where(Group.company_id == membership.company_id)).all()
     group_ids = [g.id for g in groups]
-    subgroups = session.exec(select(Subgroup)).all() if groups else []
+    subgroups = (
+        session.exec(select(Subgroup).where(Subgroup.company_id == membership.company_id)).all()
+        if groups
+        else []
+    )
     sg_by_gid: dict[str, list[Subgroup]] = {gid: [] for gid in group_ids}
     for sg in subgroups:
         sg_by_gid.setdefault(sg.group_id, []).append(sg)
@@ -42,49 +51,55 @@ def list_groups(session: Session = Depends(get_session)):
 
 
 @router.post("", response_model=GroupOut)
-def create_group(body: CreateGroupRequest, session: Session = Depends(get_session)):
-    g = Group(id=str(uuid.uuid4()), name=body.name)
+def create_group(
+    body: CreateGroupRequest,
+    membership: CurrentMembership = Depends(require_write_access),
+    session: Session = Depends(get_session),
+):
+    g = Group(id=str(uuid.uuid4()), company_id=membership.company_id, name=body.name)
     session.add(g)
     session.commit()
     return GroupOut(id=g.id, name=g.name, subgroups=[])
 
 
 @router.post("/subgroups", response_model=SubgroupOut)
-def create_subgroup(body: CreateSubgroupRequest, session: Session = Depends(get_session)):
-    g = session.get(Group, body.group_id)
-    if not g:
-        raise HTTPException(status_code=404, detail="Group not found")
-    sg = Subgroup(id=str(uuid.uuid4()), group_id=g.id, name=body.name)
+def create_subgroup(
+    body: CreateSubgroupRequest,
+    membership: CurrentMembership = Depends(require_write_access),
+    session: Session = Depends(get_session),
+):
+    g = get_scoped(session, Group, body.group_id, membership.company_id)
+    sg = Subgroup(id=str(uuid.uuid4()), company_id=membership.company_id, group_id=g.id, name=body.name)
     session.add(sg)
     session.commit()
     return SubgroupOut(id=sg.id, group_id=sg.group_id, name=sg.name)
 
 
 @router.post("/assign")
-def assign_variable(body: AssignVariableRequest, session: Session = Depends(get_session)):
-    ds = session.get(Dataset, body.dataset_id)
-    if not ds:
-        raise HTTPException(status_code=404, detail="Dataset not found")
+def assign_variable(
+    body: AssignVariableRequest,
+    membership: CurrentMembership = Depends(require_write_access),
+    session: Session = Depends(get_session),
+):
+    ds = get_scoped(session, Dataset, body.dataset_id, membership.company_id)
 
     var = session.exec(
         select(Variable).where(
-            (Variable.dataset_id == body.dataset_id) & (Variable.name == body.variable_name)
+            (Variable.dataset_id == ds.id)
+            & (Variable.company_id == membership.company_id)
+            & (Variable.name == body.variable_name)
         )
     ).first()
     if not var:
         raise HTTPException(status_code=404, detail="Variable not found")
 
-    group = session.get(Group, body.group_id) if body.group_id else None
-    subgroup = session.get(Subgroup, body.subgroup_id) if body.subgroup_id else None
+    group = get_scoped(session, Group, body.group_id, membership.company_id) if body.group_id else None
+    subgroup = get_scoped(session, Subgroup, body.subgroup_id, membership.company_id) if body.subgroup_id else None
 
     if subgroup and group and subgroup.group_id != group.id:
         raise HTTPException(status_code=400, detail="Subgroup does not belong to group")
     if subgroup and not group:
-        group = session.get(Group, subgroup.group_id)
-    if body.group_id and not group:
-        raise HTTPException(status_code=404, detail="Group not found")
-    if body.subgroup_id and not subgroup:
-        raise HTTPException(status_code=404, detail="Subgroup not found")
+        group = get_scoped(session, Group, subgroup.group_id, membership.company_id)
 
     var.group_id = group.id if group else None
     var.subgroup_id = subgroup.id if subgroup else None
@@ -94,15 +109,22 @@ def assign_variable(body: AssignVariableRequest, session: Session = Depends(get_
 
 
 @router.patch("/{group_id}", response_model=GroupOut)
-def rename_group(group_id: str, body: RenameGroupRequest, session: Session = Depends(get_session)):
-    group = session.get(Group, group_id)
-    if not group:
-        raise HTTPException(status_code=404, detail="Group not found")
+def rename_group(
+    group_id: str,
+    body: RenameGroupRequest,
+    membership: CurrentMembership = Depends(require_write_access),
+    session: Session = Depends(get_session),
+):
+    group = get_scoped(session, Group, group_id, membership.company_id)
     new_name = body.name.strip()
     if not new_name:
         raise HTTPException(status_code=400, detail={"error": "Name cannot be empty"})
     conflict = session.exec(
-        select(Group).where(func.lower(Group.name) == new_name.lower(), Group.id != group_id)
+        select(Group).where(
+            Group.company_id == membership.company_id,
+            func.lower(Group.name) == new_name.lower(),
+            Group.id != group_id,
+        )
     ).first()
     if conflict:
         raise HTTPException(status_code=400, detail={"error": "Group name already exists"})
@@ -110,7 +132,9 @@ def rename_group(group_id: str, body: RenameGroupRequest, session: Session = Dep
     session.add(group)
     session.commit()
     session.refresh(group)
-    subgroups = session.exec(select(Subgroup).where(Subgroup.group_id == group.id)).all()
+    subgroups = session.exec(
+        select(Subgroup).where(Subgroup.group_id == group.id, Subgroup.company_id == membership.company_id)
+    ).all()
     return GroupOut(
         id=group.id,
         name=group.name,
@@ -119,16 +143,20 @@ def rename_group(group_id: str, body: RenameGroupRequest, session: Session = Dep
 
 
 @router.patch("/subgroups/{subgroup_id}", response_model=SubgroupOut)
-def rename_subgroup(subgroup_id: str, body: RenameSubgroupRequest, session: Session = Depends(get_session)):
-    subgroup = session.get(Subgroup, subgroup_id)
-    if not subgroup:
-        raise HTTPException(status_code=404, detail="Subgroup not found")
+def rename_subgroup(
+    subgroup_id: str,
+    body: RenameSubgroupRequest,
+    membership: CurrentMembership = Depends(require_write_access),
+    session: Session = Depends(get_session),
+):
+    subgroup = get_scoped(session, Subgroup, subgroup_id, membership.company_id)
     new_name = body.name.strip()
     if not new_name:
         raise HTTPException(status_code=400, detail={"error": "Name cannot be empty"})
     conflict = session.exec(
         select(Subgroup).where(
             Subgroup.group_id == subgroup.group_id,
+            Subgroup.company_id == membership.company_id,
             func.lower(Subgroup.name) == new_name.lower(),
             Subgroup.id != subgroup_id,
         )
@@ -146,43 +174,52 @@ def rename_subgroup(subgroup_id: str, body: RenameSubgroupRequest, session: Sess
 def delete_group(
     group_id: str,
     reassign: str = Query("uncategorized", regex="^(uncategorized|none)$"),
+    membership: CurrentMembership = Depends(require_write_access),
     session: Session = Depends(get_session),
 ):
-    group = session.get(Group, group_id)
-    if not group:
-        raise HTTPException(status_code=404, detail="Group not found")
+    group = get_scoped(session, Group, group_id, membership.company_id)
 
     variable_count = session.exec(
-        select(func.count()).select_from(Variable).where(Variable.group_id == group_id)
+        select(func.count())
+        .select_from(Variable)
+        .where(Variable.group_id == group_id, Variable.company_id == membership.company_id)
     ).one()
     count_value = int(variable_count[0] if isinstance(variable_count, tuple) else variable_count or 0)
-    session.exec(delete(Subgroup).where(Subgroup.group_id == group_id))
+    session.exec(
+        delete(Subgroup).where(Subgroup.group_id == group_id, Subgroup.company_id == membership.company_id)
+    )
     session.exec(
         Variable.__table__.update()
-        .where(Variable.group_id == group_id)
+        .where(Variable.group_id == group_id, Variable.company_id == membership.company_id)
         .values(group_id=None, subgroup_id=None)
     )
-    session.exec(delete(Group).where(Group.id == group_id))
+    session.exec(delete(Group).where(Group.id == group.id, Group.company_id == membership.company_id))
     session.commit()
     return {"deleted_group_id": group_id, "reassigned_variables": count_value}
 
 
 @router.delete("/subgroups/{subgroup_id}")
-def delete_subgroup(subgroup_id: str, session: Session = Depends(get_session)):
-    subgroup = session.get(Subgroup, subgroup_id)
-    if not subgroup:
-        raise HTTPException(status_code=404, detail="Subgroup not found")
+def delete_subgroup(
+    subgroup_id: str,
+    membership: CurrentMembership = Depends(require_write_access),
+    session: Session = Depends(get_session),
+):
+    subgroup = get_scoped(session, Subgroup, subgroup_id, membership.company_id)
 
     variable_count = session.exec(
-        select(func.count()).select_from(Variable).where(Variable.subgroup_id == subgroup_id)
+        select(func.count())
+        .select_from(Variable)
+        .where(Variable.subgroup_id == subgroup_id, Variable.company_id == membership.company_id)
     ).one()
     count_value = int(variable_count[0] if isinstance(variable_count, tuple) else variable_count or 0)
     session.exec(
         Variable.__table__.update()
-        .where(Variable.subgroup_id == subgroup_id)
+        .where(Variable.subgroup_id == subgroup_id, Variable.company_id == membership.company_id)
         .values(subgroup_id=None)
     )
-    session.exec(delete(Subgroup).where(Subgroup.id == subgroup_id))
+    session.exec(
+        delete(Subgroup).where(Subgroup.id == subgroup.id, Subgroup.company_id == membership.company_id)
+    )
     session.commit()
     return {
         "deleted_subgroup_id": subgroup_id,

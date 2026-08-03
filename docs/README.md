@@ -1,41 +1,12 @@
-# Aion Monorepo
+# Aion — Especificación técnica por módulo
 
-This repository contains a modular analytics application with a Next.js frontend and a FastAPI backend.
+> Descripción general del proyecto, estado actual y setup de desarrollo: ver `README.md` en la
+> raíz. Historial de decisiones y pendientes: ver `BITACORA.md`.
 
-## Structure
+Este documento es la referencia de contratos (endpoints, request/response) entre frontend y
+backend, por módulo. Actualízalo cuando agregues o cambies un endpoint.
 
-- `frontend/` — Next.js 14 App Router UI
-- `backend/` — FastAPI app with SQLite (local) and Parquet data storage
-- `data/` — Local dataset storage (Parquet). Ignored by git.
-- `modules/` — Placeholders for domain modules (transform/modeling/etc.)
-
-## Local Development
-
-### Backend
-
-1. Create and activate a virtual environment
-   - PowerShell: `python -m venv .venv; . .venv/Scripts/Activate.ps1`
-2. Install dependencies
-   - `pip install -r backend/requirements.txt`
-3. Run the server
-   - `uvicorn app.main:app --reload --port 8000 --app-dir backend`
-4. Environment
-   - Copy `backend/.env.example` to `backend/.env` (optional)
-   - `AION_DATA_ROOT` defaults to `../data` from backend; adjust as needed.
-
-### Frontend
-
-1. Install dependencies
-   - `cd frontend`
-   - `npm install` (or `pnpm install`)
-2. Set environment
-   - Create `frontend/.env.local` with `NEXT_PUBLIC_API_URL=http://localhost:8000`
-3. Run the dev server
-   - `npm run dev` (visits http://localhost:3000)
-4. Charts
-   - Ensure `recharts` is installed: `npm install recharts`
-
-### Module 1
+## Module 1
 
 - UI: `/datasets` replaces the legacy upload screen. Drag-and-drop zone, dataset list with stats, schema preview, rename/delete actions, dependency warning modal, sticky toasts.
 - Upload endpoint `POST /datasets/upload?force=false` computes file checksum and blocks silent duplicates (409 response with `dataset_id` so the UI can re-use or force upload).
@@ -47,7 +18,7 @@ This repository contains a modular analytics application with a Next.js frontend
 - Time variable selector: choose a temporal column inside the dataset detail card. `GET /datasets/{id}/time_candidates` suggests columns; `PATCH /datasets/{id}/time_variable` saves `{ column, coerce, time_format, timezone }` (or clears when `column=null`). All analytics endpoints now load data via the helper that enforces sample size + datetime parsing, so temporal features (lag/decay, stacked charts, scenario horizons) stay consistent.
 - Replace dataset file: new “Update File” action opens a modal that uploads a CSV/XLSX via `POST /datasets/{id}/update` (strict vs. force schema modes). Each replacement writes `/data/{dataset_id}/v{n}.parquet`, bumps the dataset’s `version`, and archives the previous file so `GET /datasets/{id}/versions` can list history. Schema differences return 400 with added/removed columns, and a success toast announces the new version.
 
-### Module 2
+## Module 2
 
 - UI: `/transform` provides a variable browser with search/filter, drag & drop categorization into Groups/Subgroups, derived badges, sparkline previews, undo (Ctrl+Z), and history modals per variable.
 - Backend:
@@ -59,7 +30,7 @@ This repository contains a modular analytics application with a Next.js frontend
   - Variables now store `group_id`, `subgroup_id`, and history is persisted via `variable_history`.
 - Group assignment compatibility route `/groups/assign` now updates the variable record directly.
 
-### Module 3
+## Module 3
 
 - Correlations: `GET /models/correlations?dataset_id=...&y=...` (numeric columns only).
 - Create models: `POST /models` with `dataset_id`, `name`, `y_var`, `x_vars`.
@@ -71,48 +42,15 @@ This repository contains a modular analytics application with a Next.js frontend
 - Metrics stored: R², Adjusted R², VIF, Durbin–Watson, MAE, RMSE, MAPE (exposed via `ModelOut.metrics`).
 - Frontend `/modeling` now offers correlation bars with search, creation/edit form, model table with hero/challenger controls, comparison dashboard, hero coefficient table, and actual-vs-model chart with residual toggle.
 
-### Module 4
+## Module 4
 
 - Summary contributions: `GET /analysis/{model_id}/summary?include_intercept=bool&as_percent=bool` now aggregates each predictor as the sum of `beta_i * X_i,t` over the filtered date range (baseline = intercept × row count), so dashboard cards and the summary table react immediately to the selected period. Download: `GET /analysis/{model_id}/export/summary.xlsx`.
 - Stacked contributions: `GET /analysis/{model_id}/stacked?time_col=...&freq=day|week|month&by=group|subgroup&include_intercept=bool&as_percent=bool` uses the same date-filtered sums per period; Excel download: `GET /analysis/{model_id}/export/stacked.xlsx`.
 - Frontend `/analysis` now offers dashboard cards (total, baseline, top groups), value/% toggles, stacked area chart, and download buttons with icons.
 
-### Module 5
+## Module 5
 
 - Scenario builder is now a time-phased planner: choose horizon, start date, and frequency, then edit a grid of periods × variables (either multipliers or absolute overrides). Saved scenarios (max 3 per model) surface as cards with quick metrics and load/delete actions; comparisons and projected totals update in real time with toasts + micro loading states.
 - Preview endpoint: `POST /predict/scenarios/preview` with `{ model_id, horizon, start_date, freq, adjustments }` returns `{ periods, total, average_per_period, groups, subgroups, series }` for instant UI feedback.
 - Scenario CRUD: `POST /predict/scenarios` saves a scenario, `GET /predict/scenarios?model_id=...` lists them, `GET /predict/scenarios/{id}` fetches one, `PATCH /predict/scenarios/{id}` renames/updates adjustments, and `DELETE /predict/scenarios/{id}` removes it. All responses carry the summary block described above.
 - Time series + exports: `GET /predict/scenarios/{id}/timeseries` provides per-period `{ y_pred, by_group, by_subgroup }`. Import a CSV plan via `POST /predict/scenarios/{id}/import` (columns: period, variable, mode, value) and export CSV/XLSX with `GET /predict/scenarios/{id}/export?format=csv|xlsx`.
-
-
-## Deployment
-
-- Frontend: Deploy `frontend/` to Vercel. Set `NEXT_PUBLIC_API_URL` to your backend URL.
-- Backend: Deploy FastAPI to a platform (Railway/Render/Fly). Use Postgres in production and S3-compatible storage for data if needed.
-
-## UI Enhancements
-
-- Sticky header with scroll shrink, route highlighting, and a theme toggle (light/dark).
-- Shared design tokens (Inter font, spacing scale, cards, badges, toasts via `sonner`).
-
-## Next Steps
-
-- Harden validations (e.g., scenario editing, limits, better error states)
-- Add PNG exports for charts if needed
-- Module 1: Hidde variables
-- Module 1: Set up dependent variable
-- Module 2: Correlations must be vs dependent variable
-- Module 2: Adstock optimization
-- Module 3: Modelling animation
-- Module 3: Add other alorithms (NN, Random Forest, XGBoost, etc...)
-- Module 4: Set up conversion rate / template download / upload
-- Module 4: Set up average price / template download / upload
-- Module 4: Set up costs by group, subgroup and variable / template download / upload
-- Module 4: ROAS calculation, card and visualization
-- Module 5: Forecasting editable table
-- Module 5: Fix mean calc. by week, month,...
-- Module 5: Add actual (last period selected) in projected chart
-- Module 5: Forecast with original variable, backend transform before prediction
-- Module 5: Select and compare scenarios
-- Module 6: Configuration Module (palette color, users)
-- Module 7: Profile (password)

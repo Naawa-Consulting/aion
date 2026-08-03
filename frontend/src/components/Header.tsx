@@ -6,6 +6,8 @@ import { usePathname } from "next/navigation";
 import clsx from "clsx";
 import { useTheme } from "next-themes";
 import { Moon, Sun } from "lucide-react";
+import { CompanySwitcher } from "@/components/company-switcher";
+import { UserMenu } from "@/components/user-menu";
 
 const NAV_LINKS = [
   { href: "/datasets", label: "Datasets" },
@@ -84,8 +86,10 @@ export default function Header() {
             ))}
           </nav>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-3">
+          <CompanySwitcher />
           <ThemeToggle />
+          <UserMenu />
         </div>
       </div>
       <nav className="md:hidden px-6 mt-3 flex items-center gap-2 overflow-x-auto">

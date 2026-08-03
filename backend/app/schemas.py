@@ -416,6 +416,42 @@ class ScenarioProjectedExportRequest(ScenarioPreviewRequest):
     include_hero: bool = True
 
 
+MembershipRole = Literal["modelador", "visualizador", "admin_compania"]
+
+
+class CompanyOut(BaseModel):
+    id: str
+    name: str
+    created_at: datetime
+
+
+class CreateCompanyRequest(BaseModel):
+    name: str
+    admin_user_id: str
+
+
+class MembershipOut(BaseModel):
+    user_id: str
+    company_id: str
+    role: MembershipRole
+    created_at: datetime
+
+
+class AddMembershipRequest(BaseModel):
+    user_id: str
+    role: MembershipRole
+
+
+class UpdateMembershipRequest(BaseModel):
+    role: MembershipRole
+
+
+class MyMembershipOut(BaseModel):
+    company_id: str
+    company_name: str
+    role: MembershipRole
+
+
 # Rebuild models so FastAPI/Pydantic resolve forward references with future annotations
 ScenarioPreviewRequest.model_rebuild()
 ScenarioAssumptionsExportRequest.model_rebuild()

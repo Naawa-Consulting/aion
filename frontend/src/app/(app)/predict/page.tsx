@@ -7,6 +7,8 @@ import { toast } from "sonner";
 import { Card, CardHeader } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import ScenarioSheetGlide, { type MultipliersMap } from "@/components/predict/ScenarioSheetGlide";
+import { apiFetch, ApiError } from "@/lib/api";
+import { useCanEdit } from "@/hooks/useCanEdit";
 
 type Dataset = { id: string; display_name: string; columns: { name: string; dtype: string }[] };
 type Model = {
@@ -59,9 +61,8 @@ type Scenario = {
 
 const DEFAULT_MULTIPLIER = 1;
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
-
 export default function PredictPage() {
+  const canEdit = useCanEdit();
   const [datasets, setDatasets] = useState<Dataset[]>([]);
   const [selectedDataset, setSelectedDataset] = useState("");
   const [models, setModels] = useState<Model[]>([]);
@@ -141,9 +142,7 @@ export default function PredictPage() {
 
   const fetchDatasets = useCallback(async () => {
     try {
-      const res = await fetch(`${API_URL}/datasets`);
-      if (!res.ok) throw new Error();
-      const data = await res.json();
+      const data = await apiFetch<Dataset[]>("/datasets");
       setDatasets(data);
       if (data.length) {
         setSelectedDataset((prev) => (prev ? prev : data[0].id));
@@ -155,9 +154,7 @@ export default function PredictPage() {
 
   const fetchModels = useCallback(async (datasetId: string) => {
     try {
-      const res = await fetch(`${API_URL}/models?dataset_id=${datasetId}`);
-      if (!res.ok) throw new Error();
-      const data = await res.json();
+      const data = await apiFetch<any[]>(`/models?dataset_id=${datasetId}`);
       const normalized: Model[] = data.map((m: any) => ({
         id: m.id,
         name: m.name,
@@ -186,13 +183,11 @@ export default function PredictPage() {
         freq,
         adjustments: customAdjustments,
       };
-      const res = await fetch(`${API_URL}/predict/scenarios/preview`, {
+      const data = await apiFetch<ScenarioSummary>("/predict/scenarios/preview", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
-      if (!res.ok) throw new Error(await res.text());
-      const data: ScenarioSummary = await res.json();
       return data;
     },
     [selectedModel, horizon, startDate, freq]
@@ -213,13 +208,11 @@ export default function PredictPage() {
 
   const fetchBaselineVariables = useCallback(async (modelId: string) => {
     try {
-      const res = await fetch(`${API_URL}/predict/${modelId}/simulate`, {
+      const data = await apiFetch<any>(`/predict/${modelId}/simulate`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ adjustments: [] }),
       });
-      if (!res.ok) throw new Error(await res.text());
-      const data = await res.json();
       setVariables(data.variables || []);
       fetchPreview();
     } catch {
@@ -229,9 +222,7 @@ export default function PredictPage() {
 
   const fetchScenarios = useCallback(async (modelId: string) => {
     try {
-      const res = await fetch(`${API_URL}/predict/scenarios?model_id=${modelId}`);
-      if (!res.ok) throw new Error(await res.text());
-      const data = await res.json();
+      const data = await apiFetch<Scenario[]>(`/predict/scenarios?model_id=${modelId}`);
       setScenarios(data);
     } catch {
       toast.error("Failed to load scenarios");
@@ -329,17 +320,15 @@ export default function PredictPage() {
         freq,
         adjustments,
       };
-      const url = currentScenarioId
-        ? `${API_URL}/predict/scenarios/${currentScenarioId}`
-        : `${API_URL}/predict/scenarios`;
+      const path = currentScenarioId
+        ? `/predict/scenarios/${currentScenarioId}`
+        : `/predict/scenarios`;
       const method = currentScenarioId ? "PATCH" : "POST";
-      const res = await fetch(url, {
+      const data = await apiFetch<Scenario>(path, {
         method,
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
-      if (!res.ok) throw new Error(await res.text());
-      const data: Scenario = await res.json();
       setScenarioName(data.name);
       setHorizon(data.horizon);
       setStartDate(data.start_date);
@@ -373,8 +362,7 @@ export default function PredictPage() {
   const handleDeleteScenario = async (scenarioId: string) => {
     if (!window.confirm("Delete this scenario? This cannot be undone.")) return;
     try {
-      const res = await fetch(`${API_URL}/predict/scenarios/${scenarioId}`, { method: "DELETE" });
-      if (!res.ok) throw new Error(await res.text());
+      await apiFetch<void>(`/predict/scenarios/${scenarioId}`, { method: "DELETE" });
       toast.success("Scenario deleted");
       if (currentScenarioId === scenarioId) {
         setCurrentScenarioId(null);
@@ -408,12 +396,11 @@ export default function PredictPage() {
         return;
       }
       try {
-        const res = await fetch(`${API_URL}/predict/scenarios/${scenarioId}`, {
+        await apiFetch<Scenario>(`/predict/scenarios/${scenarioId}`, {
           method: "PATCH",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ name: trimmed }),
         });
-        if (!res.ok) throw new Error(await res.text());
         toast.success("Scenario renamed");
         if (currentScenarioId === scenarioId) {
           setScenarioName(trimmed);
@@ -597,21 +584,17 @@ export default function PredictPage() {
         mode: editMode,
         scenario_name: scenarioName || dependentLabel,
       };
-      const res = await fetch(`${API_URL}/predict/scenarios/assumptions/export`, {
+      const blob = await apiFetch<Blob>("/predict/scenarios/assumptions/export", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
+        responseType: "blob",
       });
-      if (!res.ok) {
-        const message = await res.text();
-        throw new Error(message || "Failed to export assumptions");
-      }
-      const fallback = buildExportFilename(scenarioName || dependentLabel || "scenario", "assumptions");
-      const filename = extractFilenameFromResponse(res, fallback);
-      const blob = await res.blob();
+      const filename = buildExportFilename(scenarioName || dependentLabel || "scenario", "assumptions");
       downloadBlob(blob, filename);
-    } catch (error: any) {
-      toast.error(error?.message || "Failed to export assumptions");
+    } catch (error) {
+      const message = error instanceof ApiError ? (error.detail?.detail || error.detail?.error) : null;
+      toast.error(message || (error as Error)?.message || "Failed to export assumptions");
     } finally {
       setAssumptionsExporting(false);
     }
@@ -643,21 +626,17 @@ export default function PredictPage() {
         scenario_name: scenarioName || dependentLabel,
         include_hero: true,
       };
-      const res = await fetch(`${API_URL}/predict/scenarios/projected/export`, {
+      const blob = await apiFetch<Blob>("/predict/scenarios/projected/export", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
+        responseType: "blob",
       });
-      if (!res.ok) {
-        const message = await res.text();
-        throw new Error(message || "Failed to export totals");
-      }
-      const fallback = buildExportFilename(scenarioName || dependentLabel || "scenario", "projected");
-      const filename = extractFilenameFromResponse(res, fallback);
-      const blob = await res.blob();
+      const filename = buildExportFilename(scenarioName || dependentLabel || "scenario", "projected");
       downloadBlob(blob, filename);
-    } catch (error: any) {
-      toast.error(error?.message || "Failed to export totals");
+    } catch (error) {
+      const message = error instanceof ApiError ? (error.detail?.detail || error.detail?.error) : null;
+      toast.error(message || (error as Error)?.message || "Failed to export totals");
     } finally {
       setTotalsExporting(false);
     }
@@ -762,7 +741,8 @@ export default function PredictPage() {
           <Button
             variant="secondary"
             onClick={handleSaveScenario}
-            disabled={saving || !selectedModel || reachedScenarioLimit}
+            disabled={!canEdit || saving || !selectedModel || reachedScenarioLimit}
+            title={!canEdit ? "Solo lectura: tu rol es Visualizador" : undefined}
           >
             {saving ? "Saving..." : saveButtonLabel}
           </Button>
@@ -972,7 +952,12 @@ export default function PredictPage() {
                     <Button variant="secondary" onClick={() => handleLoadScenario(scenario)}>
                       Load
                     </Button>
-                    <Button variant="ghost" onClick={() => handleDeleteScenario(scenario.id)}>
+                    <Button
+                      variant="ghost"
+                      onClick={() => handleDeleteScenario(scenario.id)}
+                      disabled={!canEdit}
+                      title={!canEdit ? "Solo lectura: tu rol es Visualizador" : undefined}
+                    >
                       Delete
                     </Button>
                   </div>
@@ -1131,13 +1116,6 @@ function downloadBlob(blob: Blob, filename: string) {
   link.click();
   link.remove();
   URL.revokeObjectURL(url);
-}
-
-function extractFilenameFromResponse(response: Response, fallback: string) {
-  const disposition = response.headers.get("Content-Disposition");
-  if (!disposition) return fallback;
-  const match = /filename="?([^";]+)"?/i.exec(disposition);
-  return match?.[1] ?? fallback;
 }
 
 function buildExportFilename(base: string, suffix: string) {

@@ -11,6 +11,8 @@ import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { SelectedPredictorsQuickView } from "@/components/modeling/SelectedPredictorsQuickView";
 import { FilterBar, FilterField } from "@/components/ui/filter-bar";
+import { apiFetch, ApiError } from "@/lib/api";
+import { useCanEdit } from "@/hooks/useCanEdit";
 
 type Dataset = { id: string; display_name: string; columns: { name: string; dtype: string }[] };
 type Variable = { id: string; name: string; dtype: string };
@@ -66,8 +68,6 @@ type Predictions = {
 type GroupFilter = "all" | string;
 type SubgroupFilter = "all" | string;
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
-
 const formatPValue = (value: number) => {
   if (value == null || Number.isNaN(value)) return "-";
   return value < 0.0001 ? "<0.0001" : value.toFixed(4);
@@ -87,10 +87,11 @@ const formatTimeLabel = (value: string | number, includeYear = true) => {
     }
     return parsed.toLocaleDateString(undefined, options);
   }
-  return value;
+  return String(value);
 };
 
 export default function ModelingPage() {
+  const canEdit = useCanEdit();
   const [datasets, setDatasets] = useState<Dataset[]>([]);
   const [selectedDataset, setSelectedDataset] = useState<string>("");
   const [variables, setVariables] = useState<Variable[]>([]);
@@ -136,15 +137,13 @@ const [subgroupFilter, setSubgroupFilter] = useState<SubgroupFilter>("all");
 
   const fetchDatasets = useCallback(async () => {
     try {
-      const res = await fetch(`${API_URL}/datasets`);
-      if (!res.ok) throw new Error();
-      const data = await res.json();
+      const data = await apiFetch<Dataset[]>("/datasets");
       setDatasets(data);
       if (data.length) {
         setSelectedDataset((prev) => (prev ? prev : data[0].id));
       }
-    } catch {
-      toast.error("Failed to load datasets");
+    } catch (err) {
+      toast.error((err as Error)?.message || "Failed to load datasets");
     }
   }, []);
 
@@ -154,28 +153,24 @@ const [subgroupFilter, setSubgroupFilter] = useState<SubgroupFilter>("all");
 
   const fetchVariables = useCallback(async (datasetId: string) => {
     try {
-      const res = await fetch(`${API_URL}/variables?dataset_id=${datasetId}`);
-      if (!res.ok) throw new Error();
-      const data = await res.json();
+      const data = await apiFetch<any[]>(`/variables?dataset_id=${datasetId}`);
       const mapped: Variable[] = data.map((v: any) => ({ id: v.id, name: v.name, dtype: v.dtype }));
       setVariables(mapped);
       const numeric = mapped.find((v) => /int|float|double|decimal|number/i.test(v.dtype));
       if (numeric) {
         setYVar((prev) => (prev ? prev : numeric.name));
       }
-    } catch {
-      toast.error("Failed to load variables");
+    } catch (err) {
+      toast.error((err as Error)?.message || "Failed to load variables");
     }
   }, []);
 
   const fetchModels = useCallback(async (datasetId: string) => {
     try {
-      const res = await fetch(`${API_URL}/models?dataset_id=${datasetId}`);
-      if (!res.ok) throw new Error();
-      const data = await res.json();
+      const data = await apiFetch<Model[]>(`/models?dataset_id=${datasetId}`);
       setModels(data);
-    } catch {
-      toast.error("Failed to load models");
+    } catch (err) {
+      toast.error((err as Error)?.message || "Failed to load models");
     }
   }, []);
 
@@ -192,20 +187,17 @@ const [subgroupFilter, setSubgroupFilter] = useState<SubgroupFilter>("all");
       if (modelId) {
         params.append("model_id", modelId);
       }
-      const res = await fetch(`${API_URL}/models/correlations?${params.toString()}`);
-      if (!res.ok) throw new Error();
-      const data = await res.json();
+      const data = await apiFetch<{ items: CorrelationItem[] }>(`/models/correlations?${params.toString()}`);
       setCorr(data.items);
-    } catch {
-      toast.error("Failed to compute correlations");
+    } catch (err) {
+      toast.error((err as Error)?.message || "Failed to compute correlations");
     }
   };
 
   const fetchSummary = async (modelId: string) => {
     try {
-      const res = await fetch(`${API_URL}/models/${modelId}/summary`);
-      if (!res.ok) throw new Error();
-      setSummary(await res.json());
+      const data = await apiFetch<ModelSummary>(`/models/${modelId}/summary`);
+      setSummary(data);
     } catch {
       setSummary(null);
     }
@@ -213,9 +205,8 @@ const [subgroupFilter, setSubgroupFilter] = useState<SubgroupFilter>("all");
 
   const fetchPredictions = async (modelId: string) => {
     try {
-      const res = await fetch(`${API_URL}/models/${modelId}/predictions?granularity=auto`);
-      if (!res.ok) throw new Error();
-      setPredictions(await res.json());
+      const data = await apiFetch<Predictions>(`/models/${modelId}/predictions?granularity=auto`);
+      setPredictions(data);
     } catch {
       setPredictions(null);
     }
@@ -254,26 +245,26 @@ const [subgroupFilter, setSubgroupFilter] = useState<SubgroupFilter>("all");
     setLoading(true);
     try {
       if (editingModelId) {
-        const res = await fetch(`${API_URL}/models/${editingModelId}`, {
+        await apiFetch(`/models/${editingModelId}`, {
           method: "PATCH",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ name: modelName, x_vars: xSelected }),
         });
-        if (!res.ok) throw new Error(await res.text());
         toast.success("Model updated");
       } else {
-        const res = await fetch(`${API_URL}/models`, {
+        await apiFetch("/models", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ dataset_id: selectedDataset, name: modelName, y_var: yVar, x_vars: xSelected }),
         });
-        if (!res.ok) throw new Error(await res.text());
         toast.success("Model created");
       }
       await fetchModels(selectedDataset);
       resetForm();
-    } catch (err: any) {
-      toast.error(err?.message || "Could not save model");
+    } catch (err) {
+      const detail = err instanceof ApiError ? err.detail : null;
+      const detailMessage = typeof detail === "string" ? detail : detail?.detail || detail?.error;
+      toast.error(detailMessage || (err as Error)?.message || "Could not save model");
     } finally {
       setLoading(false);
     }
@@ -295,12 +286,13 @@ const [subgroupFilter, setSubgroupFilter] = useState<SubgroupFilter>("all");
   const deleteModel = async (model: Model) => {
     if (!confirm(`Delete model ${model.name}?`)) return;
     try {
-      const res = await fetch(`${API_URL}/models/${model.id}`, { method: "DELETE" });
-      if (!res.ok) throw new Error(await res.text());
+      await apiFetch(`/models/${model.id}`, { method: "DELETE" });
       toast.success("Model deleted");
       fetchModels(selectedDataset);
-    } catch (err: any) {
-      toast.error(err?.message || "Failed to delete");
+    } catch (err) {
+      const detail = err instanceof ApiError ? err.detail : null;
+      const detailMessage = typeof detail === "string" ? detail : detail?.detail || detail?.error;
+      toast.error(detailMessage || (err as Error)?.message || "Failed to delete");
     }
   };
 
@@ -308,12 +300,13 @@ const [subgroupFilter, setSubgroupFilter] = useState<SubgroupFilter>("all");
     if (!selectedDataset) return;
     setDuplicateLoadingId(model.id);
     try {
-      const res = await fetch(`${API_URL}/models/${model.id}/duplicate`, { method: "POST" });
-      if (!res.ok) throw new Error(await res.text());
+      await apiFetch(`/models/${model.id}/duplicate`, { method: "POST" });
       toast.success("Model duplicated");
       await fetchModels(selectedDataset);
-    } catch (err: any) {
-      toast.error(err?.message || "Failed to duplicate model");
+    } catch (err) {
+      const detail = err instanceof ApiError ? err.detail : null;
+      const detailMessage = typeof detail === "string" ? detail : detail?.detail || detail?.error;
+      toast.error(detailMessage || (err as Error)?.message || "Failed to duplicate model");
     } finally {
       setDuplicateLoadingId(null);
     }
@@ -323,12 +316,13 @@ const [subgroupFilter, setSubgroupFilter] = useState<SubgroupFilter>("all");
     if (!selectedDataset) return;
     setBestLoadingId(model.id);
     try {
-      const res = await fetch(`${API_URL}/models/${model.id}/best_stepwise`, { method: "POST" });
-      if (!res.ok) throw new Error(await res.text());
+      await apiFetch(`/models/${model.id}/best_stepwise`, { method: "POST" });
       toast.success("Best model created");
       await fetchModels(selectedDataset);
-    } catch (err: any) {
-      toast.error(err?.message || "Failed to create best model");
+    } catch (err) {
+      const detail = err instanceof ApiError ? err.detail : null;
+      const detailMessage = typeof detail === "string" ? detail : detail?.detail || detail?.error;
+      toast.error(detailMessage || (err as Error)?.message || "Failed to create best model");
     } finally {
       setBestLoadingId(null);
     }
@@ -336,16 +330,17 @@ const [subgroupFilter, setSubgroupFilter] = useState<SubgroupFilter>("all");
 
   const setRole = async (model: Model, role: Model["role"]) => {
     try {
-      const res = await fetch(`${API_URL}/models/${model.id}/role`, {
+      await apiFetch(`/models/${model.id}/role`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ role }),
       });
-      if (!res.ok) throw new Error(await res.text());
       toast.success(`Marked as ${role}`);
       fetchModels(selectedDataset);
-    } catch (err: any) {
-      toast.error(err?.message || "Failed to set role");
+    } catch (err) {
+      const detail = err instanceof ApiError ? err.detail : null;
+      const detailMessage = typeof detail === "string" ? detail : detail?.detail || detail?.error;
+      toast.error(detailMessage || (err as Error)?.message || "Failed to set role");
     }
   };
 
@@ -682,7 +677,11 @@ const [subgroupFilter, setSubgroupFilter] = useState<SubgroupFilter>("all");
                   Cancel
                 </Button>
               )}
-              <Button onClick={handleSubmit} disabled={loading}>
+              <Button
+                onClick={handleSubmit}
+                disabled={!canEdit || loading}
+                title={!canEdit ? "Solo lectura: tu rol es Visualizador" : undefined}
+              >
                 {loading ? "Saving..." : editingModelId ? "Update model" : "Create model"}
               </Button>
             </div>
@@ -718,14 +717,21 @@ const [subgroupFilter, setSubgroupFilter] = useState<SubgroupFilter>("all");
                         <Button variant="ghost" size="sm" onClick={() => startEdit(m)}>
                           Edit
                         </Button>
-                        <Button variant="ghost" size="sm" onClick={() => deleteModel(m)}>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => deleteModel(m)}
+                          disabled={!canEdit}
+                          title={!canEdit ? "Solo lectura: tu rol es Visualizador" : undefined}
+                        >
                           Delete
                         </Button>
                         <Button
                           variant="ghost"
                           size="sm"
                           onClick={() => handleDuplicateModel(m)}
-                          disabled={duplicateLoadingId === m.id}
+                          disabled={!canEdit || duplicateLoadingId === m.id}
+                          title={!canEdit ? "Solo lectura: tu rol es Visualizador" : undefined}
                         >
                           {duplicateLoadingId === m.id ? "Copying..." : "Copy"}
                         </Button>
@@ -733,22 +739,41 @@ const [subgroupFilter, setSubgroupFilter] = useState<SubgroupFilter>("all");
                           variant="ghost"
                           size="sm"
                           onClick={() => handleBestModel(m)}
-                          disabled={bestLoadingId === m.id}
+                          disabled={!canEdit || bestLoadingId === m.id}
+                          title={!canEdit ? "Solo lectura: tu rol es Visualizador" : undefined}
                         >
                           {bestLoadingId === m.id ? "Finding…" : "Best"}
                         </Button>
                         {m.role !== "hero" && (
-                          <Button variant="secondary" size="sm" onClick={() => setRole(m, "hero")}>
+                          <Button
+                            variant="secondary"
+                            size="sm"
+                            onClick={() => setRole(m, "hero")}
+                            disabled={!canEdit}
+                            title={!canEdit ? "Solo lectura: tu rol es Visualizador" : undefined}
+                          >
                             Hero
                           </Button>
                         )}
                         {m.role !== "challenger1" && (
-                          <Button variant="secondary" size="sm" onClick={() => setRole(m, "challenger1")}>
+                          <Button
+                            variant="secondary"
+                            size="sm"
+                            onClick={() => setRole(m, "challenger1")}
+                            disabled={!canEdit}
+                            title={!canEdit ? "Solo lectura: tu rol es Visualizador" : undefined}
+                          >
                             Ch. 1
                           </Button>
                         )}
                         {m.role !== "challenger2" && (
-                          <Button variant="secondary" size="sm" onClick={() => setRole(m, "challenger2")}>
+                          <Button
+                            variant="secondary"
+                            size="sm"
+                            onClick={() => setRole(m, "challenger2")}
+                            disabled={!canEdit}
+                            title={!canEdit ? "Solo lectura: tu rol es Visualizador" : undefined}
+                          >
                             Ch. 2
                           </Button>
                         )}
@@ -841,10 +866,11 @@ const [subgroupFilter, setSubgroupFilter] = useState<SubgroupFilter>("all");
                       stroke="var(--color-muted)"
                     />
                     <Tooltip
-                      formatter={(value: number | null, name) => {
-                        if (value == null || Number.isNaN(value)) return ["-", name];
-                        const decimals = name === "R^2" ? 3 : value < 1 ? 4 : 2;
-                        return [value.toFixed(decimals), name];
+                      formatter={(value, name) => {
+                        const num = typeof value === "number" ? value : Number(value);
+                        if (value == null || Number.isNaN(num)) return ["-", name];
+                        const decimals = name === "R^2" ? 3 : num < 1 ? 4 : 2;
+                        return [num.toFixed(decimals), name];
                       }}
                     />
                     <Legend />

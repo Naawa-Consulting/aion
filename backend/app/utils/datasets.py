@@ -1,18 +1,18 @@
 from __future__ import annotations
 
+import io
+
 import pandas as pd
 from pandas.api.types import is_datetime64_any_dtype
 
 from ..models import Dataset
+from .storage import get_storage
 
 
 def load_dataset_frame(ds: Dataset, columns: list[str] | None = None) -> pd.DataFrame:
-    """Read a dataset from disk, trim to the configured sample, and apply time settings."""
-    df = (
-        pd.read_parquet(ds.path, columns=columns)
-        if columns is not None
-        else pd.read_parquet(ds.path)
-    )
+    """Read a dataset from Supabase Storage, trim to the configured sample, and apply time settings."""
+    raw = get_storage().read_bytes(ds.storage_key)
+    df = pd.read_parquet(io.BytesIO(raw), columns=columns)
     sample = getattr(ds, "sample_size", None)
     if sample and sample > 0:
         df = df.head(sample)

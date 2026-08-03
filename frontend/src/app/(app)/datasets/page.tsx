@@ -14,8 +14,8 @@ import { Modal } from "@/components/ui/modal";
 import { useGlobalStore } from "@/lib/store";
 import { formatDate, formatNumber } from "@/lib/format";
 import { useKeyboardShortcut } from "@/hooks/useKeyboardShortcut";
-
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+import { useCanEdit } from "@/hooks/useCanEdit";
+import { apiFetch, ApiError, getAuthHeaders, API_URL } from "@/lib/api";
 
 type Dataset = {
   id: string;
@@ -84,6 +84,7 @@ export default function DatasetsPage() {
     { open: false, cascade: true }
   );
   const { datasetId, setDatasetId } = useGlobalStore();
+  const canEdit = useCanEdit();
   const [sampleMode, setSampleMode] = useState<"all" | "custom">("all");
   const [customSample, setCustomSample] = useState<number>(0);
   const [sampleUpdating, setSampleUpdating] = useState(false);
@@ -132,15 +133,14 @@ export default function DatasetsPage() {
   }, []);
 
   const fetchDatasets = useCallback(async () => {
-    const res = await fetch(`${API_URL}/datasets`);
-    if (!res.ok) {
-      toast.error("Failed to load datasets");
-      return;
-    }
-    const data = await res.json();
-    setDatasets(data);
-    if (!datasetId && data.length) {
-      setDatasetId(data[0].id);
+    try {
+      const data = await apiFetch<Dataset[]>("/datasets");
+      setDatasets(data);
+      if (!datasetId && data.length) {
+        setDatasetId(data[0].id);
+      }
+    } catch (err) {
+      toast.error((err as Error)?.message || "Failed to load datasets");
     }
   }, [datasetId, setDatasetId]);
 
@@ -151,9 +151,7 @@ export default function DatasetsPage() {
   const loadPreview = useCallback(async (id: string) => {
     setLoadingPreview(true);
     try {
-      const res = await fetch(`${API_URL}/datasets/${id}/preview?rows=20`);
-      if (!res.ok) throw new Error(await res.text());
-      const data = await res.json();
+      const data = await apiFetch<Preview>(`/datasets/${id}/preview?rows=20`);
       setPreview(data);
     } catch (error) {
       console.error(error);
@@ -168,9 +166,7 @@ export default function DatasetsPage() {
     async (id: string) => {
       setTimeCandidatesLoading(true);
       try {
-        const res = await fetch(`${API_URL}/datasets/${id}/time_candidates`);
-        if (!res.ok) throw new Error(await res.text());
-        const data: TimeCandidateResponse = await res.json();
+        const data = await apiFetch<TimeCandidateResponse>(`/datasets/${id}/time_candidates`);
         setTimeCandidates(data.candidates || []);
         if (data.current?.name) {
           setTimeColumn(data.current.name);
@@ -199,9 +195,7 @@ export default function DatasetsPage() {
     async (dataset: Dataset) => {
       setVersionHistory({ open: true, dataset, loading: true, items: [] });
       try {
-        const res = await fetch(`${API_URL}/datasets/${dataset.id}/versions`);
-        if (!res.ok) throw new Error(await res.text());
-        const data = await res.json();
+        const data = await apiFetch<{ versions?: VersionInfo[] }>(`/datasets/${dataset.id}/versions`);
         setVersionHistory({ open: true, dataset, loading: false, items: data.versions || [] });
       } catch (error: any) {
         console.error(error);
@@ -216,9 +210,7 @@ export default function DatasetsPage() {
     async (dataset: Dataset) => {
       setSummaryState({ open: true, loading: true });
       try {
-        const res = await fetch(`${API_URL}/datasets/${dataset.id}/summary`);
-        if (!res.ok) throw new Error(await res.text());
-        const data = await res.json();
+        const data = await apiFetch<DatasetSummary>(`/datasets/${dataset.id}/summary`);
         setSummaryState({ open: true, loading: false, data });
       } catch (error: any) {
         console.error(error);
@@ -292,13 +284,11 @@ export default function DatasetsPage() {
     }
     setSampleUpdating(true);
     try {
-      const res = await fetch(`${API_URL}/datasets/${currentDataset.id}/sample_size`, {
+      const updated = await apiFetch<Dataset>(`/datasets/${currentDataset.id}/sample_size`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ sample_size: target }),
       });
-      if (!res.ok) throw new Error(await res.text());
-      const updated: Dataset = await res.json();
       setDatasets((prev) => prev.map((ds) => (ds.id === updated.id ? updated : ds)));
       toast.success(
         `✅ Working dataset updated successfully (${formatNumber(
@@ -331,7 +321,7 @@ export default function DatasetsPage() {
     if (!currentDataset) return;
     setTimeSaving(true);
     try {
-      const res = await fetch(`${API_URL}/datasets/${currentDataset.id}/time_variable`, {
+      const updated = await apiFetch<Dataset>(`/datasets/${currentDataset.id}/time_variable`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -341,22 +331,17 @@ export default function DatasetsPage() {
           timezone: timeTimezone || null,
         }),
       });
-      if (!res.ok) {
-        const detail = await safeParseJSON(await res.text());
-        if (detail?.samples) {
-          toast.error(`${detail.error || "Unparseable time values"}: ${detail.samples.map((s: any) => s.value).join(", ")}`);
-        } else {
-          toast.error(detail?.detail || "Failed to save time variable");
-        }
-        return;
-      }
-      const updated: Dataset = await res.json();
       setDatasets((prev) => prev.map((ds) => (ds.id === updated.id ? updated : ds)));
       toast.success("✅ Time variable saved");
       fetchTimeCandidates(updated.id);
     } catch (error: any) {
       console.error(error);
-      toast.error(error?.message || "Failed to save time variable");
+      const detail = error instanceof ApiError ? error.detail : null;
+      if (detail?.samples) {
+        toast.error(`${detail.error || "Unparseable time values"}: ${detail.samples.map((s: any) => s.value).join(", ")}`);
+      } else {
+        toast.error(detail?.detail || error?.message || "Failed to save time variable");
+      }
     } finally {
       setTimeSaving(false);
     }
@@ -366,13 +351,11 @@ export default function DatasetsPage() {
     if (!currentDataset) return;
     setTimeSaving(true);
     try {
-      const res = await fetch(`${API_URL}/datasets/${currentDataset.id}/time_variable`, {
+      const updated = await apiFetch<Dataset>(`/datasets/${currentDataset.id}/time_variable`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ column: null }),
       });
-      if (!res.ok) throw new Error(await res.text());
-      const updated: Dataset = await res.json();
       setDatasets((prev) => prev.map((ds) => (ds.id === updated.id ? updated : ds)));
       setTimeColumn("");
       setTimeFormat("");
@@ -403,12 +386,21 @@ export default function DatasetsPage() {
       const formData = new FormData();
       formData.append("file", updateState.file);
       formData.append("replace_strategy", updateState.strategy);
-      const res = await fetch(`${API_URL}/datasets/${updateState.dataset.id}/update`, {
+      const data = await apiFetch<{ new_version: number }>(`/datasets/${updateState.dataset.id}/update`, {
         method: "POST",
         body: formData,
       });
-      if (!res.ok) {
-        const detail = await safeParseJSON(await res.text());
+      toast.success(`✅ Dataset successfully updated (v${data.new_version})`);
+      setUpdateState({ open: false, strategy: "strict", uploading: false });
+      await fetchDatasets();
+      if (datasetId === updateState.dataset.id) {
+        loadPreview(updateState.dataset.id);
+        fetchTimeCandidates(updateState.dataset.id);
+      }
+    } catch (error: any) {
+      console.error(error);
+      const detail = error instanceof ApiError ? error.detail : null;
+      if (detail) {
         const rawMessage =
           typeof detail === "string"
             ? detail
@@ -423,20 +415,10 @@ export default function DatasetsPage() {
           error: rawMessage,
           differences: detail?.differences || null,
         }));
-        return;
+      } else {
+        toast.error(error?.message || "Update failed");
+        setUpdateState((state) => ({ ...state, uploading: false }));
       }
-      const data = await res.json();
-      toast.success(`✅ Dataset successfully updated (v${data.new_version})`);
-      setUpdateState({ open: false, strategy: "strict", uploading: false });
-      await fetchDatasets();
-      if (datasetId === updateState.dataset.id) {
-        loadPreview(updateState.dataset.id);
-        fetchTimeCandidates(updateState.dataset.id);
-      }
-    } catch (error: any) {
-      console.error(error);
-      toast.error(error?.message || "Update failed");
-      setUpdateState((state) => ({ ...state, uploading: false }));
     }
   }, [updateState, datasetId, fetchDatasets, loadPreview, fetchTimeCandidates]);
 
@@ -463,8 +445,12 @@ export default function DatasetsPage() {
           setUploadProgress(0);
           reject({ status: xhr.status || 500, detail: { message: "Upload failed" } });
         };
-        xhr.open("POST", `${API_URL}/datasets/upload?force=${force}`);
-        xhr.send(form);
+        (async () => {
+          xhr.open("POST", `${API_URL}/datasets/upload?force=${force}`);
+          const headers = await getAuthHeaders();
+          Object.entries(headers).forEach(([k, v]) => xhr.setRequestHeader(k, v));
+          xhr.send(form);
+        })();
       }),
     []
   );
@@ -472,6 +458,10 @@ export default function DatasetsPage() {
   const handleUpload = useCallback(
     async (files: File[], opts: { force?: boolean } = {}) => {
       if (!files.length) return;
+      if (!canEdit) {
+        toast.error("Solo lectura: tu rol es Visualizador");
+        return;
+      }
       setUploading(true);
       try {
         await uploadFiles(files, Boolean(opts.force));
@@ -494,7 +484,7 @@ export default function DatasetsPage() {
         setUploading(false);
       }
     },
-    [fetchDatasets, uploadFiles]
+    [fetchDatasets, uploadFiles, canEdit]
   );
 
   const onDrop = useCallback(
@@ -509,6 +499,7 @@ export default function DatasetsPage() {
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
     onDrop,
     multiple: true,
+    disabled: !canEdit,
     accept: {
       "text/csv": [".csv"],
       "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": [".xlsx"],
@@ -519,12 +510,11 @@ export default function DatasetsPage() {
   const handleRename = async () => {
     if (!renameState.dataset) return;
     try {
-      const res = await fetch(`${API_URL}/datasets/${renameState.dataset.id}/rename`, {
+      await apiFetch(`/datasets/${renameState.dataset.id}/rename`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ display_name: renameState.value }),
       });
-      if (!res.ok) throw new Error(await res.text());
       toast.success("Dataset renamed");
       setRenameState({ open: false, value: "" });
       fetchDatasets();
@@ -548,15 +538,9 @@ export default function DatasetsPage() {
   const handleDelete = async () => {
     if (!deleteState.dataset) return;
     try {
-      const res = await fetch(
-        `${API_URL}/datasets/${deleteState.dataset.id}?cascade=${deleteState.cascade}`,
-        { method: "DELETE" }
-      );
-      if (!res.ok) {
-        const detail = await res.json().catch(() => ({ message: "Delete failed" }));
-        toast.error(detail?.message || "Delete failed");
-        return;
-      }
+      await apiFetch(`/datasets/${deleteState.dataset.id}?cascade=${deleteState.cascade}`, {
+        method: "DELETE",
+      });
       toast.success("Dataset deleted");
       setDeleteState({ open: false, cascade: true });
       if (datasetId === deleteState.dataset.id) {
@@ -566,7 +550,8 @@ export default function DatasetsPage() {
       fetchDatasets();
     } catch (error) {
       console.error(error);
-      toast.error("Delete failed");
+      const detail = error instanceof ApiError ? error.detail : null;
+      toast.error(detail?.message || (error as Error)?.message || "Delete failed");
     }
   };
 
@@ -582,7 +567,11 @@ export default function DatasetsPage() {
           <p className="text-sm text-[var(--color-muted)]">Module 1</p>
           <h1 className="text-2xl font-semibold tracking-tight">Datasets</h1>
         </div>
-        <Button onClick={() => document.getElementById("dataset-upload-input")?.click()}>
+        <Button
+          onClick={() => document.getElementById("dataset-upload-input")?.click()}
+          disabled={!canEdit}
+          title={!canEdit ? "Solo lectura: tu rol es Visualizador" : undefined}
+        >
           <Upload className="mr-2 h-4 w-4" /> Upload
         </Button>
       </header>
@@ -832,10 +821,21 @@ export default function DatasetsPage() {
                   )}
                 </div>
                 <div className="flex gap-2">
-                  <Button size="sm" onClick={handleSaveTimeVariable} disabled={!currentDataset || timeSaving}>
+                  <Button
+                    size="sm"
+                    onClick={handleSaveTimeVariable}
+                    disabled={!canEdit || !currentDataset || timeSaving}
+                    title={!canEdit ? "Solo lectura: tu rol es Visualizador" : undefined}
+                  >
                     {timeSaving ? "Saving..." : "Save time variable"}
                   </Button>
-                  <Button variant="ghost" size="sm" onClick={handleClearTimeVariable} disabled={!currentDataset?.time_variable || timeSaving}>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={handleClearTimeVariable}
+                    disabled={!canEdit || !currentDataset?.time_variable || timeSaving}
+                    title={!canEdit ? "Solo lectura: tu rol es Visualizador" : undefined}
+                  >
                     Clear selection
                   </Button>
                 </div>
@@ -871,7 +871,12 @@ export default function DatasetsPage() {
                       onChange={(event) => setCustomSample(Number(event.target.value) || 0)}
                     />
                   )}
-                  <Button size="sm" onClick={handleApplySample} disabled={!canApplySample || sampleUpdating}>
+                  <Button
+                    size="sm"
+                    onClick={handleApplySample}
+                    disabled={!canEdit || !canApplySample || sampleUpdating}
+                    title={!canEdit ? "Solo lectura: tu rol es Visualizador" : undefined}
+                  >
                     Apply
                   </Button>
                 </div>
@@ -1043,7 +1048,11 @@ export default function DatasetsPage() {
           <Button variant="ghost" onClick={dismissUpdateModal}>
             Cancel
           </Button>
-          <Button onClick={submitDatasetUpdate} disabled={!updateState.file || updateState.uploading}>
+          <Button
+            onClick={submitDatasetUpdate}
+            disabled={!canEdit || !updateState.file || updateState.uploading}
+            title={!canEdit ? "Solo lectura: tu rol es Visualizador" : undefined}
+          >
             {updateState.uploading ? "Uploading new version..." : "Upload & Replace"}
           </Button>
         </div>
@@ -1088,7 +1097,11 @@ export default function DatasetsPage() {
         />
         <div className="mt-4 flex justify-end gap-2">
           <Button variant="ghost" onClick={() => setRenameState({ open: false, value: "" })}>Cancel</Button>
-          <Button onClick={handleRename} disabled={!renameState.value.trim()}>
+          <Button
+            onClick={handleRename}
+            disabled={!canEdit || !renameState.value.trim()}
+            title={!canEdit ? "Solo lectura: tu rol es Visualizador" : undefined}
+          >
             Save
           </Button>
         </div>
@@ -1123,7 +1136,14 @@ export default function DatasetsPage() {
             </label>
             <div className="flex justify-end gap-2">
               <Button variant="ghost" onClick={() => setDeleteState({ open: false, cascade: true })}>Cancel</Button>
-              <Button variant="danger" onClick={handleDelete}>Delete</Button>
+              <Button
+                variant="danger"
+                onClick={handleDelete}
+                disabled={!canEdit}
+                title={!canEdit ? "Solo lectura: tu rol es Visualizador" : undefined}
+              >
+                Delete
+              </Button>
             </div>
           </div>
         )}
@@ -1156,6 +1176,7 @@ function SchemaTabs({
 }: {
   preview: Preview | null;
   loading: boolean;
+  datasetName?: string;
 }) {
   const [tab, setTab] = useState<"schema" | "preview">("schema");
   const schemaRows =

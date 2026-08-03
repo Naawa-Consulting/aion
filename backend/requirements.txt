@@ -5,10 +5,13 @@ numpy
 pyarrow
 sqlmodel
 sqlalchemy
-aiosqlite
 python-multipart
 openpyxl
 pydantic-settings
 python-dotenv
 scipy
 statsmodels
+alembic
+psycopg2-binary
+python-jose[cryptography]
+httpx

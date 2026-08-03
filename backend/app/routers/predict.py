@@ -13,11 +13,12 @@ import statsmodels.api as sm
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, Body
 from fastapi.responses import StreamingResponse
 from sqlmodel import Session, select
-from sqlalchemy import text
 
+from ..auth import CurrentMembership, get_current_membership, require_write_access
 from ..db import get_session
 from ..models import Scenario, Model, utcnow
 from ..routers.analysis import _fit_from_model, _group_maps
+from ..tenancy import get_scoped
 from ..schemas import (
     Adjustment,
     SimulationRequest,
@@ -37,32 +38,11 @@ from ..schemas import (
 
 
 router = APIRouter()
-_SCENARIO_SCHEMA_UPGRADED = False
 
 
-def _ensure_scenario_schema(session: Session):
-    global _SCENARIO_SCHEMA_UPGRADED
-    if _SCENARIO_SCHEMA_UPGRADED:
-        return
-    result = session.exec(text("PRAGMA table_info('scenario')")).fetchall()
-    column_names = {row[1] for row in result}  # type: ignore[index]
-    if "dataset_id" not in column_names:
-        session.exec(text("ALTER TABLE scenario ADD COLUMN dataset_id TEXT"))
-        session.exec(
-            text(
-                "UPDATE scenario SET dataset_id = (SELECT dataset_id FROM model WHERE model.id = scenario.model_id)"
-            )
-        )
-    if "last_edited_at" not in column_names:
-        session.exec(text("ALTER TABLE scenario ADD COLUMN last_edited_at TEXT"))
-        session.exec(text("UPDATE scenario SET last_edited_at = COALESCE(last_edited_at, created_at)"))
-    session.commit()
-    _SCENARIO_SCHEMA_UPGRADED = True
-
-
-def _compute_contributions(session: Session, model_id: str, adjustments: dict[str, float]):
-    m, ds, work, X, Xc, y, params, _ = _fit_from_model(session, model_id)
-    var_map, sg_map, g_map = _group_maps(session, ds.id)
+def _compute_contributions(session: Session, model_id: str, company_id: str, adjustments: dict[str, float]):
+    m, ds, work, X, Xc, y, params, _ = _fit_from_model(session, model_id, company_id)
+    var_map, sg_map, g_map = _group_maps(session, ds.id, company_id)
 
     X_adj = X.copy()
     for col in X.columns:
@@ -361,14 +341,15 @@ def _accumulate_contribution(
 def _compute_plan(
     session: Session,
     model_id: str,
+    company_id: str,
     *,
     horizon: int,
     start_date: date,
     freq: str,
     adjustments: dict[str, dict[str, PeriodValue]],
 ):
-    m, ds, work, X, Xc, y, params, _ = _fit_from_model(session, model_id)
-    var_map, sg_map, g_map = _group_maps(session, ds.id)
+    m, ds, work, X, Xc, y, params, _ = _fit_from_model(session, model_id, company_id)
+    var_map, sg_map, g_map = _group_maps(session, ds.id, company_id)
 
     baseline_means: dict[str, float] = {}
     coef_map: dict[str, float] = {}
@@ -433,13 +414,14 @@ def _compute_plan(
 def _scenario_matrix(
     session: Session,
     model_id: str,
+    company_id: str,
     *,
     horizon: int,
     start_date: date,
     freq: str,
     adjustments: dict[str, dict[str, PeriodValue]],
 ):
-    _, _, _, X, _, _, _, _ = _fit_from_model(session, model_id)
+    _, _, _, X, _, _, _, _ = _fit_from_model(session, model_id, company_id)
     baseline_means: dict[str, float] = {}
     for name in X.columns:
         baseline_means[name] = float(pd.to_numeric(X[name], errors="coerce").fillna(0.0).mean())
@@ -489,13 +471,14 @@ def _dataframe_response(df: pd.DataFrame, sheet_name: str, filename: str) -> Str
     )
 
 
-def _scenario_out_from_record(record: Scenario, session: Session, summary: ScenarioSummary | None = None) -> ScenarioOut:
+def _scenario_out_from_record(record: Scenario, session: Session, company_id: str, summary: ScenarioSummary | None = None) -> ScenarioOut:
     definition = _load_definition(record)
     summary_data = summary or _load_summary(record)
     if summary_data is None:
         summary_data, _ = _compute_plan(
             session,
             record.model_id,
+            company_id,
             horizon=definition.horizon,
             start_date=definition.start_date,
             freq=definition.freq,
@@ -505,20 +488,13 @@ def _scenario_out_from_record(record: Scenario, session: Session, summary: Scena
         session.add(record)
         session.commit()
     dataset_id = record.dataset_id
-    if not dataset_id:
-        model = session.get(Model, record.model_id)
-        if model:
-            dataset_id = model.dataset_id
-            record.dataset_id = dataset_id
-            session.add(record)
-            session.commit()
-            session.refresh(record)
     base_total = None
     delta_pct = None
     try:
         base_summary, _ = _compute_plan(
             session,
             record.model_id,
+            company_id,
             horizon=definition.horizon,
             start_date=definition.start_date,
             freq=definition.freq,
@@ -548,31 +524,41 @@ def _scenario_out_from_record(record: Scenario, session: Session, summary: Scena
     )
 
 
-def _require_model(session: Session, model_id: str) -> Model:
-    model = session.get(Model, model_id)
-    if not model:
-        raise HTTPException(status_code=404, detail="Model not found")
-    return model
+def _require_model(session: Session, model_id: str, company_id: str) -> Model:
+    return get_scoped(session, Model, model_id, company_id)
 
 
-def _ensure_scenario_capacity(session: Session, model_id: str, limit: int = 5):
-    existing = session.exec(select(Scenario.id).where(Scenario.model_id == model_id)).all()
+def _ensure_scenario_capacity(session: Session, model_id: str, company_id: str, limit: int = 5):
+    existing = session.exec(
+        select(Scenario.id).where(Scenario.model_id == model_id, Scenario.company_id == company_id)
+    ).all()
     if len(existing) >= limit:
         raise HTTPException(status_code=400, detail=f"Maximum {limit} scenarios per model")
 
+
 @router.post("/{model_id}/simulate")
-def simulate(model_id: str, body: SimulationRequest, session: Session = Depends(get_session)):
+def simulate(
+    model_id: str,
+    body: SimulationRequest,
+    membership: CurrentMembership = Depends(get_current_membership),
+    session: Session = Depends(get_session),
+):
     adjustments = {adj.variable: adj.multiplier for adj in body.adjustments}
-    result = _compute_contributions(session, model_id, adjustments)
+    result = _compute_contributions(session, model_id, membership.company_id, adjustments)
     return result
 
 
 @router.post("/scenarios/preview", response_model=ScenarioSummary)
-def preview_scenario(body: ScenarioPreviewRequest, session: Session = Depends(get_session)):
-    _require_model(session, body.model_id)
+def preview_scenario(
+    body: ScenarioPreviewRequest,
+    membership: CurrentMembership = Depends(get_current_membership),
+    session: Session = Depends(get_session),
+):
+    _require_model(session, body.model_id, membership.company_id)
     summary, _ = _compute_plan(
         session,
         body.model_id,
+        membership.company_id,
         horizon=body.horizon,
         start_date=body.start_date,
         freq=body.freq,
@@ -583,12 +569,15 @@ def preview_scenario(body: ScenarioPreviewRequest, session: Session = Depends(ge
 
 @router.post("/scenarios/assumptions/export")
 def export_scenario_assumptions(
-    body: ScenarioAssumptionsExportRequest = Body(...), session: Session = Depends(get_session)
+    body: ScenarioAssumptionsExportRequest = Body(...),
+    membership: CurrentMembership = Depends(get_current_membership),
+    session: Session = Depends(get_session),
 ):
-    _require_model(session, body.model_id)
+    _require_model(session, body.model_id, membership.company_id)
     labels, rows = _scenario_matrix(
         session,
         body.model_id,
+        membership.company_id,
         horizon=body.horizon,
         start_date=body.start_date,
         freq=body.freq,
@@ -613,11 +602,16 @@ def export_scenario_assumptions(
 
 
 @router.post("/scenarios/projected/export")
-def export_projected_totals(body: ScenarioProjectedExportRequest = Body(...), session: Session = Depends(get_session)):
-    _require_model(session, body.model_id)
+def export_projected_totals(
+    body: ScenarioProjectedExportRequest = Body(...),
+    membership: CurrentMembership = Depends(get_current_membership),
+    session: Session = Depends(get_session),
+):
+    _require_model(session, body.model_id, membership.company_id)
     summary, _ = _compute_plan(
         session,
         body.model_id,
+        membership.company_id,
         horizon=body.horizon,
         start_date=body.start_date,
         freq=body.freq,
@@ -628,6 +622,7 @@ def export_projected_totals(body: ScenarioProjectedExportRequest = Body(...), se
         hero_summary, _ = _compute_plan(
             session,
             body.model_id,
+            membership.company_id,
             horizon=body.horizon,
             start_date=body.start_date,
             freq=body.freq,
@@ -656,13 +651,17 @@ def export_projected_totals(body: ScenarioProjectedExportRequest = Body(...), se
 
 
 @router.post("/scenarios", response_model=ScenarioOut)
-def create_scenario(body: ScenarioCreate, session: Session = Depends(get_session)):
-    _ensure_scenario_schema(session)
-    model = _require_model(session, body.model_id)
-    _ensure_scenario_capacity(session, body.model_id)
+def create_scenario(
+    body: ScenarioCreate,
+    membership: CurrentMembership = Depends(require_write_access),
+    session: Session = Depends(get_session),
+):
+    model = _require_model(session, body.model_id, membership.company_id)
+    _ensure_scenario_capacity(session, body.model_id, membership.company_id)
     summary, _ = _compute_plan(
         session,
         body.model_id,
+        membership.company_id,
         horizon=body.horizon,
         start_date=body.start_date,
         freq=body.freq,
@@ -670,6 +669,7 @@ def create_scenario(body: ScenarioCreate, session: Session = Depends(get_session
     )
     record = Scenario(
         id=str(uuid.uuid4()),
+        company_id=membership.company_id,
         model_id=body.model_id,
         dataset_id=model.dataset_id,
         name=body.name,
@@ -680,34 +680,42 @@ def create_scenario(body: ScenarioCreate, session: Session = Depends(get_session
     session.add(record)
     session.commit()
     session.refresh(record)
-    return _scenario_out_from_record(record, session, summary)
+    return _scenario_out_from_record(record, session, membership.company_id, summary)
 
 
 @router.get("/scenarios", response_model=list[ScenarioOut])
-def list_scenarios(model_id: str = Query(...), session: Session = Depends(get_session)):
-    _ensure_scenario_schema(session)
-    _require_model(session, model_id)
+def list_scenarios(
+    model_id: str = Query(...),
+    membership: CurrentMembership = Depends(get_current_membership),
+    session: Session = Depends(get_session),
+):
+    _require_model(session, model_id, membership.company_id)
     records = session.exec(
-        select(Scenario).where(Scenario.model_id == model_id).order_by(Scenario.last_edited_at.desc())
+        select(Scenario)
+        .where(Scenario.model_id == model_id, Scenario.company_id == membership.company_id)
+        .order_by(Scenario.last_edited_at.desc())
     ).all()
-    return [_scenario_out_from_record(record, session) for record in records]
+    return [_scenario_out_from_record(record, session, membership.company_id) for record in records]
 
 
 @router.get("/scenarios/{scenario_id}", response_model=ScenarioOut)
-def get_scenario(scenario_id: str, session: Session = Depends(get_session)):
-    _ensure_scenario_schema(session)
-    record = session.get(Scenario, scenario_id)
-    if not record:
-        raise HTTPException(status_code=404, detail="Scenario not found")
-    return _scenario_out_from_record(record, session)
+def get_scenario(
+    scenario_id: str,
+    membership: CurrentMembership = Depends(get_current_membership),
+    session: Session = Depends(get_session),
+):
+    record = get_scoped(session, Scenario, scenario_id, membership.company_id)
+    return _scenario_out_from_record(record, session, membership.company_id)
 
 
 @router.patch("/scenarios/{scenario_id}", response_model=ScenarioOut)
-def update_scenario(scenario_id: str, body: ScenarioUpdate, session: Session = Depends(get_session)):
-    _ensure_scenario_schema(session)
-    record = session.get(Scenario, scenario_id)
-    if not record:
-        raise HTTPException(status_code=404, detail="Scenario not found")
+def update_scenario(
+    scenario_id: str,
+    body: ScenarioUpdate,
+    membership: CurrentMembership = Depends(require_write_access),
+    session: Session = Depends(get_session),
+):
+    record = get_scoped(session, Scenario, scenario_id, membership.company_id)
     definition = _load_definition(record)
     name = body.name or record.name
     horizon = body.horizon or definition.horizon
@@ -718,6 +726,7 @@ def update_scenario(scenario_id: str, body: ScenarioUpdate, session: Session = D
     summary, _ = _compute_plan(
         session,
         record.model_id,
+        membership.company_id,
         horizon=horizon,
         start_date=start_date,
         freq=freq,
@@ -730,30 +739,33 @@ def update_scenario(scenario_id: str, body: ScenarioUpdate, session: Session = D
     session.add(record)
     session.commit()
     session.refresh(record)
-    return _scenario_out_from_record(record, session, summary)
+    return _scenario_out_from_record(record, session, membership.company_id, summary)
 
 
 @router.delete("/scenarios/{scenario_id}")
-def delete_scenario(scenario_id: str, session: Session = Depends(get_session)):
-    _ensure_scenario_schema(session)
-    record = session.get(Scenario, scenario_id)
-    if not record:
-        raise HTTPException(status_code=404, detail="Scenario not found")
+def delete_scenario(
+    scenario_id: str,
+    membership: CurrentMembership = Depends(require_write_access),
+    session: Session = Depends(get_session),
+):
+    record = get_scoped(session, Scenario, scenario_id, membership.company_id)
     session.delete(record)
     session.commit()
     return {"status": "ok"}
 
 
 @router.get("/scenarios/{scenario_id}/timeseries", response_model=ScenarioTimeseriesResponse)
-def scenario_timeseries(scenario_id: str, session: Session = Depends(get_session)):
-    _ensure_scenario_schema(session)
-    record = session.get(Scenario, scenario_id)
-    if not record:
-        raise HTTPException(status_code=404, detail="Scenario not found")
+def scenario_timeseries(
+    scenario_id: str,
+    membership: CurrentMembership = Depends(get_current_membership),
+    session: Session = Depends(get_session),
+):
+    record = get_scoped(session, Scenario, scenario_id, membership.company_id)
     definition = _load_definition(record)
     summary, series = _compute_plan(
         session,
         record.model_id,
+        membership.company_id,
         horizon=definition.horizon,
         start_date=definition.start_date,
         freq=definition.freq,
@@ -771,11 +783,13 @@ def scenario_timeseries(scenario_id: str, session: Session = Depends(get_session
 
 
 @router.post("/scenarios/{scenario_id}/import", response_model=ScenarioOut)
-async def import_scenario_plan(scenario_id: str, file: UploadFile = File(...), session: Session = Depends(get_session)):
-    _ensure_scenario_schema(session)
-    record = session.get(Scenario, scenario_id)
-    if not record:
-        raise HTTPException(status_code=404, detail="Scenario not found")
+async def import_scenario_plan(
+    scenario_id: str,
+    file: UploadFile = File(...),
+    membership: CurrentMembership = Depends(require_write_access),
+    session: Session = Depends(get_session),
+):
+    record = get_scoped(session, Scenario, scenario_id, membership.company_id)
     content = await file.read()
     try:
         df = pd.read_csv(io.BytesIO(content))
@@ -806,6 +820,7 @@ async def import_scenario_plan(scenario_id: str, file: UploadFile = File(...), s
     summary, _ = _compute_plan(
         session,
         record.model_id,
+        membership.company_id,
         horizon=definition.horizon,
         start_date=definition.start_date,
         freq=definition.freq,
@@ -816,19 +831,17 @@ async def import_scenario_plan(scenario_id: str, file: UploadFile = File(...), s
     session.add(record)
     session.commit()
     session.refresh(record)
-    return _scenario_out_from_record(record, session, summary)
+    return _scenario_out_from_record(record, session, membership.company_id, summary)
 
 
 @router.get("/scenarios/{scenario_id}/export")
 def export_scenario_plan(
     scenario_id: str,
     format: str = Query("csv", regex="^(csv|xlsx)$"),
+    membership: CurrentMembership = Depends(get_current_membership),
     session: Session = Depends(get_session),
 ):
-    _ensure_scenario_schema(session)
-    record = session.get(Scenario, scenario_id)
-    if not record:
-        raise HTTPException(status_code=404, detail="Scenario not found")
+    record = get_scoped(session, Scenario, scenario_id, membership.company_id)
     definition = _load_definition(record)
     rows: list[dict] = []
     for period, mapping in definition.adjustments.items():

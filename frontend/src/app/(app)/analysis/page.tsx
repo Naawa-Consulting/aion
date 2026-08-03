@@ -16,6 +16,7 @@ import { toast } from "sonner";
 import { Card, CardHeader } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { FilterBar, FilterField } from "@/components/ui/filter-bar";
+import { apiFetch, ApiError } from "@/lib/api";
 
 type Dataset = { id: string; display_name: string; columns: { name: string; dtype: string }[] };
 type ModelRole = "hero" | "challenger1" | "challenger2";
@@ -52,7 +53,6 @@ type DatasetMeta = {
 };
 type DateBounds = { min: string | null; max: string | null };
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 const MODEL_ROLES: readonly ModelRole[] = ["hero", "challenger1", "challenger2"];
 const MODEL_ROLE_ORDER: Record<ModelRole, number> = {
   hero: 0,
@@ -155,9 +155,7 @@ export default function AnalysisPage() {
 
   const fetchDatasets = useCallback(async () => {
     try {
-      const res = await fetch(`${API_URL}/datasets`);
-      if (!res.ok) throw new Error();
-      const data = await res.json();
+      const data = await apiFetch<Dataset[]>("/datasets");
       setDatasets(data);
       if (data.length) {
         setSelectedDataset((prev) => (prev ? prev : data[0].id));
@@ -176,9 +174,7 @@ export default function AnalysisPage() {
     setTimeCol(TIME_COLUMN_PLACEHOLDER);
     setDateBounds({ min: null, max: null });
     try {
-      const res = await fetch(`${API_URL}/datasets/${datasetId}/meta`);
-      if (!res.ok) throw new Error();
-      const raw = await res.json();
+      const raw = await apiFetch<any>(`/datasets/${datasetId}/meta`);
       const data = normalizeDatasetMeta(raw);
       setTimeColumnDefault(data.time_column);
       const bounds = { min: data.date_min ?? null, max: data.date_max ?? null };
@@ -194,9 +190,7 @@ export default function AnalysisPage() {
 
   const fetchModels = useCallback(async (datasetId: string) => {
     try {
-      const res = await fetch(`${API_URL}/datasets/${datasetId}/models-with-roles`);
-      if (!res.ok) throw new Error();
-      const data = await res.json();
+      const data = await apiFetch<any[]>(`/datasets/${datasetId}/models-with-roles`);
       const normalized: Model[] = data.map((m: any) => ({
         id: m.id,
         name: m.name,
@@ -239,11 +233,10 @@ export default function AnalysisPage() {
       });
       if (dateRange.start) params.set("start_date", dateRange.start);
       if (dateRange.end) params.set("end_date", dateRange.end);
-      const res = await fetch(`${API_URL}/analysis/${modelId}/summary?${params.toString()}`);
-      if (!res.ok) throw new Error(await res.text());
-      setSummary(await res.json());
-    } catch (err: any) {
-      toast.error(err?.message || "Failed to load summary");
+      const data = await apiFetch<Summary>(`/analysis/${modelId}/summary?${params.toString()}`);
+      setSummary(data);
+    } catch (err) {
+      toast.error((err instanceof ApiError ? err.message : (err as Error)?.message) || "Failed to load summary");
       setSummary(null);
     } finally {
       setLoading(false);
@@ -286,13 +279,13 @@ export default function AnalysisPage() {
       });
       if (dateRange.start) params.set("start_date", dateRange.start);
       if (dateRange.end) params.set("end_date", dateRange.end);
-      const url = `${API_URL}/analysis/${selectedModel}/stacked?${params.toString()}`;
-      const res = await fetch(url);
-      if (!res.ok) throw new Error(await res.text());
-      setStacked(await res.json());
-    } catch (err: any) {
+      const data = await apiFetch<StackedData>(`/analysis/${selectedModel}/stacked?${params.toString()}`);
+      setStacked(data);
+    } catch (err) {
       setStacked(null);
-      setStackedError(err?.message || "Failed to load stacked data");
+      setStackedError(
+        (err instanceof ApiError ? err.message : (err as Error)?.message) || "Failed to load stacked data"
+      );
     } finally {
       setStackedLoading(false);
     }
@@ -348,10 +341,15 @@ export default function AnalysisPage() {
     });
     if (dateRange.start) params.set("start_date", dateRange.start);
     if (dateRange.end) params.set("end_date", dateRange.end);
-    const url = `${API_URL}/analysis/${selectedModel}/export/summary.xlsx?${params.toString()}`;
-    const res = await fetch(url);
-    const blob = await res.blob();
-    downloadBlob(blob, "analysis-summary.xlsx");
+    try {
+      const blob = await apiFetch<Blob>(
+        `/analysis/${selectedModel}/export/summary.xlsx?${params.toString()}`,
+        { responseType: "blob" }
+      );
+      downloadBlob(blob, "analysis-summary.xlsx");
+    } catch (err) {
+      toast.error((err instanceof ApiError ? err.message : (err as Error)?.message) || "Failed to export summary");
+    }
   };
 
   const downloadSummaryTable = async () => {
@@ -368,16 +366,17 @@ export default function AnalysisPage() {
     if (dateRange.start) payload.start_date = dateRange.start;
     if (dateRange.end) payload.end_date = dateRange.end;
     try {
-      const res = await fetch(`${API_URL}/analysis/summary/export`, {
+      const blob = await apiFetch<Blob>("/analysis/summary/export", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
+        responseType: "blob",
       });
-      if (!res.ok) throw new Error(await res.text());
-      const blob = await res.blob();
       downloadBlob(blob, "summary-table.xlsx");
-    } catch (err: any) {
-      toast.error(err?.message || "Failed to export summary table");
+    } catch (err) {
+      toast.error(
+        (err instanceof ApiError ? err.message : (err as Error)?.message) || "Failed to export summary table"
+      );
     }
   };
 
@@ -392,10 +391,17 @@ export default function AnalysisPage() {
     });
     if (dateRange.start) params.set("start_date", dateRange.start);
     if (dateRange.end) params.set("end_date", dateRange.end);
-    const url = `${API_URL}/analysis/${selectedModel}/export/stacked.xlsx?${params.toString()}`;
-    const res = await fetch(url);
-    const blob = await res.blob();
-    downloadBlob(blob, "stacked.xlsx");
+    try {
+      const blob = await apiFetch<Blob>(
+        `/analysis/${selectedModel}/export/stacked.xlsx?${params.toString()}`,
+        { responseType: "blob" }
+      );
+      downloadBlob(blob, "stacked.xlsx");
+    } catch (err) {
+      toast.error(
+        (err instanceof ApiError ? err.message : (err as Error)?.message) || "Failed to export stacked data"
+      );
+    }
   };
 
   const timeColumns = useMemo(() => {
