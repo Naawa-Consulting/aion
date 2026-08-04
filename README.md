@@ -13,7 +13,9 @@ Resumen por módulo (detalle técnico completo — endpoints y contratos — en 
 2. **Transform** — funcional. Categorización en Grupo/Subgrupo, variables derivadas, historial y
    undo.
 3. **Modeling** — funcional. Correlaciones, modelos OLS, roles hero/challenger, selección
-   stepwise, métricas (R², VIF, Durbin–Watson, MAE, RMSE, MAPE).
+   stepwise, métricas (R², VIF, Durbin–Watson, MAE, RMSE, MAPE). Variables de medios (marcadas por
+   Group/Subgroup en Transform) reciben adstock + saturación Hill automáticos vía grid-search al
+   ajustar el modelo, aplicados de forma consistente en Modeling/Analysis/Predict.
 4. **Analysis** — funcional. Contribución/atribución por variable y por grupo/subgrupo, series
    apiladas por periodo, export a Excel.
 5. **Predict** — funcional (MVP). Escenarios time-phased, comparación, import/export CSV/XLSX.

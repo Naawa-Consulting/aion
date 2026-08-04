@@ -25,8 +25,10 @@ aportan contexto). Convenciones y arquitectura conceptual completas en `CLAUDE.m
 - `app/tenancy.py` — `get_scoped()`: helper de `session.get` + guard de `company_id` (404 si es
   de otra compañía), usado en todos los routers.
 - `app/models.py` — tablas SQLModel: `Company`, `Membership`, `Dataset`, `Variable`, `Group`,
-  `Subgroup`, `VariableHistory`, `Model`, `ModelMetrics`, `Scenario` — todas (salvo
-  Company/Membership) con `company_id`.
+  `Subgroup`, `VariableHistory`, `Model`, `ModelMetrics`, `ModelTransform`, `Scenario` — todas
+  (salvo Company/Membership) con `company_id`. `Group`/`Subgroup` tienen `apply_media_transform`
+  (marca variables de medios); `ModelTransform` guarda los parámetros de adstock+Hill fit por
+  `(modelo, variable)`.
 - `app/schemas.py` — modelos Pydantic de request/response usados por los routers.
 - `app/routers/datasets.py` — Módulo 1: upload, versionado, sample size, variable temporal.
 - `app/routers/variables.py` — Módulo 2: filtros, transformaciones, categorización,
@@ -42,6 +44,13 @@ aportan contexto). Convenciones y arquitectura conceptual completas en `CLAUDE.m
 - `app/routers/me.py` — `GET /me/memberships` (compañías + rol del usuario actual).
 - `app/services/analysis.py` — cálculo de contribuciones + cache TTL en memoria (invalidar en
   cada mutación relevante de dataset/modelo).
+- `app/services/media_transform.py` — funciones puras de adstock (decay geométrico) + saturación
+  Hill, usadas tanto al ajustar modelos como al proyectar escenarios en Predict.
+- `app/services/model_fit.py` — `build_design_matrix()`: punto único que arma la matriz de diseño
+  (variables de medios transformadas, control crudas) usado por `routers/models.py`,
+  `routers/analysis.py` y `routers/predict.py`; incluye el grid-search por canal
+  (`search_media_hparams`) y la resolución de qué variables son "de medios"
+  (`resolve_media_flags`, vía Group/Subgroup).
 - `app/utils/datasets.py` — `load_dataset_frame()`: lectura desde Supabase Storage + `sample_size`
   + parseo de columna temporal. Usar siempre esta función, no leer el storage directo.
 - `app/utils/storage.py` — cliente mínimo de Supabase Storage vía `httpx` (`read_bytes`,

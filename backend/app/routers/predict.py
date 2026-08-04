@@ -18,6 +18,8 @@ from ..auth import CurrentMembership, get_current_membership, require_write_acce
 from ..db import get_session
 from ..models import Scenario, Model, utcnow
 from ..routers.analysis import _fit_from_model, _group_maps
+from ..services.media_transform import apply_media_transform
+from ..services.model_fit import load_transform_params
 from ..tenancy import get_scoped
 from ..schemas import (
     Adjustment,
@@ -43,11 +45,7 @@ router = APIRouter()
 def _compute_contributions(session: Session, model_id: str, company_id: str, adjustments: dict[str, float]):
     m, ds, work, X, Xc, y, params, _ = _fit_from_model(session, model_id, company_id)
     var_map, sg_map, g_map = _group_maps(session, ds.id, company_id)
-
-    X_adj = X.copy()
-    for col in X.columns:
-        mult = float(adjustments.get(col, 1.0))
-        X_adj[col] = pd.to_numeric(X[col], errors='coerce').fillna(0.0) * mult
+    transform_params = load_transform_params(session, m.id, company_id)
 
     contrib_rows = []
     group_totals: Dict[str, float] = {}
@@ -57,10 +55,21 @@ def _compute_contributions(session: Session, model_id: str, company_id: str, adj
 
     for name in X.columns:
         coef = float(params.get(name, 0.0))
-        mean = float(X[name].mean())
-        adjusted_mean = float(X_adj[name].mean())
-        contribution = coef * adjusted_mean
         mult = float(adjustments.get(name, 1.0))
+        mean = float(X[name].mean())
+        media_params = transform_params.get(name)
+        if media_params is not None:
+            # Adjust the RAW spend series (never the already-adstocked/saturated one), then
+            # re-run the transform over the whole adjusted series before averaging —
+            # matches how a flat "what if spend were X% different" reads for a media channel.
+            raw_adjusted = pd.to_numeric(work[name], errors="coerce").fillna(0.0).to_numpy(dtype=float) * mult
+            transformed_adjusted = apply_media_transform(
+                raw_adjusted, media_params.decay, media_params.hill_k, media_params.hill_s, media_params.lag
+            )
+            adjusted_mean = float(np.mean(transformed_adjusted)) if transformed_adjusted.size else 0.0
+        else:
+            adjusted_mean = float((pd.to_numeric(X[name], errors="coerce").fillna(0.0) * mult).mean())
+        contribution = coef * adjusted_mean
         mapping = var_map.get(name, {})
         sg_id = mapping.get("subgroup_id")
         gid = mapping.get("group_id")
@@ -350,6 +359,7 @@ def _compute_plan(
 ):
     m, ds, work, X, Xc, y, params, _ = _fit_from_model(session, model_id, company_id)
     var_map, sg_map, g_map = _group_maps(session, ds.id, company_id)
+    transform_params = load_transform_params(session, m.id, company_id)
 
     baseline_means: dict[str, float] = {}
     coef_map: dict[str, float] = {}
@@ -362,22 +372,49 @@ def _compute_plan(
     period_dates = _period_sequence(start_date, horizon, freq)
     labels = [_label_for_period(p, freq) for p in period_dates]
 
+    # Media variables: build the projected RAW spend series per period, then run the
+    # adstock+Hill transform ONCE over history+future concatenated — this is what makes
+    # carryover across the history/future boundary correct, instead of re-deriving each
+    # period's decay state from scratch. Control variables keep the existing
+    # mean*multiplier-or-absolute-value math untouched.
+    media_future_transformed: dict[str, np.ndarray] = {}
+    for name in X.columns:
+        tparams = transform_params.get(name)
+        if tparams is None:
+            continue
+        raw_history = pd.to_numeric(work[name], errors="coerce").fillna(0.0).to_numpy(dtype=float)
+        raw_mean = float(raw_history.mean()) if raw_history.size else 0.0
+        future_raw = []
+        for label in labels:
+            adj = adjustments.get(label, {}).get(name)
+            if isinstance(adj, PeriodValue):
+                value = raw_mean * adj.value if adj.mode == "multiplier" else adj.value
+            else:
+                value = raw_mean
+            future_raw.append(value)
+        combined = np.concatenate([raw_history, np.asarray(future_raw, dtype=float)])
+        transformed = apply_media_transform(combined, tparams.decay, tparams.hill_k, tparams.hill_s, tparams.lag)
+        media_future_transformed[name] = transformed[-len(future_raw):] if future_raw else np.array([])
+
     aggregate_groups: defaultdict[str, float] = defaultdict(float)
     aggregate_subgroups: defaultdict[str, float] = defaultdict(float)
     series_points: list[ScenarioTimeseriesSlice] = []
 
-    for label in labels:
+    for period_index, label in enumerate(labels):
         group_totals: defaultdict[str, float] = defaultdict(float)
         subgroup_totals: defaultdict[str, float] = defaultdict(float)
         total = 0.0
         period_adjustments = adjustments.get(label, {})
         for name in X.columns:
-            baseline_val = baseline_means[name]
-            adj = period_adjustments.get(name)
-            if isinstance(adj, PeriodValue):
-                value = baseline_val * adj.value if adj.mode == "multiplier" else adj.value
+            if name in media_future_transformed:
+                value = float(media_future_transformed[name][period_index])
             else:
-                value = baseline_val
+                baseline_val = baseline_means[name]
+                adj = period_adjustments.get(name)
+                if isinstance(adj, PeriodValue):
+                    value = baseline_val * adj.value if adj.mode == "multiplier" else adj.value
+                else:
+                    value = baseline_val
             contribution = coef_map[name] * value
             total += contribution
             _accumulate_contribution(group_totals, subgroup_totals, name, contribution, var_map, sg_map, g_map)
@@ -421,10 +458,12 @@ def _scenario_matrix(
     freq: str,
     adjustments: dict[str, dict[str, PeriodValue]],
 ):
-    _, _, _, X, _, _, _, _ = _fit_from_model(session, model_id, company_id)
+    _, _, work, X, _, _, _, _ = _fit_from_model(session, model_id, company_id)
     baseline_means: dict[str, float] = {}
     for name in X.columns:
-        baseline_means[name] = float(pd.to_numeric(X[name], errors="coerce").fillna(0.0).mean())
+        # Raw historical mean, not the transformed X — assumptions/multipliers are defined
+        # against raw spend, never against the already-adstocked/saturated value.
+        baseline_means[name] = float(pd.to_numeric(work[name], errors="coerce").fillna(0.0).mean())
 
     labels = [_label_for_period(period, freq) for period in _period_sequence(start_date, horizon, freq)]
     rows: list[dict] = []

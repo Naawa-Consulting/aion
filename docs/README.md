@@ -29,18 +29,62 @@ backend, por módulo. Actualízalo cuando agregues o cambies un endpoint.
   - `POST /variables/{id}/undo` removes the derived column (with dependency guard).
   - Variables now store `group_id`, `subgroup_id`, and history is persisted via `variable_history`.
 - Group assignment compatibility route `/groups/assign` now updates the variable record directly.
+- **Media flag**: `Group`/`Subgroup` now carry `apply_media_transform: bool` (default `false`).
+  `GET /groups` returns it on every group/subgroup; `POST /groups`, `POST /groups/subgroups` accept
+  it on creation; `PATCH /groups/{id}` and `PATCH /groups/subgroups/{id}` accept a body with `name`
+  and/or `apply_media_transform`, both now optional (either can be omitted to update just the
+  other). A variable's "is this a media variable" status (adstock+Hill applies when it's used as a
+  model predictor — see Module 3) is resolved from its Subgroup's flag, falling back to its Group's
+  flag, defaulting to `false` (control variable) if neither is set. UI: a checkbox per group/subgroup
+  in the `/transform` "Groups & Subgroups" card.
 
 ## Module 3
 
-- Correlations: `GET /models/correlations?dataset_id=...&y=...` (numeric columns only).
+- Correlations: `GET /models/correlations?dataset_id=...&y=...` (numeric columns only). Always
+  computed on raw values — the adstock/Hill grid search (below) only runs when a model is actually
+  fit, not while browsing candidate predictors.
 - Create models: `POST /models` with `dataset_id`, `name`, `y_var`, `x_vars`.
 - Update/re-fit: `PATCH /models/{id}` to rename and/or change predictors (re-computes metrics).
-- Delete: `DELETE /models/{id}` removes metrics and dependent scenarios.
+- Delete: `DELETE /models/{id}` removes metrics, transform params, and dependent scenarios.
 - Roles: `POST /models/{id}/role` with `hero|challenger1|challenger2|none` (enforces 1 Hero + 2 Challengers max). Legacy `/hero` endpoint still works.
-- Summary: `GET /models/{id}/summary` ⇒ intercept + coefficients with β, std err, t, p, VIF.
+- Summary: `GET /models/{id}/summary` ⇒ intercept + coefficients with β, std err, t, p, VIF, plus
+  (new) `is_media`, `decay`, `half_life`, `hill_k`, `hill_s`, `lag`, `raw_mean` per coefficient when
+  that variable is media-flagged (see below); all `null` for control variables.
 - Predictions: `GET /models/{id}/predictions?granularity=auto|weekly|monthly[&time_col=col]` ⇒ `{index, y_true, y_pred, residuals}` (when not auto, requires a datetime column).
 - Metrics stored: R², Adjusted R², VIF, Durbin–Watson, MAE, RMSE, MAPE (exposed via `ModelOut.metrics`).
 - Frontend `/modeling` now offers correlation bars with search, creation/edit form, model table with hero/challenger controls, comparison dashboard, hero coefficient table, and actual-vs-model chart with residual toggle.
+
+### Adstock + Hill media transform
+
+Any `x_var` whose Group or Subgroup has `apply_media_transform=true` (see Module 2) is
+automatically transformed — geometric adstock (carryover) followed by Hill saturation
+(diminishing returns) — instead of being fed to OLS raw; control variables are unaffected. This
+is fully automatic (no manual per-variable configuration): a per-channel grid search (decay ∈
+{0,0.2,0.4,0.6,0.8}, Hill S ∈ {1,2,3}, lag ∈ {0..4}, Hill K ∈ quantiles of the channel's own
+nonzero values) runs against the target residualized on the model's control variables, and the
+winning params are fixed for that model — never re-sampled jointly with the linear coefficients
+(see `backend/app/services/model_fit.py` docstring and `BITACORA.md` for why the joint-Bayesian
+alternative was rejected). Fitted params are persisted per `(model_id, variable_name)` in the new
+`ModelTransform` table; `POST/PATCH /models` (re)runs the search and stores the result,
+`POST /models/{id}/best_stepwise` reuses the parent model's already-fit params (fixed before
+variable selection, per the reference methodology) rather than re-searching, and
+`POST /models/{id}/duplicate` copies them verbatim. A model with **no** `ModelTransform` rows
+(including every model created before this feature shipped) behaves exactly as pure OLS always
+did — this is the deliberate backward-compatibility story, not an oversight.
+
+Every consumer that re-fits or re-derives a model's coefficients (`models.py` summary/predictions/
+correlations-residual, `routers/analysis.py::_fit_from_model`, `routers/predict.py`'s scenario
+engine) goes through the single shared `services/model_fit.py::build_design_matrix`, so the same
+transform is applied consistently everywhere. Scenario projections in `/predict` additionally
+apply adstock/Hill over the **full concatenated history+future series** before slicing out the
+projected periods — never on a truncated future-only window — so carryover from real history
+correctly bleeds into the first few projected periods instead of starting from a cold (zero)
+state.
+
+Frontend: `/modeling`'s Hero coefficient table badges media variables and shows their fitted
+decay/half-life/K/S; a "Curvas de saturación" card renders the Hill curve per media variable
+client-side from `hill_k`/`hill_s`, with a reference line at the variable's historical mean
+(`raw_mean`).
 
 ## Module 4
 

@@ -173,6 +173,7 @@ class TransformResponse(BaseModel):
 class GroupOut(BaseModel):
     id: str
     name: str
+    apply_media_transform: bool = False
     subgroups: List["SubgroupOut"]
 
 
@@ -180,6 +181,7 @@ class SubgroupOut(BaseModel):
     id: str
     name: str
     group_id: str
+    apply_media_transform: bool = False
 
 
 GroupOut.model_rebuild()
@@ -187,11 +189,13 @@ GroupOut.model_rebuild()
 
 class CreateGroupRequest(BaseModel):
     name: str
+    apply_media_transform: bool = False
 
 
 class CreateSubgroupRequest(BaseModel):
     group_id: str
     name: str
+    apply_media_transform: bool = False
 
 
 class AssignVariableRequest(BaseModel):
@@ -202,11 +206,13 @@ class AssignVariableRequest(BaseModel):
 
 
 class RenameGroupRequest(BaseModel):
-    name: str
+    name: Optional[str] = None
+    apply_media_transform: Optional[bool] = None
 
 
 class RenameSubgroupRequest(BaseModel):
-    name: str
+    name: Optional[str] = None
+    apply_media_transform: Optional[bool] = None
 
 
 class CategorizeRequest(BaseModel):
@@ -235,6 +241,7 @@ class CreateModelRequest(BaseModel):
     name: str
     y_var: str
     x_vars: list[str]
+    apply_media_transforms: bool = True
 
 
 class ModelMetricsOut(BaseModel):
@@ -255,6 +262,7 @@ class ModelOut(BaseModel):
     x_vars: list[str]
     is_hero: bool
     role: Literal["hero", "challenger1", "challenger2", "none"] = "none"
+    apply_media_transforms: bool = True
     metrics: ModelMetricsOut
 
 
@@ -273,6 +281,7 @@ class ModelWithRole(BaseModel):
 class UpdateModelRequest(BaseModel):
     name: Optional[str] = None
     x_vars: Optional[list[str]] = None
+    apply_media_transforms: Optional[bool] = None
 
 
 class ModelRoleRequest(BaseModel):
@@ -287,6 +296,13 @@ class CoefficientItem(BaseModel):
     p_value: float
     vif: Optional[float] = None
     beta_std: Optional[float] = None
+    is_media: bool = False
+    decay: Optional[float] = None
+    half_life: Optional[float] = None
+    hill_k: Optional[float] = None
+    hill_s: Optional[float] = None
+    lag: Optional[int] = None
+    raw_mean: Optional[float] = None
 
 
 class ModelSummaryResponse(BaseModel):

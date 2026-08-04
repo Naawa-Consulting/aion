@@ -45,7 +45,11 @@ def list_groups(
         out.append(GroupOut(
             id=g.id,
             name=g.name,
-            subgroups=[SubgroupOut(id=sg.id, name=sg.name, group_id=sg.group_id) for sg in sg_by_gid.get(g.id, [])]
+            apply_media_transform=g.apply_media_transform,
+            subgroups=[
+                SubgroupOut(id=sg.id, name=sg.name, group_id=sg.group_id, apply_media_transform=sg.apply_media_transform)
+                for sg in sg_by_gid.get(g.id, [])
+            ]
         ))
     return out
 
@@ -56,10 +60,15 @@ def create_group(
     membership: CurrentMembership = Depends(require_write_access),
     session: Session = Depends(get_session),
 ):
-    g = Group(id=str(uuid.uuid4()), company_id=membership.company_id, name=body.name)
+    g = Group(
+        id=str(uuid.uuid4()),
+        company_id=membership.company_id,
+        name=body.name,
+        apply_media_transform=body.apply_media_transform,
+    )
     session.add(g)
     session.commit()
-    return GroupOut(id=g.id, name=g.name, subgroups=[])
+    return GroupOut(id=g.id, name=g.name, apply_media_transform=g.apply_media_transform, subgroups=[])
 
 
 @router.post("/subgroups", response_model=SubgroupOut)
@@ -69,10 +78,16 @@ def create_subgroup(
     session: Session = Depends(get_session),
 ):
     g = get_scoped(session, Group, body.group_id, membership.company_id)
-    sg = Subgroup(id=str(uuid.uuid4()), company_id=membership.company_id, group_id=g.id, name=body.name)
+    sg = Subgroup(
+        id=str(uuid.uuid4()),
+        company_id=membership.company_id,
+        group_id=g.id,
+        name=body.name,
+        apply_media_transform=body.apply_media_transform,
+    )
     session.add(sg)
     session.commit()
-    return SubgroupOut(id=sg.id, group_id=sg.group_id, name=sg.name)
+    return SubgroupOut(id=sg.id, group_id=sg.group_id, name=sg.name, apply_media_transform=sg.apply_media_transform)
 
 
 @router.post("/assign")
@@ -116,19 +131,22 @@ def rename_group(
     session: Session = Depends(get_session),
 ):
     group = get_scoped(session, Group, group_id, membership.company_id)
-    new_name = body.name.strip()
-    if not new_name:
-        raise HTTPException(status_code=400, detail={"error": "Name cannot be empty"})
-    conflict = session.exec(
-        select(Group).where(
-            Group.company_id == membership.company_id,
-            func.lower(Group.name) == new_name.lower(),
-            Group.id != group_id,
-        )
-    ).first()
-    if conflict:
-        raise HTTPException(status_code=400, detail={"error": "Group name already exists"})
-    group.name = new_name
+    if body.name is not None:
+        new_name = body.name.strip()
+        if not new_name:
+            raise HTTPException(status_code=400, detail={"error": "Name cannot be empty"})
+        conflict = session.exec(
+            select(Group).where(
+                Group.company_id == membership.company_id,
+                func.lower(Group.name) == new_name.lower(),
+                Group.id != group_id,
+            )
+        ).first()
+        if conflict:
+            raise HTTPException(status_code=400, detail={"error": "Group name already exists"})
+        group.name = new_name
+    if body.apply_media_transform is not None:
+        group.apply_media_transform = body.apply_media_transform
     session.add(group)
     session.commit()
     session.refresh(group)
@@ -138,7 +156,11 @@ def rename_group(
     return GroupOut(
         id=group.id,
         name=group.name,
-        subgroups=[SubgroupOut(id=sg.id, name=sg.name, group_id=sg.group_id) for sg in subgroups],
+        apply_media_transform=group.apply_media_transform,
+        subgroups=[
+            SubgroupOut(id=sg.id, name=sg.name, group_id=sg.group_id, apply_media_transform=sg.apply_media_transform)
+            for sg in subgroups
+        ],
     )
 
 
@@ -150,24 +172,32 @@ def rename_subgroup(
     session: Session = Depends(get_session),
 ):
     subgroup = get_scoped(session, Subgroup, subgroup_id, membership.company_id)
-    new_name = body.name.strip()
-    if not new_name:
-        raise HTTPException(status_code=400, detail={"error": "Name cannot be empty"})
-    conflict = session.exec(
-        select(Subgroup).where(
-            Subgroup.group_id == subgroup.group_id,
-            Subgroup.company_id == membership.company_id,
-            func.lower(Subgroup.name) == new_name.lower(),
-            Subgroup.id != subgroup_id,
-        )
-    ).first()
-    if conflict:
-        raise HTTPException(status_code=400, detail={"error": "Subgroup name already exists in this group"})
-    subgroup.name = new_name
+    if body.name is not None:
+        new_name = body.name.strip()
+        if not new_name:
+            raise HTTPException(status_code=400, detail={"error": "Name cannot be empty"})
+        conflict = session.exec(
+            select(Subgroup).where(
+                Subgroup.group_id == subgroup.group_id,
+                Subgroup.company_id == membership.company_id,
+                func.lower(Subgroup.name) == new_name.lower(),
+                Subgroup.id != subgroup_id,
+            )
+        ).first()
+        if conflict:
+            raise HTTPException(status_code=400, detail={"error": "Subgroup name already exists in this group"})
+        subgroup.name = new_name
+    if body.apply_media_transform is not None:
+        subgroup.apply_media_transform = body.apply_media_transform
     session.add(subgroup)
     session.commit()
     session.refresh(subgroup)
-    return SubgroupOut(id=subgroup.id, group_id=subgroup.group_id, name=subgroup.name)
+    return SubgroupOut(
+        id=subgroup.id,
+        group_id=subgroup.group_id,
+        name=subgroup.name,
+        apply_media_transform=subgroup.apply_media_transform,
+    )
 
 
 @router.delete("/{group_id}")

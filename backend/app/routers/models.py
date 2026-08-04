@@ -14,8 +14,16 @@ from statsmodels.stats.stattools import durbin_watson
 
 from ..auth import CurrentMembership, get_current_membership, require_write_access
 from ..db import get_session
-from ..models import Dataset, Model, ModelMetrics, Scenario, Variable, Group, Subgroup
+from ..models import Dataset, Model, ModelMetrics, ModelTransform, Scenario, Variable, Group, Subgroup
 from ..services.analysis import invalidate_cache_for_model
+from ..services.media_transform import half_life
+from ..services.model_fit import (
+    MediaTransformParams,
+    build_design_matrix,
+    load_transform_params,
+    resolve_media_flags,
+    store_transform_params,
+)
 from ..tenancy import get_scoped
 from ..utils.datasets import load_dataset_frame
 from ..schemas import (
@@ -112,7 +120,11 @@ def correlations(
         if model.y_var != y:
             raise HTTPException(status_code=400, detail="Model target does not match requested y")
         x_vars = json.loads(model.x_vars_json)
-        work, y_arr, X = _prepare_training_frame(df, model.y_var, x_vars)
+        transform_params = load_transform_params(session, model.id, membership.company_id)
+        work, y_arr, X, _ = _build_matrix(
+            session, membership.company_id, dataset_id, df, model.y_var, x_vars,
+            transform_params=transform_params, apply_transforms=model.apply_media_transforms,
+        )
         X_const = sm.add_constant(X, has_constant="add")
         result = sm.OLS(y_arr, X_const).fit()
         y_series = pd.Series(y_arr, index=work.index)
@@ -154,21 +166,30 @@ def correlations(
     return CorrelationResponse(y=y, items=corr_items)
 
 
-def _prepare_training_frame(df: pd.DataFrame, y_var: str, x_vars: list[str]):
-    if y_var not in df.columns:
-        raise HTTPException(status_code=400, detail="y_var not found")
-    if not x_vars:
-        raise HTTPException(status_code=400, detail="At least one x_var is required")
-    for x in x_vars:
-        if x not in df.columns:
-            raise HTTPException(status_code=400, detail=f"x_var not found: {x}")
-    cols = [y_var] + x_vars
-    work = df[cols].apply(pd.to_numeric, errors="coerce").dropna()
-    if work.shape[0] < len(cols) + 1:
-        raise HTTPException(status_code=400, detail="Insufficient rows after cleaning for regression")
+def _build_matrix(
+    session: Session,
+    company_id: str,
+    dataset_id: str,
+    df: pd.DataFrame,
+    y_var: str,
+    x_vars: list[str],
+    transform_params: Optional[dict] = None,
+    apply_transforms: bool = True,
+):
+    """Resolves media flags from Group/Subgroup, then builds the design matrix (media
+    x_vars adstock+Hill transformed, control x_vars raw) via the shared model_fit service.
+    `apply_transforms=False` is the per-model override: every x_var is treated as control
+    (raw), regardless of its Group/Subgroup media flag — used for variables the user already
+    transformed manually, or to compare a raw vs. transformed model side by side."""
+    media_flags = (
+        resolve_media_flags(session, dataset_id, company_id, x_vars) if apply_transforms else {x: False for x in x_vars}
+    )
+    try:
+        work, X, used_params = build_design_matrix(df, y_var, x_vars, media_flags, transform_params=transform_params)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     y = work[y_var].to_numpy()
-    X = work[x_vars]
-    return work, y, X
+    return work, y, X, used_params
 
 
 def _compute_metrics(y: np.ndarray, y_hat: np.ndarray, X: pd.DataFrame) -> dict:
@@ -220,6 +241,7 @@ def _model_to_out(m: Model, mm: ModelMetrics) -> ModelOut:
         x_vars=json.loads(m.x_vars_json),
         is_hero=m.role == "hero",
         role=m.role or "none",
+        apply_media_transforms=m.apply_media_transforms,
         metrics=ModelMetricsOut(
             r2=mm.r2,
             adj_r2=mm.adj_r2,
@@ -232,8 +254,21 @@ def _model_to_out(m: Model, mm: ModelMetrics) -> ModelOut:
     )
 
 
-def _fit_and_store_metrics(session: Session, model: Model, df: pd.DataFrame, x_vars: list[str]):
-    work, y, X = _prepare_training_frame(df, model.y_var, x_vars)
+def _fit_and_store_metrics(
+    session: Session,
+    model: Model,
+    df: pd.DataFrame,
+    x_vars: list[str],
+    transform_params: Optional[dict[str, MediaTransformParams]] = None,
+):
+    """Fits OLS on the (possibly adstock+Hill transformed) design matrix, stores metrics +
+    the per-variable transform params used. Pass `transform_params=None` (the default) to
+    run a fresh per-channel grid search; pass a fixed dict (e.g. from best_stepwise, which
+    must not re-search hyperparameters on a variable subset) to reuse it as-is."""
+    work, y, X, used_params = _build_matrix(
+        session, model.company_id, model.dataset_id, df, model.y_var, x_vars,
+        transform_params=transform_params, apply_transforms=model.apply_media_transforms,
+    )
     X_const = sm.add_constant(X, has_constant="add")
     result = sm.OLS(y, X_const).fit()
     y_hat = result.predict(X_const)
@@ -253,7 +288,8 @@ def _fit_and_store_metrics(session: Session, model: Model, df: pd.DataFrame, x_v
     mm.mape = metrics["mape"]
     mm.vif_json = json.dumps(metrics["vif"])
     session.add(mm)
-    return work, y, X, X_const, result
+    store_transform_params(session, model, used_params)
+    return work, y, X, X_const, result, used_params
 
 
 def _generate_unique_name(session: Session, dataset_id: str, company_id: str, base_name: str) -> str:
@@ -341,6 +377,7 @@ def create_model(
         x_vars_json=json.dumps(body.x_vars),
         is_hero=False,
         role="none",
+        apply_media_transforms=body.apply_media_transforms,
     )
     session.add(m)
     session.commit()
@@ -386,9 +423,16 @@ def update_model(
 
     if body.name:
         m.name = body.name
-    if body.x_vars is not None:
-        m.x_vars_json = json.dumps(body.x_vars)
-        _fit_and_store_metrics(session, m, df, body.x_vars)
+    transforms_flag_changed = (
+        body.apply_media_transforms is not None and body.apply_media_transforms != m.apply_media_transforms
+    )
+    if transforms_flag_changed:
+        m.apply_media_transforms = body.apply_media_transforms
+    if body.x_vars is not None or transforms_flag_changed:
+        x_vars = body.x_vars if body.x_vars is not None else json.loads(m.x_vars_json)
+        if body.x_vars is not None:
+            m.x_vars_json = json.dumps(body.x_vars)
+        _fit_and_store_metrics(session, m, df, x_vars)
     session.add(m)
     session.commit()
 
@@ -419,6 +463,7 @@ def duplicate_model(
         x_vars_json=original.x_vars_json,
         is_hero=False,
         role="none",
+        apply_media_transforms=original.apply_media_transforms,
     )
     session.add(new_model)
     session.commit()
@@ -435,6 +480,10 @@ def duplicate_model(
     )
     session.add(new_metrics)
     session.commit()
+    original_params = load_transform_params(session, original.id, membership.company_id)
+    if original_params:
+        store_transform_params(session, new_model, original_params)
+        session.commit()
     invalidate_cache_for_model(new_model.id)
     return _model_to_out(new_model, new_metrics)
 
@@ -449,7 +498,14 @@ def create_best_stepwise_model(
     ds = get_scoped(session, Dataset, original.dataset_id, membership.company_id)
     df = _load_df(ds)
     original_x = json.loads(original.x_vars_json)
-    work, y_arr, X = _prepare_training_frame(df, original.y_var, original_x)
+    # Hyperparameters (decay/K/S/lag) are fixed from the original model's fit *before*
+    # stepwise selection runs, never re-searched per candidate subset (matches the
+    # reference methodology: transform params fixed, then variable selection on top).
+    original_params = load_transform_params(session, original.id, membership.company_id)
+    work, y_arr, X, used_params = _build_matrix(
+        session, membership.company_id, original.dataset_id, df, original.y_var, original_x,
+        transform_params=original_params, apply_transforms=original.apply_media_transforms,
+    )
     y_series = pd.Series(y_arr, index=work.index)
     selected_predictors = _stepwise_selection(X, y_series, original_x)
     if not selected_predictors:
@@ -464,10 +520,12 @@ def create_best_stepwise_model(
         x_vars_json=json.dumps(selected_predictors),
         is_hero=False,
         role="none",
+        apply_media_transforms=original.apply_media_transforms,
     )
     session.add(new_model)
     session.commit()
-    _fit_and_store_metrics(session, new_model, df, selected_predictors)
+    subset_params = {name: p for name, p in used_params.items() if name in selected_predictors}
+    _fit_and_store_metrics(session, new_model, df, selected_predictors, transform_params=subset_params)
     session.commit()
     metrics = session.get(ModelMetrics, new_model.id)
     if not metrics:
@@ -485,6 +543,7 @@ def delete_model(
     m = get_scoped(session, Model, model_id, membership.company_id)
     session.exec(delete(Scenario).where(Scenario.model_id == model_id, Scenario.company_id == membership.company_id))
     session.exec(delete(ModelMetrics).where(ModelMetrics.model_id == model_id, ModelMetrics.company_id == membership.company_id))
+    session.exec(delete(ModelTransform).where(ModelTransform.model_id == model_id, ModelTransform.company_id == membership.company_id))
     session.delete(m)
     session.commit()
     invalidate_cache_for_model(model_id)
@@ -555,7 +614,11 @@ def model_summary(
     ds = get_scoped(session, Dataset, m.dataset_id, membership.company_id)
     df = _load_df(ds)
     x_vars = json.loads(m.x_vars_json)
-    work, y, X = _prepare_training_frame(df, m.y_var, x_vars)
+    transform_params = load_transform_params(session, m.id, membership.company_id)
+    work, y, X, used_params = _build_matrix(
+        session, membership.company_id, m.dataset_id, df, m.y_var, x_vars,
+        transform_params=transform_params, apply_transforms=m.apply_media_transforms,
+    )
     X_const = sm.add_constant(X, has_constant="add")
     result = sm.OLS(y, X_const).fit()
     metrics = _compute_metrics(y, result.predict(X_const), X)
@@ -594,6 +657,7 @@ def model_summary(
         vif_value = vif_lookup.get(var)
         if isinstance(vif_value, (int, float)) and not np.isfinite(vif_value):
             vif_value = None
+        transform = used_params.get(var)
         coefficients.append(
             CoefficientItem(
                 name=var,
@@ -603,6 +667,13 @@ def model_summary(
                 p_value=float(result.pvalues.get(var, 1.0)),
                 vif=vif_value,
                 beta_std=_beta_std(var),
+                is_media=transform is not None,
+                decay=transform.decay if transform else None,
+                half_life=half_life(transform.decay) if transform else None,
+                hill_k=transform.hill_k if transform else None,
+                hill_s=transform.hill_s if transform else None,
+                lag=transform.lag if transform else None,
+                raw_mean=float(work[var].mean()) if var in work.columns else None,
             )
         )
 
@@ -633,7 +704,11 @@ def model_predictions(
     ds = get_scoped(session, Dataset, m.dataset_id, membership.company_id)
     df = _load_df(ds)
     x_vars = json.loads(m.x_vars_json)
-    work, y, X = _prepare_training_frame(df, m.y_var, x_vars)
+    transform_params = load_transform_params(session, m.id, membership.company_id)
+    work, y, X, _ = _build_matrix(
+        session, membership.company_id, m.dataset_id, df, m.y_var, x_vars,
+        transform_params=transform_params, apply_transforms=m.apply_media_transforms,
+    )
     X_const = sm.add_constant(X, has_constant="add")
     result = sm.OLS(y, X_const).fit()
     y_hat = result.predict(X_const)

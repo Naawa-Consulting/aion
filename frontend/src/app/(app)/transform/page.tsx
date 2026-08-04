@@ -39,7 +39,12 @@ type Variable = {
   created_at?: string | null;
 };
 
-type Group = { id: string; name: string; subgroups: { id: string; name: string; group_id: string }[] };
+type Group = {
+  id: string;
+  name: string;
+  apply_media_transform: boolean;
+  subgroups: { id: string; name: string; group_id: string; apply_media_transform: boolean }[];
+};
 type TransformOp = "lag" | "decay" | "log" | "add" | "sub" | "mul" | "div";
 type PreviewPayload = {
   dataset_id: string;
@@ -388,6 +393,50 @@ const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
       setSubgroupError(detail?.error || detail?.detail || error?.message || "Failed to rename subgroup");
     } finally {
       setRenamingSubgroupId(null);
+    }
+  };
+
+  const toggleGroupMediaTransform = async (group: Group) => {
+    const next = !group.apply_media_transform;
+    setGroups((prev) => prev.map((g) => (g.id === group.id ? { ...g, apply_media_transform: next } : g)));
+    try {
+      await apiFetch(`/groups/${group.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ apply_media_transform: next }),
+      });
+      toast.success(next ? `"${group.name}" now applies adstock + saturation` : `"${group.name}" no longer applies adstock + saturation`);
+    } catch (error: any) {
+      setGroups((prev) => prev.map((g) => (g.id === group.id ? { ...g, apply_media_transform: !next } : g)));
+      toast.error((error as Error)?.message || "Failed to update group");
+    }
+  };
+
+  const toggleSubgroupMediaTransform = async (group: Group, subgroup: { id: string; name: string; apply_media_transform: boolean }) => {
+    const next = !subgroup.apply_media_transform;
+    setGroups((prev) =>
+      prev.map((g) =>
+        g.id === group.id
+          ? { ...g, subgroups: g.subgroups.map((s) => (s.id === subgroup.id ? { ...s, apply_media_transform: next } : s)) }
+          : g
+      )
+    );
+    try {
+      await apiFetch(`/groups/subgroups/${subgroup.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ apply_media_transform: next }),
+      });
+      toast.success(next ? `"${subgroup.name}" now applies adstock + saturation` : `"${subgroup.name}" no longer applies adstock + saturation`);
+    } catch (error: any) {
+      setGroups((prev) =>
+        prev.map((g) =>
+          g.id === group.id
+            ? { ...g, subgroups: g.subgroups.map((s) => (s.id === subgroup.id ? { ...s, apply_media_transform: !next } : s)) }
+            : g
+        )
+      );
+      toast.error((error as Error)?.message || "Failed to update subgroup");
     }
   };
 
@@ -922,7 +971,6 @@ const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
                             className="rounded-full p-1 text-[var(--color-muted)] hover:text-red-500 transition disabled:cursor-not-allowed disabled:opacity-60"
                             onClick={() => {
                               setGroupToDelete(group);
-                              setGroupDeleteMode("uncategorized");
                               setGroupDeleteError("");
                             }}
                             disabled={!canEdit}
@@ -935,6 +983,18 @@ const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
                     </div>
                     <Badge>{group.subgroups.length} subgroups</Badge>
                   </div>
+                  <label
+                    className="flex items-center gap-2 text-xs text-[var(--color-muted)]"
+                    title="Variables in this group get adstock (carryover) + Hill saturation applied automatically when used as model predictors"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={group.apply_media_transform}
+                      disabled={!canEdit}
+                      onChange={() => toggleGroupMediaTransform(group)}
+                    />
+                    Aplica adstock + saturación (medios)
+                  </label>
                   <div className="space-y-2">
                     {group.subgroups.map((sub) => (
                       <div
@@ -992,6 +1052,18 @@ const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
                                 className="text-[var(--color-muted)] opacity-0 group-hover:opacity-100 transition"
                               />
                             </button>
+                            <label
+                              className="flex items-center gap-1 text-[10px] uppercase text-[var(--color-muted)] shrink-0"
+                              title="Aplica adstock + saturación (medios) a las variables de este subgrupo"
+                            >
+                              <input
+                                type="checkbox"
+                                checked={sub.apply_media_transform}
+                                disabled={!canEdit}
+                                onChange={() => toggleSubgroupMediaTransform(group, sub)}
+                              />
+                              Medios
+                            </label>
                             <button
                               type="button"
                               className="rounded-full p-1 text-[var(--color-muted)] hover:text-red-500 transition disabled:cursor-not-allowed disabled:opacity-60"

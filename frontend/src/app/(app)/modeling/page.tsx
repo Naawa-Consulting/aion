@@ -2,7 +2,7 @@
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import clsx from "clsx";
-import { Bar, CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis, Legend, ComposedChart } from "recharts";
+import { Bar, CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis, Legend, ComposedChart, ReferenceLine } from "recharts";
 import { toast } from "sonner";
 
 import { Card, CardHeader } from "@/components/ui/card";
@@ -41,6 +41,7 @@ type Model = {
   y_var: string;
   x_vars: string[];
   is_hero: boolean;
+  apply_media_transforms: boolean;
   role: "hero" | "challenger1" | "challenger2" | "none";
   metrics: ModelMetrics;
 };
@@ -57,6 +58,13 @@ type Coefficient = {
   p_value: number;
   vif?: number | null;
   beta_std?: number | null;
+  is_media?: boolean;
+  decay?: number | null;
+  half_life?: number | null;
+  hill_k?: number | null;
+  hill_s?: number | null;
+  lag?: number | null;
+  raw_mean?: number | null;
 };
 type Predictions = {
   index: string[];
@@ -78,6 +86,41 @@ const formatCorr = (value: number | null | undefined) => {
   return value.toFixed(3);
 };
 
+function SaturationCurveChart({ coef }: { coef: Coefficient }) {
+  const k = coef.hill_k ?? 0;
+  const s = coef.hill_s ?? 1;
+  if (!k || !s) return null;
+  const maxX = k * 4;
+  const points = Array.from({ length: 61 }, (_, i) => {
+    const x = (maxX * i) / 60;
+    const xs = Math.pow(x, s);
+    const ks = Math.pow(k, s);
+    return { x, y: xs / (ks + xs || 1) };
+  });
+  return (
+    <div className="space-y-1">
+      <p className="text-xs font-medium truncate">{coef.name}</p>
+      <ResponsiveContainer width="100%" height={140}>
+        <LineChart data={points} margin={{ top: 4, right: 8, bottom: 0, left: -20 }}>
+          <CartesianGrid strokeDasharray="3 3" opacity={0.2} />
+          <XAxis dataKey="x" tick={{ fontSize: 10 }} tickFormatter={(v) => Number(v).toFixed(0)} />
+          <YAxis domain={[0, 1]} tick={{ fontSize: 10 }} />
+          <Tooltip formatter={(v: number) => v.toFixed(3)} labelFormatter={(v: number) => `x=${Number(v).toFixed(1)}`} />
+          <Line type="monotone" dataKey="y" stroke="#2563eb" dot={false} strokeWidth={2} />
+          {coef.raw_mean != null && (
+            <ReferenceLine
+              x={coef.raw_mean}
+              stroke="#dc2626"
+              strokeDasharray="4 4"
+              label={{ value: "actual", fontSize: 10, position: "insideTopRight" }}
+            />
+          )}
+        </LineChart>
+      </ResponsiveContainer>
+    </div>
+  );
+}
+
 const formatTimeLabel = (value: string | number, includeYear = true) => {
   const parsed = new Date(value);
   if (!Number.isNaN(parsed.getTime())) {
@@ -98,6 +141,7 @@ export default function ModelingPage() {
   const [yVar, setYVar] = useState("");
   const [xSelected, setXSelected] = useState<string[]>([]);
   const [modelName, setModelName] = useState("");
+  const [applyMediaTransforms, setApplyMediaTransforms] = useState(true);
   const [corr, setCorr] = useState<CorrelationItem[]>([]);
   const [corrSearch, setCorrSearch] = useState("");
   const [models, setModels] = useState<Model[]>([]);
@@ -248,14 +292,20 @@ const [subgroupFilter, setSubgroupFilter] = useState<SubgroupFilter>("all");
         await apiFetch(`/models/${editingModelId}`, {
           method: "PATCH",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ name: modelName, x_vars: xSelected }),
+          body: JSON.stringify({ name: modelName, x_vars: xSelected, apply_media_transforms: applyMediaTransforms }),
         });
         toast.success("Model updated");
       } else {
         await apiFetch("/models", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ dataset_id: selectedDataset, name: modelName, y_var: yVar, x_vars: xSelected }),
+          body: JSON.stringify({
+            dataset_id: selectedDataset,
+            name: modelName,
+            y_var: yVar,
+            x_vars: xSelected,
+            apply_media_transforms: applyMediaTransforms,
+          }),
         });
         toast.success("Model created");
       }
@@ -274,6 +324,7 @@ const [subgroupFilter, setSubgroupFilter] = useState<SubgroupFilter>("all");
     setModelName("");
     setXSelected([]);
     setEditingModelId(null);
+    setApplyMediaTransforms(true);
   };
 
   const startEdit = (model: Model) => {
@@ -281,6 +332,7 @@ const [subgroupFilter, setSubgroupFilter] = useState<SubgroupFilter>("all");
     setModelName(model.name);
     setYVar(model.y_var);
     setXSelected(model.x_vars);
+    setApplyMediaTransforms(model.apply_media_transforms);
   };
 
   const deleteModel = async (model: Model) => {
@@ -671,6 +723,17 @@ const [subgroupFilter, setSubgroupFilter] = useState<SubgroupFilter>("all");
               onRemove={(name) => setXSelected((prev) => prev.filter((p) => p !== name))}
               onClear={() => setXSelected([])}
             />
+            <label
+              className="flex items-center gap-2 text-sm"
+              title="Cuando está activo, las variables de medios (marcadas en Group/Subgroup) reciben adstock + saturación Hill automáticos al ajustar el modelo. Desactívalo para usar valores crudos (por ejemplo si ya las transformaste manualmente en Transform)."
+            >
+              <input
+                type="checkbox"
+                checked={applyMediaTransforms}
+                onChange={(e) => setApplyMediaTransforms(e.target.checked)}
+              />
+              Aplicar adstock + saturación a variables de medios
+            </label>
             <div className="flex gap-2 justify-end">
               {editingModelId && (
                 <Button variant="ghost" onClick={resetForm}>
@@ -705,7 +768,17 @@ const [subgroupFilter, setSubgroupFilter] = useState<SubgroupFilter>("all");
                 <tbody>
                   {models.map((m) => (
                     <tr key={m.id} className="odd:bg-transparent even:bg-[var(--color-border)]/20">
-                      <td className="px-3 py-2 font-medium">{m.name}</td>
+                      <td className="px-3 py-2 font-medium">
+                        {m.name}
+                        {!m.apply_media_transforms && (
+                          <span
+                            className="ml-2 text-[10px] uppercase text-[var(--color-muted)]"
+                            title="Este modelo NO aplica adstock+saturación a variables de medios (valores crudos)"
+                          >
+                            sin transform
+                          </span>
+                        )}
+                      </td>
                       <td className="px-3 py-2">
                         <Badge>{m.role === "none" ? "-" : m.role}</Badge>
                       </td>
@@ -931,7 +1004,20 @@ const [subgroupFilter, setSubgroupFilter] = useState<SubgroupFilter>("all");
                 <tbody>
                   {[summary.intercept, ...summary.coefficients].map((item) => (
                     <tr key={item.name} className="odd:bg-transparent even:bg-[var(--color-border)]/20">
-                      <td className="px-3 py-2">{item.name}</td>
+                      <td className="px-3 py-2">
+                        <div className="flex items-center gap-2">
+                          <span>{item.name}</span>
+                          {item.is_media && <Badge>Medios</Badge>}
+                        </div>
+                        {item.is_media && (
+                          <div className="text-[11px] text-[var(--color-muted)]">
+                            decay {item.decay?.toFixed(2)}
+                            {item.half_life != null ? ` (half-life ${item.half_life.toFixed(1)})` : ""} · K{" "}
+                            {item.hill_k?.toFixed(2)} · S {item.hill_s?.toFixed(1)}
+                            {item.lag ? ` · lag ${item.lag}` : ""}
+                          </div>
+                        )}
+                      </td>
                       <td className="px-3 py-2">{item.coef.toFixed(4)}</td>
                       <td className="px-3 py-2">{item.beta_std != null ? item.beta_std.toFixed(3) : "-"}</td>
                       <td className="px-3 py-2">{item.std_err.toFixed(4)}</td>
@@ -995,6 +1081,22 @@ const [subgroupFilter, setSubgroupFilter] = useState<SubgroupFilter>("all");
           )}
         </Card>
       </div>
+
+      {summary && summary.coefficients.some((c) => c.is_media) && (
+        <Card className="space-y-4">
+          <CardHeader
+            title="Curvas de saturación"
+            subtitle="Rendimiento marginal decreciente (Hill) por variable de medios — línea punteada: nivel actual"
+          />
+          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+            {summary.coefficients
+              .filter((c) => c.is_media)
+              .map((c) => (
+                <SaturationCurveChart key={c.name} coef={c} />
+              ))}
+          </div>
+        </Card>
+      )}
     </section>
 
     {showQuickView && (

@@ -116,6 +116,7 @@ def compute_contributions(
     dataset_id: str,
     model_id: str,
     df: pd.DataFrame,
+    design_frame: pd.DataFrame,
     time_column: Optional[str],
     start: Optional[pd.Timestamp],
     end: Optional[pd.Timestamp],
@@ -146,6 +147,7 @@ def compute_contributions(
 
     result = _compute_contributions_impl(
         df=df,
+        design_frame=design_frame,
         time_column=time_column,
         start=start,
         end=end,
@@ -159,6 +161,7 @@ def compute_contributions(
 def _compute_contributions_impl(
     *,
     df: pd.DataFrame,
+    design_frame: pd.DataFrame,
     time_column: Optional[str],
     start: Optional[pd.Timestamp],
     end: Optional[pd.Timestamp],
@@ -172,6 +175,13 @@ def _compute_contributions_impl(
     - Validates the model contains coefficients for every predictor + intercept.
     - Filters the frame by the requested date range.
     - Returns both per-row and aggregated contribution artifacts.
+
+    `design_frame` holds the *already-transformed* predictor values (media variables
+    adstock+Hill applied, controls raw) — see services/model_fit.py. It must be built over
+    the full historical series (never a date-truncated one) so adstock carryover across the
+    window boundary is correct; `design_frame.reindex(...)` below handles it covering a
+    different row set than `df`/`filtered_df` (e.g. when built over full history while
+    `filtered_df` is a narrower date-filtered slice, or vice versa).
     """
 
     time_values = pd.to_datetime(df[time_column], errors="coerce")
@@ -228,7 +238,17 @@ def _compute_contributions_impl(
 
     intercept_value = float(params[intercept_name])
 
-    numeric = filtered_df[predictors].apply(pd.to_numeric, errors="coerce").fillna(0.0)
+    missing_design_cols = [col for col in predictors if col not in design_frame.columns]
+    if missing_design_cols:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Design matrix is missing predictors: {', '.join(missing_design_cols)}",
+        )
+    numeric = (
+        design_frame.reindex(filtered_df.index)[predictors]
+        .apply(pd.to_numeric, errors="coerce")
+        .fillna(0.0)
+    )
     per_row = pd.DataFrame(index=numeric.index)
     per_variable_totals: Dict[str, float] = {}
 

@@ -68,6 +68,7 @@ class Group(SQLModel, table=True):
     id: str = Field(primary_key=True)
     company_id: str = Field(index=True, foreign_key="company.id")
     name: str
+    apply_media_transform: bool = Field(default=False, nullable=False)
     created_at: datetime = Field(default_factory=datetime.utcnow, nullable=False)
 
 
@@ -76,6 +77,7 @@ class Subgroup(SQLModel, table=True):
     company_id: str = Field(index=True, foreign_key="company.id")
     group_id: str = Field(index=True)
     name: str
+    apply_media_transform: bool = Field(default=False, nullable=False)
     created_at: datetime = Field(default_factory=datetime.utcnow, nullable=False)
 
 
@@ -98,6 +100,7 @@ class Model(SQLModel, table=True):
     x_vars_json: str  # JSON array of variable names
     is_hero: bool = False  # legacy flag
     role: str = Field(default="none")  # hero|challenger1|challenger2|none
+    apply_media_transforms: bool = Field(default=True, nullable=False)
     created_at: datetime = Field(default_factory=datetime.utcnow, nullable=False)
 
 
@@ -111,6 +114,22 @@ class ModelMetrics(SQLModel, table=True):
     rmse: float
     mape: float | None = None
     vif_json: str  # JSON array of {name, vif}
+
+
+class ModelTransform(SQLModel, table=True):
+    """Fitted adstock+Hill params per media x_var of a model. Absence of rows for a
+    model_id means no media transform applies (control-only or legacy pre-redesign model)."""
+
+    __table_args__ = (UniqueConstraint("model_id", "variable_name", name="uq_model_transform_model_var"),)
+
+    id: str = Field(primary_key=True)
+    company_id: str = Field(index=True, foreign_key="company.id")
+    model_id: str = Field(index=True)
+    variable_name: str
+    decay: float
+    hill_k: float
+    hill_s: float
+    lag: int = Field(default=0, nullable=False)
 
 
 class Scenario(SQLModel, table=True):

@@ -44,30 +44,59 @@ y desplegar:**
       transformaciones y modelos probados en producción y funcionan.
 - [ ] Dominio propio para el frontend en Vercel — pendiente, el usuario lo definirá en los
       próximos días. Por ahora se usa el subdominio `.vercel.app` por default.
-- [ ] **Bug abierto**: preview de transformación en `/transform` (gráfico + stats) muestra
-      "Failed to fetch" en producción (Vercel), consistente tras Retry y reload — no reproduce en
-      local. Se descartaron CORS y timeout del free tier de Render (probado directo con
-      curl: OPTIONS y POST al endpoint responden bien desde el origen de Vercel, dataset de
-      prueba es chico — 226 filas). Falta inspeccionar la request real desde DevTools del
-      navegador del usuario para aislar la causa.
+- [x] Bug de preview en `/transform` ("Failed to fetch" en producción) — resuelto. Causa raíz:
+      `variables.py:438` usaba `.fillna(method="ffill")`, sintaxis eliminada en pandas 3.0; como
+      `requirements.txt` no fijaba versión, Render resolvió `pandas==3.0.5` en el build mientras
+      local tenía `2.3.3` cacheado, de ahí que solo reprodujera en producción. De paso se encontró
+      y corrigió un bug más de fondo: una excepción no capturada nunca lleva headers CORS (el
+      middleware de error de Starlette corre por fuera de `CORSMiddleware`), por lo que cualquier
+      500 futuro se vería igual como "Failed to fetch" en vez de un error real — se agregó un
+      manejador global de excepciones en `main.py`. Se aprovechó para fijar las 17 dependencias de
+      `requirements.txt` a versión exacta (solo primer nivel, no todo `pip freeze`, para no romper
+      el dev local en Windows con paquetes de Linux como `uvloop`). Ver historial de hoy.
 - [ ] `render.yaml` (infra-as-code) — fast-follow no bloqueante, configurar primero por
       dashboard.
 - [ ] RLS en Supabase: descartado para esta fase (la autorización real vive en la capa de
       aplicación, ver arriba) — queda como mejora opcional a futuro, no pendiente activo.
-- [ ] Rediseño de modelado: adstock (lag/decay geométrico) + Hill (saturación) como
+- [x] Rediseño de modelado: adstock (lag/decay geométrico) + Hill (saturación) como
       transformaciones automáticas por variable de medios — barrido (grid search) al ajustar el
-      modelo, no configuración manual del usuario. Ver metodología de referencia en
-      `[[mx_hdi_reference_project]]` (memoria de Claude).
+      modelo, no configuración manual del usuario. Implementado (ver historial de hoy); metodología
+      de referencia en `[[mx_hdi_reference_project]]` (memoria de Claude).
   - Esto también resuelve: "Módulo 5: forecast con variable original, transformación en backend
-    antes de predecir" (ítem antiguo de abajo).
+    antes de predecir" (ítem antiguo de abajo) — las proyecciones de escenario ahora aplican
+    adstock+Hill sobre la serie histórico+futuro concatenada.
 - [ ] Capa económica: tasa de conversión + valor/precio promedio ligados al `y_var` del modelo,
       costos de medios por variable/grupo/subgrupo, cálculo y visualización de ROI/ROAS y
       eficiencia de media mix. Fórmula de referencia: `ingreso = contribución × tasa_conversión
       × valor_promedio`; `ROI = ingreso / inversión − 1`.
   - Esto reemplaza/agrupa los ítems antiguos de Módulo 4 sobre tasa de conversión, precio
     promedio y costos (ver abajo).
-- [ ] Visualizaciones de negocio: curvas de saturación (Hill) y de adstock/decay con punto de
-      operación, waterfall/donut de atribución, dashboard de ROI/eficiencia.
+  - **Dos consideraciones de negocio a resolver en el diseño (aportadas por el usuario
+    2026-08-03, antes de empezar a implementar esta capa):**
+    1. **Inversión total ≠ solo variables que entraron al modelo.** En la práctica no todas las
+       variables de medios terminan siendo predictores del modelo (p.ej. Video y Display sí
+       entran, Radio no — por significancia, colinealidad, etc.), pero la inversión total y el
+       ROI total deben reflejar el gasto real completo (Video + Display + Radio), aunque la
+       contribución de Radio sea 0 por no estar en el modelo. Implica que el catálogo de
+       "inversión por canal" no puede ser simplemente "suma de costos de los x_vars del
+       modelo" — necesita cubrir también canales con inversión pero sin variable seleccionada
+       en el modelo (contribución 0, pero costo > 0 en el denominador del ROI).
+    2. **Evitar duplicar/triplicar inversión cuando varias variables miden lo mismo.** Es común
+       tener varias métricas correlacionadas del mismo canal (p.ej. impresiones, clics y views
+       de YouTube) y que solo una entre al modelo por ser la que mejor ajusta (p.ej. views). El
+       costo de referencia (p.ej. CPV) debe asociarse a esa métrica ganadora únicamente — no se
+       deben sumar también costos por impresiones o clics del mismo canal, o la inversión total
+       quedaría multiplicada por cada métrica redundante en vez de contarse una sola vez por
+       canal real de gasto.
+    - Ambos puntos sugieren que la capa económica necesita un concepto de "canal de inversión"
+      (gasto real en $) desacoplado de "variable predictora del modelo" — probablemente un
+      catálogo nuevo (¿a nivel Group/Subgroup, o una tabla aparte?) que mapee cada canal a: su
+      costo/precio de referencia, la métrica específica que se usa como su proxy en el modelo (si
+      la hay), y su inversión total — a diseñar con el usuario antes de escribir código.
+- [x] Curva de saturación (Hill) con punto de operación — implementada en `/modeling` (ver
+      historial de hoy).
+- [ ] Visualizaciones de negocio pendientes: curva de adstock/decay standalone, waterfall/donut de
+      atribución, dashboard de ROI/eficiencia (bloqueado por la capa económica de arriba).
 - [ ] Bayesiano: fase futura explícita, no ahora. No bloquear el diseño de datos para poder
       agregarlo después (evitar mezclar parámetros de transformación con el muestreo bayesiano
       conjunto — la referencia mostró que eso no converge en tiempo razonable).
@@ -82,9 +111,11 @@ y desplegar:**
       comportamiento) y se desactivó `typescript.ignoreBuildErrors` en `next.config.mjs` como
       tapón para no bloquear el despliegue — pendiente hacer una pasada dedicada de limpieza de
       tipos y volver a activar el type-check en build.
-- [ ] Bug preexistente encontrado en `transform/page.tsx`: el botón de borrar grupo llama
-      `setGroupDeleteMode("uncategorized")` pero ese estado no existe en el archivo — lanzaría
-      `ReferenceError` en tiempo de ejecución. No se tocó (no es parte de esta migración).
+- [x] Bug preexistente en `transform/page.tsx` corregido: el botón de borrar grupo llamaba
+      `setGroupDeleteMode("uncategorized")`, un estado que nunca se declaró con `useState` y que
+      ningún otro código consultaba (`confirmDeleteGroup` ya reasigna a "uncategorized" de forma
+      fija vía `/groups/{id}?reassign=uncategorized`, sin ningún concepto de "modo") — residuo
+      muerto de una versión anterior. Se quitó la línea; no requería más cambios.
 
 ### Backlog previo (sin resolver, no bloqueante para la fase actual)
 
@@ -108,6 +139,84 @@ y desplegar:**
 ~~Módulo 2: optimización de adstock~~ — resuelto por el rediseño de modelado (adstock automático).
 
 ## Historial
+
+### 2026-08-03 (5) — Toggle por modelo para activar/desactivar la transformación de medios
+
+A raíz de probar el rediseño de modelado (ver entrada anterior), se detectó que algunas variables
+de medios ya tenían un decay manual aplicado desde la herramienta vieja de Transform (p.ej.
+`dig_meta_branding_views_d5`, derivada con `alpha=0.5`) y quedaron dentro de un subgrupo marcado
+como medios — aplicarles adstock+Hill encima habría sido una doble transformación. Se agregó
+`Model.apply_media_transforms: bool` (default `true`, migración `7f4d461579cd`): un toggle por
+modelo, visible en el form de crear/editar en `/modeling`, que si se desactiva fuerza todas las
+x_vars de ese modelo a valores crudos sin importar su flag de Group/Subgroup — útil tanto para este
+caso (variables ya pre-procesadas manualmente) como para comparar un hero-con-transform vs. un
+challenger-sin-transform. Se propaga a duplicar/best_stepwise (heredan el flag del modelo
+original); modelos existentes quedan en `true` (comportamiento automático sin cambios) hasta que se
+editen. Migración aplicada contra Postgres real.
+
+### 2026-08-03 (4) — Rediseño de Modelado: adstock (decay geométrico) + Hill (saturación) automáticos
+
+Implementado el ítem principal de la fase actual, con metodología portada de
+`[[mx_hdi_reference_project]]` (memoria de Claude — proyecto MX-HDI). Cambios:
+
+- **Detección de variables de medios**: nuevo flag `apply_media_transform` en `Group`/`Subgroup`
+  (catálogo de Transform), no por variable individual ni por coincidencia de nombre — el usuario
+  marca qué grupo/subgrupo aplica el transform desde `/transform`. Migración Alembic
+  `6b0ac33ad4d4` generada, verificada contra SQLite temporal (upgrade/downgrade limpios) y ya
+  aplicada contra el Postgres real (`alembic upgrade head` corrido a pedido del usuario).
+- **Librería de transformación** (`backend/app/services/media_transform.py`): adstock geométrico
+  (`y_t = x_t + decay·y_{t-1}`, normalizado por `(1-decay)`) + Hill (`x^S/(K^S+x^S)`), idéntico a la
+  metodología de referencia.
+- **Grid-search + matriz de diseño compartida** (`backend/app/services/model_fit.py`): barrido por
+  canal (decay×S×lag×K, ~225 combinaciones) contra el residual del target tras controlar por las
+  variables no-medios, fijo *antes* de cualquier selección de variables (igual que la referencia;
+  se descartó el muestreo bayesiano conjunto de `decay/K/S/β` por la misma razón que en MX-HDI:
+  no-identificabilidad estructural). Nueva tabla `ModelTransform` persiste los parámetros fit por
+  `(modelo, variable)` — su ausencia para un modelo significa "sin transform" (control-only o
+  modelo legacy pre-rediseño, que sigue funcionando exactamente como OLS puro, sin cambios).
+- **Un solo punto de verdad para construir la matriz de diseño**: `models.py` (crear/editar/
+  stepwise/summary/predictions), `routers/analysis.py::_fit_from_model` y el motor de escenarios de
+  `predict.py` pasan todos por `build_design_matrix`. Se corrigió además un problema de fondo que
+  este cambio expuso: cualquier filtro por rango de fechas debe aplicarse *después* de transformar
+  sobre el histórico completo, nunca antes — filtrar primero rompería el arrastre (carryover) del
+  adstock en el borde de la ventana. Las proyecciones de escenario en `/predict` ahora concatenan
+  histórico+futuro, transforman una sola vez, y solo entonces recortan el tramo proyectado.
+- **Frontend**: toggle "Aplica adstock + saturación (medios)" por grupo/subgrupo en `/transform`;
+  en `/modeling`, badge + decay/half-life/K/S por variable de medios en la tabla de coeficientes del
+  Hero, y una tarjeta nueva de curvas de saturación (Hill) con línea de referencia en el valor medio
+  histórico de cada variable.
+- **Verificación**: sin infraestructura corriendo localmente (Supabase real, sin fixtures), se
+  verificó la lógica nueva con scripts standalone: (1) el grid-search recupera correctamente
+  parámetros conocidos sobre datos sintéticos (R²>0.99) y el camino sin variables de medios da
+  *exactamente* el mismo resultado que un OLS crudo (garantiza cero regresión en modelos legacy);
+  (2) el arrastre de adstock a través de la frontera histórico/futuro se comprobó explícitamente
+  distinto (y correcto) frente a transformar solo el tramo futuro en aislado. `npm run lint` y
+  `tsc --noEmit` en el frontend no muestran errores nuevos (los pre-existentes ya documentados
+  arriba siguen igual). Falta: probar en el navegador contra Supabase real (el usuario lo hará).
+
+### 2026-08-03 (3) — Bug de preview en Transform: pandas 3.0 + CORS ocultando errores 500
+
+Después del deploy, el preview de transformación en `/transform` mostraba "Failed to fetch" en
+Vercel (no en local). Se descartaron CORS/timeout por pruebas directas con curl contra Render.
+DevTools del usuario mostró que la request real sí llegaba y regresaba **500** — la pista que
+faltaba. Dos bugs reales, ambos corregidos:
+
+1. `variables.py:438` — `.fillna(method="ffill").fillna(method="bfill")` (sintaxis eliminada en
+   pandas 3.0). `requirements.txt` no fijaba versión de pandas; Render resolvió `3.0.5` en un
+   build fresco mientras el entorno local tenía `2.3.3` cacheado de antes — por eso solo
+   reproducía en producción. Corregido a `.ffill().bfill()` (compatible con ambas versiones).
+2. **Cualquier excepción no capturada pierde los headers CORS**: el middleware de error por
+   defecto de Starlette corre *fuera* de `CORSMiddleware`, así que un 500 sin manejar nunca lleva
+   `Access-Control-Allow-Origin` — el navegador lo bloquea a nivel de JS y lo reporta como
+   "Failed to fetch" genérico, aunque la pestaña Network sí vea el 500 real. Se agregó un
+   `@app.exception_handler(Exception)` global en `main.py` que responde con JSON normal (pasa por
+   `CORSMiddleware` correctamente) y loggea el traceback real. Este fix aplica a cualquier
+   endpoint, no solo este — antes, cualquier 500 no manejado se hubiera visto igual de opaco.
+
+**De paso**: se fijaron las 17 dependencias de primer nivel en `backend/requirements.txt` a la
+versión exacta ya probada en local (`pip freeze` filtrado, sin arrastrar paquetes específicos de
+Linux como `uvloop` que romperían el dev local en Windows) — para no repetir esta clase de
+sorpresa por drift de versión entre dev local y build fresco en Render.
 
 ### 2026-08-03 (2) — Primer deploy a Render/Vercel: 3 bugs encontrados y corregidos
 

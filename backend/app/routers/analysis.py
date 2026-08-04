@@ -21,6 +21,7 @@ from ..services.analysis import (
     get_cached_view,
     set_cached_view,
 )
+from ..services.model_fit import build_design_matrix, load_transform_params, resolve_media_flags
 from ..tenancy import get_scoped
 from ..utils.datasets import load_dataset_frame
 
@@ -70,27 +71,55 @@ def _fit_from_model(
     start: Optional[pd.Timestamp] = None,
     end: Optional[pd.Timestamp] = None,
 ):
+    """Builds the design matrix over the FULL historical series first (so media variables'
+    adstock carryover is correct), then — only if a date range was requested — slices the
+    already-transformed matrix down to that window for the OLS refit. Filtering the raw
+    series before transforming would truncate history and break adstock carryover at the
+    window boundary, so date filtering must always happen after the transform, never before."""
     m = get_scoped(session, Model, model_id, company_id)
     ds = get_scoped(session, Dataset, m.dataset_id, company_id)
     try:
-        df = load_dataset_frame(ds)
+        full_df = load_dataset_frame(ds)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     time_field = time_column or getattr(ds, "time_variable", None)
-    df = _apply_date_filter(df, time_field, start, end)
     x_vars = json.loads(m.x_vars_json)
     cols = [m.y_var] + x_vars
-    work = df[cols].apply(pd.to_numeric, errors="coerce").dropna()
+
+    media_flags = (
+        resolve_media_flags(session, ds.id, company_id, x_vars) if m.apply_media_transforms else {x: False for x in x_vars}
+    )
+    transform_params = load_transform_params(session, m.id, company_id)
+    try:
+        full_work, full_X, _ = build_design_matrix(
+            full_df, m.y_var, x_vars, media_flags, transform_params=transform_params
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    if time_field and (start is not None or end is not None) and time_field in full_df.columns:
+        ts = pd.to_datetime(full_df.loc[full_work.index, time_field], errors="coerce")
+        mask = ts.notna()
+        if start is not None:
+            mask &= ts >= start
+        if end is not None:
+            mask &= ts <= end
+        work = full_work.loc[mask]
+        X = full_X.loc[mask]
+    else:
+        work = full_work
+        X = full_X
+
     if work.shape[0] < len(cols) + 1:
         raise HTTPException(
             status_code=400, detail="Insufficient rows after cleaning for analysis"
         )
     y = work[m.y_var].to_numpy()
-    X = work[x_vars]
     Xc = sm.add_constant(X, has_constant="add")
     res = sm.OLS(y, Xc).fit()
     params = res.params  # pandas Series with const and x_vars
-    return m, ds, work, X, Xc, y, params, df
+    df_out = _apply_date_filter(full_df, time_field, start, end) if (start is not None or end is not None) else full_df
+    return m, ds, work, X, Xc, y, params, df_out
 
 
 def _group_maps(session: Session, dataset_id: str, company_id: str):
@@ -174,6 +203,7 @@ def summary(
         dataset_id=ds.id,
         model_id=m.id,
         df=filtered_df,
+        design_frame=X,
         time_column=time_field,
         start=start_ts,
         end=end_ts,
@@ -388,22 +418,14 @@ def stacked(
         ):
             raise
         m, ds, work, X, Xc, y, params, full_df = _fit_from_model(session, model_id, membership.company_id)
+        # `work`/`X` above already cover the FULL history (correct adstock carryover) from
+        # the unfiltered fit — don't rebuild predictor values from `filtered_df`, just use it
+        # (via design_frame=X below) to scope rows/time to the requested date range.
         filtered_df = _apply_date_filter(full_df.copy(), time_col, start_ts, end_ts)
         if filtered_df.empty:
             raise HTTPException(
                 status_code=400, detail="No rows available for the selected date range"
             )
-        numeric = (
-            filtered_df[[m.y_var] + list(X.columns)]
-            .apply(pd.to_numeric, errors="coerce")
-            .dropna()
-        )
-        if numeric.empty:
-            raise HTTPException(
-                status_code=400,
-                detail="No complete rows available for the selected date range",
-        )
-        work = numeric
     if filtered_df is None:
         filtered_df = work
 
@@ -425,6 +447,7 @@ def stacked(
         dataset_id=ds.id,
         model_id=m.id,
         df=filtered_df,
+        design_frame=X,
         time_column=time_col,
         start=start_ts,
         end=end_ts,
