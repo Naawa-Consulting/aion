@@ -551,3 +551,4 @@ WHERE membership.user_id = %(user_id_1)s]
 [parameters: {'user_id_1': 'ec09090f-017f-4ccf-853c-08ed2d2d2177'}]
 (Background on this error at: https://sqlalche.me/e/20/e3q8)
 INFO:     127.0.0.1:64857 - "GET /me/memberships HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59023 - "GET /me/memberships HTTP/1.1" 200 OK

@@ -27,3 +27,8 @@ backend/data/
 .env
 frontend/.env.local
 backend/.env
+
+# Claude Code project docs/config (kept locally, not tracked)
+.claude/
+CLAUDE.md
+BITACORA.md
