@@ -17,6 +17,7 @@ import { Card, CardHeader } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { FilterBar, FilterField } from "@/components/ui/filter-bar";
 import { apiFetch, ApiError } from "@/lib/api";
+import { EconomicsSection } from "@/components/analysis/economics-section";
 
 type Dataset = { id: string; display_name: string; columns: { name: string; dtype: string }[] };
 type ModelRole = "hero" | "challenger1" | "challenger2";
@@ -118,6 +119,7 @@ export default function AnalysisPage() {
   const [asPercent, setAsPercent] = useState(false);
   const [includeBaseline, setIncludeBaseline] = useState(true);
   const [viewMode, setViewMode] = useState<"stacked" | "grouped">("stacked");
+  const [mainView, setMainView] = useState<"contribution" | "economics">("contribution");
   const [tableView, setTableView] = useState<"group" | "group_subgroup" | "variable">("group");
   const [loading, setLoading] = useState(false);
   const [dateRange, setDateRange] = useState<{ start: string | null; end: string | null }>({
@@ -581,9 +583,31 @@ export default function AnalysisPage() {
   return (
     <section className="space-y-6">
       <header className="space-y-4">
-        <div>
-          <p className="text-sm text-[var(--color-muted)]">Module 4</p>
-          <h1 className="text-2xl font-semibold">Analysis & Attribution</h1>
+        <div className="flex flex-wrap items-center justify-between gap-4">
+          <div>
+            <p className="text-sm text-[var(--color-muted)]">Module 4</p>
+            <h1 className="text-2xl font-semibold">Analysis & Attribution</h1>
+          </div>
+          <div className="inline-flex overflow-hidden rounded-full border border-[var(--color-border)] text-sm">
+            <button
+              type="button"
+              className={`px-4 py-1.5 transition ${
+                mainView === "contribution" ? "bg-[var(--color-foreground)] text-white" : "text-[var(--color-muted)]"
+              }`}
+              onClick={() => setMainView("contribution")}
+            >
+              Contribución
+            </button>
+            <button
+              type="button"
+              className={`px-4 py-1.5 transition ${
+                mainView === "economics" ? "bg-[var(--color-foreground)] text-white" : "text-[var(--color-muted)]"
+              }`}
+              onClick={() => setMainView("economics")}
+            >
+              Economía
+            </button>
+          </div>
         </div>
         <FilterBar>
           <FilterField label="DATASET" className="w-[240px]">
@@ -640,6 +664,16 @@ export default function AnalysisPage() {
         </FilterBar>
       </header>
 
+      {mainView === "economics" ? (
+        <EconomicsSection
+          modelId={selectedModel}
+          timeCol={timeCol}
+          freq={freq}
+          dateRange={dateRange}
+          readyForTimeseries={readyForStacked}
+        />
+      ) : (
+      <>
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
         <Card padding="sm">
           <CardHeader title="Total" subtitle={summary?.model?.y_var || "—"} />
@@ -862,6 +896,8 @@ export default function AnalysisPage() {
           </p>
         )}
       </Card>
+      </>
+      )}
     </section>
   );
 }

@@ -242,6 +242,8 @@ def _model_to_out(m: Model, mm: ModelMetrics) -> ModelOut:
         is_hero=m.role == "hero",
         role=m.role or "none",
         apply_media_transforms=m.apply_media_transforms,
+        conversion_rate=m.conversion_rate,
+        avg_value=m.avg_value,
         metrics=ModelMetricsOut(
             r2=mm.r2,
             adj_r2=mm.adj_r2,
@@ -378,6 +380,8 @@ def create_model(
         is_hero=False,
         role="none",
         apply_media_transforms=body.apply_media_transforms,
+        conversion_rate=body.conversion_rate,
+        avg_value=body.avg_value,
     )
     session.add(m)
     session.commit()
@@ -423,6 +427,10 @@ def update_model(
 
     if body.name:
         m.name = body.name
+    if body.conversion_rate is not None:
+        m.conversion_rate = body.conversion_rate
+    if body.avg_value is not None:
+        m.avg_value = body.avg_value
     transforms_flag_changed = (
         body.apply_media_transforms is not None and body.apply_media_transforms != m.apply_media_transforms
     )
@@ -464,6 +472,8 @@ def duplicate_model(
         is_hero=False,
         role="none",
         apply_media_transforms=original.apply_media_transforms,
+        conversion_rate=original.conversion_rate,
+        avg_value=original.avg_value,
     )
     session.add(new_model)
     session.commit()
@@ -521,6 +531,8 @@ def create_best_stepwise_model(
         is_hero=False,
         role="none",
         apply_media_transforms=original.apply_media_transforms,
+        conversion_rate=original.conversion_rate,
+        avg_value=original.avg_value,
     )
     session.add(new_model)
     session.commit()

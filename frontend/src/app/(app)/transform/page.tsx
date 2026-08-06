@@ -23,6 +23,7 @@ import { useGlobalStore } from "@/lib/store";
 import { useKeyboardShortcut } from "@/hooks/useKeyboardShortcut";
 import { apiFetch, ApiError } from "@/lib/api";
 import { useCanEdit } from "@/hooks/useCanEdit";
+import { InvestmentChannels } from "@/components/transform/investment-channels";
 
 type Dataset = { id: string; display_name: string; columns: { name: string; dtype: string }[] };
 
@@ -1086,6 +1087,13 @@ const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
               ))}
             </div>
           </Card>
+
+          <InvestmentChannels
+            datasetId={activeDatasetId}
+            variableNames={variables.map((v) => v.name)}
+            datasetColumns={datasetColumns}
+            canEdit={canEdit}
+          />
         </div>
       </div>
 

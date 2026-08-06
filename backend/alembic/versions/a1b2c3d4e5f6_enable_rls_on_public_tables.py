@@ -43,10 +43,17 @@ TABLES = [
 
 
 def upgrade() -> None:
+    # ROW LEVEL SECURITY is Postgres-only syntax; guarding by dialect lets `alembic upgrade
+    # head` still run cleanly against the local SQLite dev fallback (see db.py) instead of
+    # crashing on a fresh local setup — no behavior change against real Postgres.
+    if op.get_bind().dialect.name != "postgresql":
+        return
     for table in TABLES:
         op.execute(f'ALTER TABLE "{table}" ENABLE ROW LEVEL SECURITY')
 
 
 def downgrade() -> None:
+    if op.get_bind().dialect.name != "postgresql":
+        return
     for table in TABLES:
         op.execute(f'ALTER TABLE "{table}" DISABLE ROW LEVEL SECURITY')

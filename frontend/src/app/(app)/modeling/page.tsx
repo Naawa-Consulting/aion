@@ -42,6 +42,8 @@ type Model = {
   x_vars: string[];
   is_hero: boolean;
   apply_media_transforms: boolean;
+  conversion_rate?: number | null;
+  avg_value?: number | null;
   role: "hero" | "challenger1" | "challenger2" | "none";
   metrics: ModelMetrics;
 };
@@ -142,6 +144,8 @@ export default function ModelingPage() {
   const [xSelected, setXSelected] = useState<string[]>([]);
   const [modelName, setModelName] = useState("");
   const [applyMediaTransforms, setApplyMediaTransforms] = useState(true);
+  const [conversionRate, setConversionRate] = useState("");
+  const [avgValue, setAvgValue] = useState("");
   const [corr, setCorr] = useState<CorrelationItem[]>([]);
   const [corrSearch, setCorrSearch] = useState("");
   const [models, setModels] = useState<Model[]>([]);
@@ -287,12 +291,20 @@ const [subgroupFilter, setSubgroupFilter] = useState<SubgroupFilter>("all");
       return;
     }
     setLoading(true);
+    const parsedConversionRate = conversionRate.trim() === "" ? undefined : parseFloat(conversionRate);
+    const parsedAvgValue = avgValue.trim() === "" ? undefined : parseFloat(avgValue);
     try {
       if (editingModelId) {
         await apiFetch(`/models/${editingModelId}`, {
           method: "PATCH",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ name: modelName, x_vars: xSelected, apply_media_transforms: applyMediaTransforms }),
+          body: JSON.stringify({
+            name: modelName,
+            x_vars: xSelected,
+            apply_media_transforms: applyMediaTransforms,
+            conversion_rate: parsedConversionRate,
+            avg_value: parsedAvgValue,
+          }),
         });
         toast.success("Model updated");
       } else {
@@ -305,6 +317,8 @@ const [subgroupFilter, setSubgroupFilter] = useState<SubgroupFilter>("all");
             y_var: yVar,
             x_vars: xSelected,
             apply_media_transforms: applyMediaTransforms,
+            conversion_rate: parsedConversionRate,
+            avg_value: parsedAvgValue,
           }),
         });
         toast.success("Model created");
@@ -325,6 +339,8 @@ const [subgroupFilter, setSubgroupFilter] = useState<SubgroupFilter>("all");
     setXSelected([]);
     setEditingModelId(null);
     setApplyMediaTransforms(true);
+    setConversionRate("");
+    setAvgValue("");
   };
 
   const startEdit = (model: Model) => {
@@ -333,6 +349,8 @@ const [subgroupFilter, setSubgroupFilter] = useState<SubgroupFilter>("all");
     setYVar(model.y_var);
     setXSelected(model.x_vars);
     setApplyMediaTransforms(model.apply_media_transforms);
+    setConversionRate(model.conversion_rate != null ? String(model.conversion_rate) : "");
+    setAvgValue(model.avg_value != null ? String(model.avg_value) : "");
   };
 
   const deleteModel = async (model: Model) => {
@@ -734,6 +752,32 @@ const [subgroupFilter, setSubgroupFilter] = useState<SubgroupFilter>("all");
               />
               Aplicar adstock + saturación a variables de medios
             </label>
+            <div className="grid gap-3 md:grid-cols-2">
+              <div className="space-y-2">
+                <label className="text-xs uppercase text-[var(--color-muted)]">Tasa de conversión</label>
+                <Input
+                  type="number"
+                  step="0.0001"
+                  value={conversionRate}
+                  onChange={(e) => setConversionRate(e.target.value)}
+                  placeholder="0.18"
+                />
+              </div>
+              <div className="space-y-2">
+                <label className="text-xs uppercase text-[var(--color-muted)]">Valor promedio</label>
+                <Input
+                  type="number"
+                  step="0.01"
+                  value={avgValue}
+                  onChange={(e) => setAvgValue(e.target.value)}
+                  placeholder="1000"
+                />
+              </div>
+            </div>
+            <p className="text-xs text-[var(--color-muted)]">
+              Ligados a {yVar || "la variable dependiente"}: ingreso = contribución × tasa_conversión × valor_promedio.
+              Opcionales — sin ambos, la sección de Economía en Analysis queda deshabilitada para este modelo.
+            </p>
             <div className="flex gap-2 justify-end">
               {editingModelId && (
                 <Button variant="ghost" onClick={resetForm}>

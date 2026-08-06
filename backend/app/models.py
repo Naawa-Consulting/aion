@@ -101,6 +101,8 @@ class Model(SQLModel, table=True):
     is_hero: bool = False  # legacy flag
     role: str = Field(default="none")  # hero|challenger1|challenger2|none
     apply_media_transforms: bool = Field(default=True, nullable=False)
+    conversion_rate: float | None = Field(default=None, nullable=True)
+    avg_value: float | None = Field(default=None, nullable=True)
     created_at: datetime = Field(default_factory=datetime.utcnow, nullable=False)
 
 
@@ -130,6 +132,27 @@ class ModelTransform(SQLModel, table=True):
     hill_k: float
     hill_s: float
     lag: int = Field(default=0, nullable=False)
+
+
+class InvestmentChannel(SQLModel, table=True):
+    """Real $ investment channel, decoupled from model predictor variables so total spend
+    (economic layer) can include channels with no selected predictor (contribution 0, cost > 0)
+    and so a channel with several correlated metrics attributes cost to only one winning metric.
+    Scoped to a dataset (like Variable), not a company-wide catalog like Group/Subgroup, because
+    its config references actual dataset column names."""
+
+    __table_args__ = (
+        UniqueConstraint("company_id", "dataset_id", "name", name="uq_invchannel_company_dataset_name"),
+    )
+
+    id: str = Field(primary_key=True)
+    company_id: str = Field(index=True, foreign_key="company.id")
+    dataset_id: str = Field(index=True)
+    name: str
+    source_mode: str  # "dataset_column" | "rate_metric" | "manual"
+    config_json: str  # shape depends on source_mode, see services/economics.py
+    proxy_variable: str | None = Field(default=None, nullable=True)  # Variable.name; None = never modeled
+    created_at: datetime = Field(default_factory=utcnow, nullable=False)
 
 
 class Scenario(SQLModel, table=True):

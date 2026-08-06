@@ -16,7 +16,7 @@ from sqlmodel import Session, select, delete
 
 from ..auth import CurrentMembership, get_current_membership, require_write_access
 from ..db import get_session
-from ..models import Dataset, Variable, Model, ModelMetrics, Scenario
+from ..models import Dataset, Variable, Model, ModelMetrics, Scenario, InvestmentChannel
 from ..services.analysis import invalidate_cache_for_dataset
 from ..tenancy import get_scoped
 from ..utils.storage import StorageNotFoundError, get_storage
@@ -659,6 +659,15 @@ def delete_dataset(
             session.exec(delete(Scenario).where(Scenario.model_id.in_(model_ids)))
             session.exec(delete(ModelMetrics).where(ModelMetrics.model_id.in_(model_ids)))
             session.exec(delete(Model).where(Model.id.in_(model_ids)))
+
+    # Investment channels have no dependents of their own and aren't counted in `deps` above
+    # (they never block a non-cascade delete), so they're always cleaned up here to avoid
+    # orphaning them once the dataset they reference is gone.
+    session.exec(
+        delete(InvestmentChannel).where(
+            InvestmentChannel.dataset_id == ds.id, InvestmentChannel.company_id == ds.company_id
+        )
+    )
 
     storage = get_storage()
     for version in range(1, (ds.version or 1) + 1):

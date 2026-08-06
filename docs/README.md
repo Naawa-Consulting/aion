@@ -92,6 +92,63 @@ client-side from `hill_k`/`hill_s`, with a reference line at the variable's hist
 - Stacked contributions: `GET /analysis/{model_id}/stacked?time_col=...&freq=day|week|month&by=group|subgroup&include_intercept=bool&as_percent=bool` uses the same date-filtered sums per period; Excel download: `GET /analysis/{model_id}/export/stacked.xlsx`.
 - Frontend `/analysis` now offers dashboard cards (total, baseline, top groups), value/% toggles, stacked area chart, and download buttons with icons.
 
+### Economic layer (ROI/ROAS)
+
+`Model.conversion_rate`/`Model.avg_value` (both optional floats, `null` = "economics not configured") are now
+accepted/returned by the existing `POST /models`, `PATCH /models/{model_id}` and `ModelOut` (Module 3) — global
+per-model, tied to that model's `y_var` per the formula `revenue = contribution × conversion_rate × avg_value`.
+`duplicate`/`best_stepwise` inherit them from the parent model, same as `apply_media_transforms`.
+
+**Investment channel catalog** (`backend/app/routers/economics.py`, mounted at `/economics`) — a dataset-scoped
+catalog (like `Variable`, not a company-wide catalog like Group/Subgroup) representing real $ investment,
+decoupled from "which variable made it into the model":
+
+- `GET /economics/channels?dataset_id=...` / `POST /economics/channels` / `PATCH /economics/channels/{id}` /
+  `DELETE /economics/channels/{id}` — standard catalog CRUD (same tenancy/role pattern as `/groups`).
+- Every channel has a `source_mode` + a `config` shaped accordingly:
+  - `dataset_column`: `{cost_column}` — reads a $ column already in the dataset.
+  - `rate_metric`: `{rate_value, metric_column}` — `investment = rate_value × metric_column` (fixed rate, v1).
+  - `manual`: `{entries: [{amount, start_date, end_date}, ...]}` — each entry is prorated uniformly by
+    calendar day across its range, then bucketed into whichever dataset row/period it falls in (same
+    day-count proration method used to go from a monthly media plan to weekly rows in the MX-HDI reference
+    project).
+- `proxy_variable` (nullable) is the model predictor this channel's spend is attributed to. It is a hint
+  stored on the channel, not a live binding to any specific model — at analysis time
+  `is_modeled = proxy_variable is not None and proxy_variable in model.x_vars`. A channel with
+  `proxy_variable = null`, or one whose configured proxy simply isn't one of the *current* model's `x_vars`
+  (distinguished via `proxy_in_current_model`), is treated as non-modeled for that view: its investment still
+  counts toward totals, but contribution/revenue/ROI are `null`. This is what lets total investment include
+  channels with real spend but zero model contribution, and lets a channel with several correlated metrics
+  (impressions/clicks/views of the same platform) attribute cost to only the one metric that actually won a
+  spot in the model.
+- Deleting a dataset cascades to delete its channels; a channel whose `config` references a dataset column
+  that no longer exists (e.g. after a rename) degrades to a `misconfigured: true` flag with zero investment
+  for that channel, rather than 500ing the whole response.
+
+**ROI/ROAS computation** (`backend/app/services/economics.py`, reusing `compute_contributions` from
+`services/analysis.py`):
+
+- `GET /economics/{model_id}/summary?start_date&end_date` → `{model, economics_configured, totals: {investment,
+  revenue, contribution, roi, roas, modeled_investment, non_modeled_investment}, channels: [{id, name,
+  source_mode, proxy_variable, is_modeled, proxy_in_current_model, misconfigured, investment, revenue,
+  contribution, roi, roas, share_of_investment, share_of_contribution}, ...]}`. `roi`/`roas` are `null`
+  whenever `economics_configured` is `false` (not zero/misleading placeholder values) or investment is 0.
+  `share_of_contribution` is computed over modeled-channel contribution only (excludes baseline).
+- `GET /economics/{model_id}/stacked?time_col&freq=day|week|month&start_date&end_date` → per-period
+  `{index, totals: {investment[], revenue[]}, series: [{channel_id, channel_name, is_modeled, investment[],
+  revenue[]}, ...]}` — raw investment/revenue arrays (not pre-divided ROI/ROAS) so the frontend can guard
+  div-by-zero per point.
+- `.../export/summary.xlsx` and `.../export/stacked.xlsx` mirror the Module 4 contribution exports.
+- Cached via the same `AnalysisCacheKey`/TTL cache as the contribution endpoints (new `view` values
+  `econ_summary`/`econ_stacked`); the existing `invalidate_cache_for_model`/`invalidate_cache_for_dataset`
+  calls already cover these for free. Channel CRUD additionally calls `invalidate_cache_for_dataset`.
+
+Frontend: `/transform` gained an "Investment Channels" card (create/edit/delete channels per dataset,
+including the manual-mode repeatable period list); `/modeling`'s form gained "Tasa de conversión"/"Valor
+promedio" inputs next to the media-transform toggle; `/analysis` gained a "Contribución"/"Economía"
+top-level toggle — the Economía view shows summary cards (investment/revenue/ROI/ROAS), a per-channel table,
+and an investment-vs-revenue time series chart with an optional per-channel highlight.
+
 ## Module 5
 
 - Scenario builder is now a time-phased planner: choose horizon, start date, and frequency, then edit a grid of periods × variables (either multipliers or absolute overrides). Saved scenarios (max 3 per model) surface as cards with quick metrics and load/delete actions; comparisons and projected totals update in real time with toasts + micro loading states.

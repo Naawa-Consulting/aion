@@ -17,7 +17,10 @@ Resumen por módulo (detalle técnico completo — endpoints y contratos — en 
    Group/Subgroup en Transform) reciben adstock + saturación Hill automáticos vía grid-search al
    ajustar el modelo, aplicados de forma consistente en Modeling/Analysis/Predict.
 4. **Analysis** — funcional. Contribución/atribución por variable y por grupo/subgrupo, series
-   apiladas por periodo, export a Excel.
+   apiladas por periodo, export a Excel. Capa económica: catálogo de canales de inversión
+   (por-dataset, configurado en `/transform`) + tasa de conversión/valor promedio por modelo
+   (`/modeling`) alimentan una vista de Economía/ROI en `/analysis` (cards, tabla por canal,
+   serie de tiempo inversión vs. ingreso).
 5. **Predict** — funcional (MVP). Escenarios time-phased, comparación, import/export CSV/XLSX.
 6. **Configuración** (paleta de color, usuarios) — usuarios ya cubierto por auth multi-company
    (ver abajo); paleta de color pendiente.

@@ -242,6 +242,8 @@ class CreateModelRequest(BaseModel):
     y_var: str
     x_vars: list[str]
     apply_media_transforms: bool = True
+    conversion_rate: Optional[float] = None
+    avg_value: Optional[float] = None
 
 
 class ModelMetricsOut(BaseModel):
@@ -263,6 +265,8 @@ class ModelOut(BaseModel):
     is_hero: bool
     role: Literal["hero", "challenger1", "challenger2", "none"] = "none"
     apply_media_transforms: bool = True
+    conversion_rate: Optional[float] = None
+    avg_value: Optional[float] = None
     metrics: ModelMetricsOut
 
 
@@ -282,6 +286,8 @@ class UpdateModelRequest(BaseModel):
     name: Optional[str] = None
     x_vars: Optional[list[str]] = None
     apply_media_transforms: Optional[bool] = None
+    conversion_rate: Optional[float] = None
+    avg_value: Optional[float] = None
 
 
 class ModelRoleRequest(BaseModel):
@@ -430,6 +436,112 @@ class ScenarioAssumptionsExportRequest(ScenarioPreviewRequest):
 class ScenarioProjectedExportRequest(ScenarioPreviewRequest):
     scenario_name: Optional[str] = None
     include_hero: bool = True
+
+
+# Economic layer (investment channels + ROI/ROAS)
+InvestmentSourceMode = Literal["dataset_column", "rate_metric", "manual"]
+
+
+class ManualInvestmentEntry(BaseModel):
+    amount: float
+    start_date: date
+    end_date: date
+
+
+class InvestmentChannelConfig(BaseModel):
+    cost_column: Optional[str] = None  # source_mode == dataset_column
+    rate_value: Optional[float] = None  # source_mode == rate_metric
+    metric_column: Optional[str] = None  # source_mode == rate_metric
+    entries: Optional[list[ManualInvestmentEntry]] = None  # source_mode == manual
+
+
+class CreateInvestmentChannelRequest(BaseModel):
+    dataset_id: str
+    name: str
+    source_mode: InvestmentSourceMode
+    config: InvestmentChannelConfig
+    proxy_variable: Optional[str] = None
+
+
+class UpdateInvestmentChannelRequest(BaseModel):
+    name: Optional[str] = None
+    source_mode: Optional[InvestmentSourceMode] = None
+    config: Optional[InvestmentChannelConfig] = None
+    proxy_variable: Optional[str] = None
+    unset_proxy_variable: bool = False  # explicit clear, since proxy_variable=None is ambiguous with "unchanged"
+
+
+class InvestmentChannelOut(BaseModel):
+    id: str
+    dataset_id: str
+    name: str
+    source_mode: InvestmentSourceMode
+    config: InvestmentChannelConfig
+    proxy_variable: Optional[str] = None
+    created_at: datetime
+
+
+class ChannelEconomics(BaseModel):
+    id: str
+    name: str
+    source_mode: InvestmentSourceMode
+    proxy_variable: Optional[str] = None
+    is_modeled: bool
+    proxy_in_current_model: bool
+    misconfigured: bool = False
+    investment: float
+    revenue: Optional[float] = None
+    contribution: Optional[float] = None
+    roi: Optional[float] = None
+    roas: Optional[float] = None
+    share_of_investment: float
+    share_of_contribution: Optional[float] = None
+
+
+class EconomicsTotals(BaseModel):
+    investment: float
+    revenue: float
+    contribution: float
+    roi: Optional[float] = None
+    roas: Optional[float] = None
+    modeled_investment: float
+    non_modeled_investment: float
+
+
+class EconomicsModelInfo(BaseModel):
+    id: str
+    name: str
+    dataset_id: str
+    y_var: str
+    x_vars: list[str]
+    conversion_rate: Optional[float] = None
+    avg_value: Optional[float] = None
+
+
+class EconomicsSummaryResponse(BaseModel):
+    model: EconomicsModelInfo
+    economics_configured: bool
+    totals: EconomicsTotals
+    channels: list[ChannelEconomics]
+
+
+class EconomicsChannelSeries(BaseModel):
+    channel_id: str
+    channel_name: str
+    is_modeled: bool
+    investment: list[float]
+    revenue: list[Optional[float]]
+
+
+class EconomicsStackedTotals(BaseModel):
+    investment: list[float]
+    revenue: list[float]
+
+
+class EconomicsStackedResponse(BaseModel):
+    index: list[str]
+    totals: EconomicsStackedTotals
+    series: list[EconomicsChannelSeries]
 
 
 MembershipRole = Literal["modelador", "visualizador", "admin_compania"]

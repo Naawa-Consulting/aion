@@ -25,10 +25,12 @@ aportan contexto). Convenciones y arquitectura conceptual completas en `CLAUDE.m
 - `app/tenancy.py` — `get_scoped()`: helper de `session.get` + guard de `company_id` (404 si es
   de otra compañía), usado en todos los routers.
 - `app/models.py` — tablas SQLModel: `Company`, `Membership`, `Dataset`, `Variable`, `Group`,
-  `Subgroup`, `VariableHistory`, `Model`, `ModelMetrics`, `ModelTransform`, `Scenario` — todas
-  (salvo Company/Membership) con `company_id`. `Group`/`Subgroup` tienen `apply_media_transform`
-  (marca variables de medios); `ModelTransform` guarda los parámetros de adstock+Hill fit por
-  `(modelo, variable)`.
+  `Subgroup`, `VariableHistory`, `Model`, `ModelMetrics`, `ModelTransform`, `InvestmentChannel`,
+  `Scenario` — todas (salvo Company/Membership) con `company_id`. `Group`/`Subgroup` tienen
+  `apply_media_transform` (marca variables de medios); `ModelTransform` guarda los parámetros de
+  adstock+Hill fit por `(modelo, variable)`; `Model.conversion_rate`/`avg_value` alimentan la capa
+  económica; `InvestmentChannel` es un catálogo por-dataset (gasto real en $, desacoplado de qué
+  variable entró al modelo — ver `app/services/economics.py`).
 - `app/schemas.py` — modelos Pydantic de request/response usados por los routers.
 - `app/routers/datasets.py` — Módulo 1: upload, versionado, sample size, variable temporal.
 - `app/routers/variables.py` — Módulo 2: filtros, transformaciones, categorización,
@@ -39,6 +41,8 @@ aportan contexto). Convenciones y arquitectura conceptual completas en `CLAUDE.m
 - `app/routers/analysis.py` — Módulo 4: contribución/atribución, series apiladas, exports Excel.
 - `app/routers/predict.py` — Módulo 5: escenarios, preview, CRUD, series de tiempo,
   import/export.
+- `app/routers/economics.py` — capa económica: CRUD de `InvestmentChannel` por dataset,
+  `GET /economics/{model_id}/summary`/`.../stacked` (ROI/ROAS) + exports Excel.
 - `app/routers/admin.py` — crear compañías (`platform_admin`), gestionar miembros
   (`admin_compania`).
 - `app/routers/me.py` — `GET /me/memberships` (compañías + rol del usuario actual).
@@ -46,6 +50,9 @@ aportan contexto). Convenciones y arquitectura conceptual completas en `CLAUDE.m
   cada mutación relevante de dataset/modelo).
 - `app/services/media_transform.py` — funciones puras de adstock (decay geométrico) + saturación
   Hill, usadas tanto al ajustar modelos como al proyectar escenarios en Predict.
+- `app/services/economics.py` — cálculo por canal de inversión/contribución/ingreso (dataset
+  column / rate×metric / manual con proración por día), reutilizando `compute_contributions` de
+  `services/analysis.py`; usado por `routers/economics.py`.
 - `app/services/model_fit.py` — `build_design_matrix()`: punto único que arma la matriz de diseño
   (variables de medios transformadas, control crudas) usado por `routers/models.py`,
   `routers/analysis.py` y `routers/predict.py`; incluye el grid-search por canal
@@ -92,6 +99,11 @@ aportan contexto). Convenciones y arquitectura conceptual completas en `CLAUDE.m
   `filter-bar`, `progress`, `dropdown`. Preferir reusar estos antes de crear uno nuevo.
 - `src/components/modeling/SelectedPredictorsQuickView.tsx` — resumen de predictores
   seleccionados en Modeling.
+- `src/components/transform/investment-channels.tsx` — tarjeta CRUD de canales de inversión
+  (capa económica), renderizada dentro de `/transform`.
+- `src/components/analysis/economics-section.tsx` — vista de Economía/ROI (cards, tabla por
+  canal, serie de tiempo), renderizada dentro de `/analysis` vía el toggle
+  Contribución/Economía.
 - `src/components/predict/ScenarioGrid.tsx` y `ScenarioSheetGlide.tsx` — dos implementaciones de
   la grilla editable de escenarios (`react-data-grid` vs. `@glideapps/glide-data-grid`) —
   revisar cuál usa cada vista antes de asumir que aplica a ambas.

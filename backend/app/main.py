@@ -8,6 +8,7 @@ from .auth import get_current_membership
 from .config import settings
 from .routers import admin, datasets, me
 from .routers import variables, groups, models as models_router, analysis as analysis_router, predict as predict_router
+from .routers import economics as economics_router
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -40,6 +41,7 @@ def create_app() -> FastAPI:
     app.include_router(models_router.router, prefix="/models", tags=["models"], dependencies=tenant_dependency)
     app.include_router(analysis_router.router, prefix="/analysis", tags=["analysis"], dependencies=tenant_dependency)
     app.include_router(predict_router.router, prefix="/predict", tags=["predict"], dependencies=tenant_dependency)
+    app.include_router(economics_router.router, prefix="/economics", tags=["economics"], dependencies=tenant_dependency)
     app.include_router(admin.router, prefix="/admin", tags=["admin"])
     app.include_router(me.router, prefix="/me", tags=["me"])
 
