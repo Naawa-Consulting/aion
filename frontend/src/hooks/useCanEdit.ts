@@ -16,7 +16,3 @@ export function useCanEdit(): boolean {
 export function useCanManageUsers(): boolean {
   return useActiveRole() === "admin_compania";
 }
-
-export function useIsPlatformAdmin(): boolean {
-  return useGlobalStore((s) => s.isPlatformAdmin);
-}

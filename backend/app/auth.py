@@ -136,23 +136,6 @@ def require_platform_admin(user: CurrentUser = Depends(get_current_user)) -> Cur
     return user
 
 
-def require_admin_privilege(user: CurrentUser = Depends(get_current_user), session: Session = Depends(get_session)) -> CurrentUser:
-    """Platform admin, or admin_compania of at least one company — used by endpoints (like
-    the email->user_id lookup) that aren't scoped to a single company_id path param but still
-    shouldn't be open to every authenticated user."""
-    if is_platform_admin(user.email):
-        return user
-    has_company_admin_membership = session.exec(
-        select(Membership).where(
-            Membership.user_id == user.user_id,
-            Membership.role == COMPANY_ADMIN_ROLE,
-        )
-    ).first()
-    if not has_company_admin_membership:
-        raise HTTPException(status_code=403, detail="Admin privileges required")
-    return user
-
-
 def require_company_admin(company_id: str, user: CurrentUser = Depends(get_current_user), session: Session = Depends(get_session)) -> CurrentMembership:
     """Like get_current_membership, but scoped to the company_id in the URL path rather
     than the X-Company-Id header — used by /admin/companies/{company_id}/... routes so a

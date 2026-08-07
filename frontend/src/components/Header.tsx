@@ -9,7 +9,6 @@ import { motion } from "framer-motion";
 import { Moon, Sun } from "lucide-react";
 import { CompanySwitcher } from "@/components/company-switcher";
 import { UserMenu } from "@/components/user-menu";
-import { useCanManageUsers, useIsPlatformAdmin } from "@/hooks/useCanEdit";
 
 const NAV_LINKS = [
   { href: "/datasets", label: "Datasets" },
@@ -18,8 +17,6 @@ const NAV_LINKS = [
   { href: "/analysis", label: "Analysis" },
   { href: "/predict", label: "Predict" },
 ];
-
-const ADMIN_LINK = { href: "/admin", label: "Admin" };
 
 const NavLink = ({ href, label, layoutScope }: { href: string; label: string; layoutScope: string }) => {
   const pathname = usePathname();
@@ -61,9 +58,6 @@ const ThemeToggle = () => {
 
 export default function Header() {
   const [shrunken, setShrunken] = useState(false);
-  const isPlatformAdmin = useIsPlatformAdmin();
-  const canManageUsers = useCanManageUsers();
-  const navLinks = isPlatformAdmin || canManageUsers ? [...NAV_LINKS, ADMIN_LINK] : NAV_LINKS;
 
   useEffect(() => {
     let frame: number;
@@ -94,7 +88,7 @@ export default function Header() {
             Aion
           </Link>
           <nav className="hidden md:flex items-center gap-2">
-            {navLinks.map((link) => (
+            {NAV_LINKS.map((link) => (
               <NavLink key={link.href} {...link} layoutScope="desktop" />
             ))}
           </nav>
@@ -106,7 +100,7 @@ export default function Header() {
         </div>
       </div>
       <nav className="md:hidden px-6 mt-3 flex items-center gap-2 overflow-x-auto">
-        {navLinks.map((link) => (
+        {NAV_LINKS.map((link) => (
           <NavLink key={`mobile-${link.href}`} {...link} layoutScope="mobile" />
         ))}
       </nav>

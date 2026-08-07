@@ -6,19 +6,15 @@ import { apiFetch } from "@/lib/api";
 import { useGlobalStore, type Membership } from "@/lib/store";
 
 type MyMembership = { company_id: string; company_name: string; role: Membership["role"] };
-type MyMembershipsResponse = { is_platform_admin: boolean; memberships: MyMembership[] };
 
 async function hydrateMemberships() {
   try {
-    const { is_platform_admin, memberships } = await apiFetch<MyMembershipsResponse>("/me/memberships", {
-      skipCompanyHeader: true,
-    });
+    const rows = await apiFetch<MyMembership[]>("/me/memberships", { skipCompanyHeader: true });
     useGlobalStore.getState().setMemberships(
-      memberships.map((r) => ({ companyId: r.company_id, companyName: r.company_name, role: r.role })),
-      is_platform_admin
+      rows.map((r) => ({ companyId: r.company_id, companyName: r.company_name, role: r.role }))
     );
   } catch {
-    useGlobalStore.getState().setMemberships([], false);
+    useGlobalStore.getState().setMemberships([]);
   }
 }
 
