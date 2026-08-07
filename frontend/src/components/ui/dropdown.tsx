@@ -2,6 +2,7 @@
 
 import clsx from "clsx";
 import React, { useEffect, useRef, useState } from "react";
+import { AnimatePresence, motion } from "framer-motion";
 
 type DropdownProps = {
   trigger: React.ReactNode;
@@ -36,17 +37,23 @@ export function Dropdown({ trigger, children, align = "right" }: DropdownProps) 
       <button type="button" onClick={() => setOpen((o) => !o)}>
         {trigger}
       </button>
-      {open && (
-        <div
-          className={clsx(
-            "absolute mt-2 min-w-[200px] rounded-2xl border border-[var(--color-border)] bg-[var(--color-card)] p-2 shadow-lg z-50",
-            align === "right" ? "right-0" : "left-0"
-          )}
-          onClick={() => setOpen(false)}
-        >
-          {children}
-        </div>
-      )}
+      <AnimatePresence>
+        {open && (
+          <motion.div
+            className={clsx(
+              "absolute mt-2 min-w-[200px] rounded-2xl border border-[var(--color-border)] bg-[var(--color-card)] p-2 shadow-lg z-50",
+              align === "right" ? "right-0" : "left-0"
+            )}
+            onClick={() => setOpen(false)}
+            initial={{ opacity: 0, y: -4, scale: 0.98 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: -4, scale: 0.98 }}
+            transition={{ duration: 0.15, ease: "easeOut" }}
+          >
+            {children}
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }

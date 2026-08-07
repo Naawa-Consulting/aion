@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import uuid
-from typing import List
+from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func
@@ -10,6 +10,7 @@ from sqlmodel import Session, select, delete
 from ..auth import CurrentMembership, get_current_membership, require_write_access
 from ..db import get_session
 from ..models import Group, Subgroup, Dataset, Variable
+from ..services.analysis import clear_analysis_cache
 from ..tenancy import get_scoped
 from ..schemas import (
     GroupOut,
@@ -23,6 +24,18 @@ from ..schemas import (
 
 
 router = APIRouter()
+
+
+def _clear_other_baselines(session: Session, company_id: str, exclude_group_id: Optional[str]) -> None:
+    """Only one group per company may be the baseline group — clear the flag on any other."""
+    others = session.exec(
+        select(Group).where(Group.company_id == company_id, Group.is_baseline == True)
+    ).all()
+    for other in others:
+        if other.id == exclude_group_id:
+            continue
+        other.is_baseline = False
+        session.add(other)
 
 
 @router.get("", response_model=List[GroupOut])
@@ -46,6 +59,7 @@ def list_groups(
             id=g.id,
             name=g.name,
             apply_media_transform=g.apply_media_transform,
+            is_baseline=g.is_baseline,
             subgroups=[
                 SubgroupOut(id=sg.id, name=sg.name, group_id=sg.group_id, apply_media_transform=sg.apply_media_transform)
                 for sg in sg_by_gid.get(g.id, [])
@@ -60,15 +74,24 @@ def create_group(
     membership: CurrentMembership = Depends(require_write_access),
     session: Session = Depends(get_session),
 ):
+    if body.is_baseline:
+        _clear_other_baselines(session, membership.company_id, exclude_group_id=None)
     g = Group(
         id=str(uuid.uuid4()),
         company_id=membership.company_id,
         name=body.name,
         apply_media_transform=body.apply_media_transform,
+        is_baseline=body.is_baseline,
     )
     session.add(g)
     session.commit()
-    return GroupOut(id=g.id, name=g.name, apply_media_transform=g.apply_media_transform, subgroups=[])
+    return GroupOut(
+        id=g.id,
+        name=g.name,
+        apply_media_transform=g.apply_media_transform,
+        is_baseline=g.is_baseline,
+        subgroups=[],
+    )
 
 
 @router.post("/subgroups", response_model=SubgroupOut)
@@ -147,9 +170,16 @@ def rename_group(
         group.name = new_name
     if body.apply_media_transform is not None:
         group.apply_media_transform = body.apply_media_transform
+    baseline_changed = body.is_baseline is not None and body.is_baseline != group.is_baseline
+    if body.is_baseline is not None:
+        if body.is_baseline:
+            _clear_other_baselines(session, membership.company_id, exclude_group_id=group.id)
+        group.is_baseline = body.is_baseline
     session.add(group)
     session.commit()
     session.refresh(group)
+    if baseline_changed:
+        clear_analysis_cache()
     subgroups = session.exec(
         select(Subgroup).where(Subgroup.group_id == group.id, Subgroup.company_id == membership.company_id)
     ).all()
@@ -157,6 +187,7 @@ def rename_group(
         id=group.id,
         name=group.name,
         apply_media_transform=group.apply_media_transform,
+        is_baseline=group.is_baseline,
         subgroups=[
             SubgroupOut(id=sg.id, name=sg.name, group_id=sg.group_id, apply_media_transform=sg.apply_media_transform)
             for sg in subgroups

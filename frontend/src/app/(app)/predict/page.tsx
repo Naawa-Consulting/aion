@@ -6,9 +6,15 @@ import { toast } from "sonner";
 
 import { Card, CardHeader } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import { ErrorText } from "@/components/ui/error-text";
+import { Select } from "@/components/ui/select";
+import { Eyebrow } from "@/components/ui/eyebrow";
 import ScenarioSheetGlide, { type MultipliersMap } from "@/components/predict/ScenarioSheetGlide";
 import { apiFetch, ApiError } from "@/lib/api";
 import { useCanEdit } from "@/hooks/useCanEdit";
+import { formatChartNumber } from "@/lib/chart-format";
+import { downloadBlob } from "@/lib/download";
+import { useGlobalStore } from "@/lib/store";
 
 type Dataset = { id: string; display_name: string; columns: { name: string; dtype: string }[] };
 type Model = {
@@ -63,6 +69,7 @@ const DEFAULT_MULTIPLIER = 1;
 
 export default function PredictPage() {
   const canEdit = useCanEdit();
+  const { activeCompanyId } = useGlobalStore();
   const [datasets, setDatasets] = useState<Dataset[]>([]);
   const [selectedDataset, setSelectedDataset] = useState("");
   const [models, setModels] = useState<Model[]>([]);
@@ -90,10 +97,6 @@ export default function PredictPage() {
   const [assumptionsExporting, setAssumptionsExporting] = useState(false);
   const [totalsExporting, setTotalsExporting] = useState(false);
 
-  const numberFormatter = useMemo(
-    () => new Intl.NumberFormat(undefined, { minimumFractionDigits: 1, maximumFractionDigits: 1 }),
-    []
-  );
   const percentFormatter = useMemo(
     () => new Intl.NumberFormat(undefined, { minimumFractionDigits: 1, maximumFractionDigits: 1 }),
     []
@@ -230,8 +233,12 @@ export default function PredictPage() {
   }, []);
 
   useEffect(() => {
+    // activeCompanyId hydrates asynchronously (AuthBootstrap fetches /me/memberships and
+    // auto-selects the first company) — fetching before it's set sends no X-Company-Id
+    // header and the backend 422s. Wait for it, then re-fetch once it's ready.
+    if (!activeCompanyId) return;
     fetchDatasets();
-  }, [fetchDatasets]);
+  }, [fetchDatasets, activeCompanyId]);
 
   useEffect(() => {
     if (selectedDataset) {
@@ -549,20 +556,20 @@ export default function PredictPage() {
     ({ active, payload, label }: any) => {
       if (!active || !payload?.length) return null;
       return (
-        <div className="rounded-md border bg-white px-3 py-2 text-xs shadow">
+        <div className="rounded-md border border-[var(--color-border)] bg-[var(--color-card)] px-3 py-2 text-xs shadow">
           <p className="font-semibold">{label}</p>
           {payload.map((item: any) => (
             <p key={item.dataKey} className="flex items-center justify-between gap-4 capitalize text-[var(--color-muted)]">
               <span>{item.name}</span>
               <span className="font-semibold text-[var(--color-foreground)]">
-                {formatNumber(numberFormatter, typeof item.value === "number" ? item.value : Number(item.value))}
+                {formatChartNumber(typeof item.value === "number" ? item.value : Number(item.value), 1)}
               </span>
             </p>
           ))}
         </div>
       );
     },
-    [numberFormatter]
+    []
   );
   const handleExportAssumptions = useCallback(async () => {
     if (!selectedModel) {
@@ -659,33 +666,25 @@ export default function PredictPage() {
           <h1 className="text-2xl font-semibold">Predict & Scenario Simulation</h1>
         </div>
         <div className="flex flex-wrap gap-3 items-center">
-          <label className="flex flex-col text-xs uppercase text-[var(--color-muted)]">
-            Dataset
-            <select
-              className="mt-1 rounded-full border border-[var(--color-border)] px-4 py-2 bg-transparent"
-              value={selectedDataset}
-              onChange={(e) => setSelectedDataset(e.target.value)}
-            >
+          <label className="flex flex-col">
+            <Eyebrow>Dataset</Eyebrow>
+            <Select wrapperClassName="mt-1" value={selectedDataset} onChange={(e) => setSelectedDataset(e.target.value)}>
               {datasets.map((ds) => (
                 <option key={ds.id} value={ds.id}>
                   {ds.display_name}
                 </option>
               ))}
-            </select>
+            </Select>
           </label>
-          <label className="flex flex-col text-xs uppercase text-[var(--color-muted)]">
-            Model
-            <select
-              className="mt-1 rounded-full border border-[var(--color-border)] px-4 py-2 bg-transparent"
-              value={selectedModel}
-              onChange={(e) => setSelectedModel(e.target.value)}
-            >
+          <label className="flex flex-col">
+            <Eyebrow>Model</Eyebrow>
+            <Select wrapperClassName="mt-1" value={selectedModel} onChange={(e) => setSelectedModel(e.target.value)}>
               {models.map((m) => (
                 <option key={m.id} value={m.id}>
                   {m.name}
                 </option>
               ))}
-            </select>
+            </Select>
           </label>
         </div>
       </header>
@@ -714,15 +713,11 @@ export default function PredictPage() {
           </label>
           <label className="flex flex-col gap-2">
             Frequency
-            <select
-              className="rounded-lg border border-[var(--color-border)] px-3 py-2 bg-transparent"
-              value={freq}
-              onChange={(e) => setFreq(e.target.value as any)}
-            >
+            <Select wrapperClassName="w-auto" value={freq} onChange={(e) => setFreq(e.target.value as any)}>
               <option value="day">Daily</option>
               <option value="week">Weekly</option>
               <option value="month">Monthly</option>
-            </select>
+            </Select>
           </label>
           <label className="flex flex-col gap-2 flex-1 min-w-[200px]">
             Scenario name
@@ -748,9 +743,9 @@ export default function PredictPage() {
           </Button>
         </div>
         {reachedScenarioLimit && (
-          <p className="text-xs text-red-500">
+          <ErrorText className="text-xs">
             Maximum of {SCENARIO_LIMIT} saved scenarios reached. Delete one to save a new scenario.
-          </p>
+          </ErrorText>
         )}
       </Card>
 
@@ -760,7 +755,7 @@ export default function PredictPage() {
             <CardHeader title={card.title} subtitle={card.subtitle} />
             <p className="text-lg font-semibold">
               {card.value !== null && card.value !== undefined
-                ? formatNumber(numberFormatter, card.value)
+                ? formatChartNumber(card.value, 1)
                 : "-"}
             </p>
           </Card>
@@ -770,9 +765,7 @@ export default function PredictPage() {
       <Card className="space-y-4">
         <CardHeader title="Scenario builder" subtitle="Edit absolute values by period and variable" />
         <div className="flex flex-wrap items-center justify-between gap-3 text-sm">
-          <p className="text-xs font-semibold uppercase tracking-wide text-[var(--color-muted)]">
-            Mode: Absolute values
-          </p>
+          <Eyebrow>Mode: Absolute values</Eyebrow>
           <div className="flex flex-wrap items-center gap-2">
             <Button variant="ghost" size="sm" onClick={handleResetAll}>
               Reset to base scenario
@@ -808,9 +801,9 @@ export default function PredictPage() {
             <div className="h-80 w-full">
               <ResponsiveContainer width="100%" height="100%">
                 <LineChart data={chartData} margin={{ top: 10, right: 20, bottom: 10, left: 0 }}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="rgba(148, 163, 184, 0.4)" />
+                  <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" />
                   <XAxis dataKey="period" tick={{ fontSize: 12 }} />
-                  <YAxis tick={{ fontSize: 12 }} tickFormatter={(value) => formatNumber(numberFormatter, Number(value))} />
+                  <YAxis tick={{ fontSize: 12 }} tickFormatter={(value) => formatChartNumber(Number(value), 1)} />
                   <RechartsTooltip content={renderTimeseriesTooltip} />
                   <Legend />
                   <Line
@@ -867,8 +860,8 @@ export default function PredictPage() {
                     {chartData.map((row) => (
                       <tr key={row.period} className="odd:bg-transparent even:bg-[var(--color-border)]/20">
                         <td className="px-3 py-2">{row.period}</td>
-                        <td className="px-3 py-2">{row.hero !== null ? formatNumber(numberFormatter, row.hero) : "-"}</td>
-                        <td className="px-3 py-2">{row.scenario !== null ? formatNumber(numberFormatter, row.scenario) : "-"}</td>
+                        <td className="px-3 py-2">{row.hero !== null ? formatChartNumber(row.hero, 1) : "-"}</td>
+                        <td className="px-3 py-2">{row.scenario !== null ? formatChartNumber(row.scenario, 1) : "-"}</td>
                       </tr>
                     ))}
                   </tbody>
@@ -898,9 +891,9 @@ export default function PredictPage() {
                 delta === null
                   ? ""
                   : delta > 0
-                  ? "text-emerald-600"
+                  ? "text-[var(--color-success)]"
                   : delta < 0
-                  ? "text-red-500"
+                  ? "text-[var(--color-danger)]"
                   : "text-[var(--color-muted)]";
               return (
                 <Card
@@ -931,9 +924,9 @@ export default function PredictPage() {
                       </div>
                     )}
                     <div className="space-y-0.5">
-                      <p className="text-xs uppercase tracking-wide text-[var(--color-muted)]">Projected total</p>
+                      <Eyebrow>Projected total</Eyebrow>
                       <p className="text-[1.35rem] font-semibold leading-tight text-[var(--color-foreground)] sm:text-[1.45rem]">
-                        {formatNumber(numberFormatter, scenario.summary.total)}
+                        {formatChartNumber(scenario.summary.total, 1)}
                       </p>
                       {deltaLabel && (
                         <p className={`text-xs font-medium ${deltaClass}`}>
@@ -971,11 +964,6 @@ export default function PredictPage() {
       </Card>
     </section>
   );
-}
-
-function formatNumber(formatter: Intl.NumberFormat, value: number | null | undefined) {
-  if (value === null || value === undefined || Number.isNaN(value)) return "-";
-  return formatter.format(value);
 }
 
 function buildPeriodLabels(startDate: string, horizon: number, freq: "day" | "week" | "month") {
@@ -1082,20 +1070,22 @@ function buildAbsoluteValuesFromAdjustments(
   periods: string[],
   adjustments: Record<string, Record<string, PeriodValue>>
 ): Record<string, Record<string, number>> {
+  // Only surface genuine "value" overrides here — this map feeds back into the grid as
+  // `absoluteValues`, and ScenarioSheetGlide's applyAbsoluteChanges clones the FULL map on
+  // every single-cell edit, then that whole clone gets converted into explicit per-cell
+  // PeriodValue overrides. If untouched "multiplier" cells were included (even at their
+  // computed baseline*1 display value), editing just one cell would freeze every other
+  // period/variable to a flat absolute number, wiping out the backend's calendar-seasonal
+  // defaults and flattening the projected series. Cells still on "multiplier" mode must stay
+  // absent here so they remain implicit and keep following the seasonal baseline.
   const result: Record<string, Record<string, number>> = {};
   const periodList = periods.length ? periods : [];
   variables.forEach((variable) => {
-    const baseline = Number(variable.baseline_mean ?? 0);
     const mapping: Record<string, number> = {};
     periodList.forEach((period) => {
       const entry = adjustments[period]?.[variable.name];
-      if (!entry) return;
-      if (entry.mode === "value") {
-        mapping[period] = roundAbsoluteValue(entry.value);
-      } else {
-        const multiplier = sanitizeMultiplierValue(entry.value);
-        mapping[period] = roundAbsoluteValue(baseline * multiplier);
-      }
+      if (!entry || entry.mode !== "value") return;
+      mapping[period] = roundAbsoluteValue(entry.value);
     });
     result[variable.name] = mapping;
   });
@@ -1105,17 +1095,6 @@ function buildAbsoluteValuesFromAdjustments(
 function roundAbsoluteValue(value: number) {
   if (!Number.isFinite(value)) return 0;
   return Number(value.toFixed(2));
-}
-
-function downloadBlob(blob: Blob, filename: string) {
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = filename;
-  document.body.appendChild(link);
-  link.click();
-  link.remove();
-  URL.revokeObjectURL(url);
 }
 
 function buildExportFilename(base: string, suffix: string) {

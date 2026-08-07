@@ -29,6 +29,7 @@ class DatasetOut(BaseModel):
     time_timezone: Optional[str] = None
     version: int = 1
     previous_version_id: Optional[str] = None
+    dependent_variable: Optional[str] = None
     created_at: datetime
     last_used_at: datetime
     columns: List[ColumnInfo]
@@ -72,6 +73,10 @@ class DatasetRenameRequest(BaseModel):
 
 class DatasetSampleSizeRequest(BaseModel):
     sample_size: Optional[int] = None
+
+
+class DependentVariableRequest(BaseModel):
+    column: Optional[str] = None
 
 
 class DatasetUpdateResponse(BaseModel):
@@ -128,6 +133,7 @@ class VariableOut(BaseModel):
     subgroup_name: Optional[str] = None
     group_id: Optional[str] = None
     group_name: Optional[str] = None
+    is_excluded: bool = False
     created_at: Optional[datetime] = None
 
 
@@ -138,18 +144,21 @@ class VariableHistoryItem(BaseModel):
     created_at: datetime
 
 
-TransformOp = Literal["lag", "decay", "log", "add", "sub", "mul", "div"]
+TransformOp = Literal["lag", "decay", "log", "add", "sub", "mul", "div", "hill", "adstock"]
 
 
 class TransformRequest(BaseModel):
     dataset_id: str
     op: TransformOp
     new_name: str
-    column: Optional[str] = None      # for lag/decay/log
+    column: Optional[str] = None      # for lag/decay/log/hill/adstock
     n: Optional[int] = None           # for lag
     alpha: Optional[float] = None     # for decay (0<alpha<=1)
     left: Optional[str] = None        # for arithmetic
     right: Optional[str] = None       # for arithmetic
+    k: Optional[float] = None         # for hill
+    s: Optional[float] = None         # for hill
+    decay: Optional[float] = None     # for adstock (0<=decay<1)
 
 
 class TransformPreviewRequest(BaseModel):
@@ -174,6 +183,7 @@ class GroupOut(BaseModel):
     id: str
     name: str
     apply_media_transform: bool = False
+    is_baseline: bool = False
     subgroups: List["SubgroupOut"]
 
 
@@ -190,6 +200,7 @@ GroupOut.model_rebuild()
 class CreateGroupRequest(BaseModel):
     name: str
     apply_media_transform: bool = False
+    is_baseline: bool = False
 
 
 class CreateSubgroupRequest(BaseModel):
@@ -208,6 +219,7 @@ class AssignVariableRequest(BaseModel):
 class RenameGroupRequest(BaseModel):
     name: Optional[str] = None
     apply_media_transform: Optional[bool] = None
+    is_baseline: Optional[bool] = None
 
 
 class RenameSubgroupRequest(BaseModel):
@@ -218,6 +230,14 @@ class RenameSubgroupRequest(BaseModel):
 class CategorizeRequest(BaseModel):
     group_id: Optional[str] = None
     subgroup_id: Optional[str] = None
+    is_excluded: Optional[bool] = None
+
+
+class BulkCategorizeRequest(BaseModel):
+    variable_ids: list[str]
+    group_id: Optional[str] = None
+    subgroup_id: Optional[str] = None
+    is_excluded: Optional[bool] = None
 
 
 # Modeling
@@ -242,8 +262,6 @@ class CreateModelRequest(BaseModel):
     y_var: str
     x_vars: list[str]
     apply_media_transforms: bool = True
-    conversion_rate: Optional[float] = None
-    avg_value: Optional[float] = None
 
 
 class ModelMetricsOut(BaseModel):
@@ -265,8 +283,6 @@ class ModelOut(BaseModel):
     is_hero: bool
     role: Literal["hero", "challenger1", "challenger2", "none"] = "none"
     apply_media_transforms: bool = True
-    conversion_rate: Optional[float] = None
-    avg_value: Optional[float] = None
     metrics: ModelMetricsOut
 
 
@@ -286,8 +302,6 @@ class UpdateModelRequest(BaseModel):
     name: Optional[str] = None
     x_vars: Optional[list[str]] = None
     apply_media_transforms: Optional[bool] = None
-    conversion_rate: Optional[float] = None
-    avg_value: Optional[float] = None
 
 
 class ModelRoleRequest(BaseModel):
@@ -514,8 +528,36 @@ class EconomicsModelInfo(BaseModel):
     dataset_id: str
     y_var: str
     x_vars: list[str]
-    conversion_rate: Optional[float] = None
-    avg_value: Optional[float] = None
+
+
+# Dataset-scoped conversion_rate/avg_value config (replaces the old per-Model fields of the
+# same name) — same 3 source modes as InvestmentChannel, minus the dated-entries manual case
+# (these represent a rate/ticket size, not a $ spend plan, so "manual" is just a fixed value).
+ConversionSourceMode = Literal["manual", "dataset_column", "rate_metric"]
+
+
+class ConversionMetricConfig(BaseModel):
+    value: Optional[float] = None  # source_mode == manual
+    column: Optional[str] = None  # source_mode == dataset_column
+    rate_value: Optional[float] = None  # source_mode == rate_metric
+    metric_column: Optional[str] = None  # source_mode == rate_metric
+
+
+class ConversionMetricInput(BaseModel):
+    source_mode: ConversionSourceMode
+    config: ConversionMetricConfig
+
+
+class UpdateConversionSettingsRequest(BaseModel):
+    dataset_id: str
+    conversion_rate: ConversionMetricInput
+    avg_value: ConversionMetricInput
+
+
+class ConversionSettingsOut(BaseModel):
+    dataset_id: str
+    conversion_rate: ConversionMetricInput
+    avg_value: ConversionMetricInput
 
 
 class EconomicsSummaryResponse(BaseModel):

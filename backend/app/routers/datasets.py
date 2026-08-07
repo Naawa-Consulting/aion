@@ -16,7 +16,7 @@ from sqlmodel import Session, select, delete
 
 from ..auth import CurrentMembership, get_current_membership, require_write_access
 from ..db import get_session
-from ..models import Dataset, Variable, Model, ModelMetrics, Scenario, InvestmentChannel
+from ..models import ConversionSettings, Dataset, Variable, Model, ModelMetrics, Scenario, InvestmentChannel
 from ..services.analysis import invalidate_cache_for_dataset
 from ..tenancy import get_scoped
 from ..utils.storage import StorageNotFoundError, get_storage
@@ -33,6 +33,7 @@ from ..schemas import (
     TimeCandidate,
     TimeSelection,
     TimeVariableRequest,
+    DependentVariableRequest,
     DatasetUpdateResponse,
     DatasetVersionsResponse,
     DatasetVersionInfo,
@@ -106,8 +107,10 @@ def _read_uploaded_file(filename: str | None, content: bytes) -> pd.DataFrame:
             df = pd.read_csv(buf)
         elif filename and filename.lower().endswith((".xlsx", ".xls")):
             df = pd.read_excel(buf)
+        elif filename and filename.lower().endswith(".parquet"):
+            df = pd.read_parquet(buf)
         else:
-            raise ValueError("Unsupported file type. Use .csv or .xlsx")
+            raise ValueError("Unsupported file type. Use .csv, .xlsx, or .parquet")
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Failed to parse {filename}: {exc}")
     df.columns = [_normalize_column(str(c)) for c in df.columns]
@@ -144,6 +147,7 @@ def _dataset_out(session: Session, ds: Dataset) -> DatasetOut:
         time_timezone=ds.time_timezone,
         version=ds.version or 1,
         previous_version_id=ds.previous_version_id,
+        dependent_variable=ds.dependent_variable,
         created_at=_ensure_utc_datetime(ds.created_at),
         last_used_at=_ensure_utc_datetime(getattr(ds, "last_used_at", ds.created_at)),
         columns=cols,
@@ -436,6 +440,30 @@ def update_time_variable(
     return _dataset_out(session, ds)
 
 
+@router.patch("/{dataset_id}/dependent_variable", response_model=DatasetOut)
+def update_dependent_variable(
+    dataset_id: str,
+    body: DependentVariableRequest,
+    membership: CurrentMembership = Depends(require_write_access),
+    session: Session = Depends(get_session),
+):
+    ds = get_scoped(session, Dataset, dataset_id, membership.company_id)
+
+    column = body.column
+    if column:
+        column_names = {c["name"] for c in json.loads(ds.columns_json)}
+        if column not in column_names:
+            raise HTTPException(status_code=400, detail="Column not found")
+
+    ds.dependent_variable = column
+    ds.last_used_at = datetime.now(timezone.utc)
+    session.add(ds)
+    session.commit()
+    session.refresh(ds)
+    invalidate_cache_for_dataset(dataset_id)
+    return _dataset_out(session, ds)
+
+
 @router.post("/{dataset_id}/update", response_model=DatasetUpdateResponse)
 async def update_dataset_file(
     dataset_id: str,
@@ -660,12 +688,17 @@ def delete_dataset(
             session.exec(delete(ModelMetrics).where(ModelMetrics.model_id.in_(model_ids)))
             session.exec(delete(Model).where(Model.id.in_(model_ids)))
 
-    # Investment channels have no dependents of their own and aren't counted in `deps` above
-    # (they never block a non-cascade delete), so they're always cleaned up here to avoid
-    # orphaning them once the dataset they reference is gone.
+    # Investment channels and conversion settings have no dependents of their own and aren't
+    # counted in `deps` above (they never block a non-cascade delete), so they're always
+    # cleaned up here to avoid orphaning them once the dataset they reference is gone.
     session.exec(
         delete(InvestmentChannel).where(
             InvestmentChannel.dataset_id == ds.id, InvestmentChannel.company_id == ds.company_id
+        )
+    )
+    session.exec(
+        delete(ConversionSettings).where(
+            ConversionSettings.dataset_id == ds.id, ConversionSettings.company_id == ds.company_id
         )
     )
 

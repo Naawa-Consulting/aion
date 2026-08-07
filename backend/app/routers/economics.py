@@ -1,22 +1,31 @@
 from __future__ import annotations
 
-import io
 import json
 import uuid
 from typing import List, Optional
 
 import pandas as pd
 from fastapi import APIRouter, Depends, HTTPException, Query
-from fastapi.responses import StreamingResponse
 from sqlalchemy import func
 from sqlmodel import Session, select
 
 from ..auth import CurrentMembership, get_current_membership, require_write_access
 from ..db import get_session
-from ..models import Dataset, InvestmentChannel, Variable
-from ..routers.analysis import _apply_date_filter, _fit_from_model, _parse_date, _ts_key
+from ..models import ConversionSettings, Dataset, InvestmentChannel, Variable
+from ..routers.analysis import (
+    _apply_date_filter,
+    _baseline_predictor_names,
+    _fit_from_model,
+    _group_maps,
+    _parse_date,
+    _ts_key,
+)
+from ..utils.excel import excel_response
 from ..schemas import (
     ChannelEconomics,
+    ConversionMetricConfig,
+    ConversionMetricInput,
+    ConversionSettingsOut,
     CreateInvestmentChannelRequest,
     EconomicsChannelSeries,
     EconomicsModelInfo,
@@ -24,6 +33,7 @@ from ..schemas import (
     EconomicsTotals,
     InvestmentChannelConfig,
     InvestmentChannelOut,
+    UpdateConversionSettingsRequest,
     UpdateInvestmentChannelRequest,
 )
 from ..services.analysis import (
@@ -33,7 +43,7 @@ from ..services.analysis import (
     invalidate_cache_for_dataset,
     set_cached_view,
 )
-from ..services.economics import compute_channel_economics
+from ..services.economics import compute_channel_economics, resolve_conversion_settings
 from ..tenancy import get_scoped
 
 router = APIRouter()
@@ -219,6 +229,114 @@ def _load_channels(session: Session, company_id: str, dataset_id: str) -> List[I
     ).all()
 
 
+def _load_conversion_settings(
+    session: Session, company_id: str, dataset_id: str
+) -> Optional[ConversionSettings]:
+    return session.exec(
+        select(ConversionSettings).where(
+            ConversionSettings.company_id == company_id,
+            ConversionSettings.dataset_id == dataset_id,
+        )
+    ).first()
+
+
+def _conversion_settings_out(dataset_id: str, settings: ConversionSettings) -> ConversionSettingsOut:
+    return ConversionSettingsOut(
+        dataset_id=dataset_id,
+        conversion_rate=ConversionMetricInput(
+            source_mode=settings.conversion_rate_mode,
+            config=ConversionMetricConfig(**json.loads(settings.conversion_rate_config_json)),
+        ),
+        avg_value=ConversionMetricInput(
+            source_mode=settings.avg_value_mode,
+            config=ConversionMetricConfig(**json.loads(settings.avg_value_config_json)),
+        ),
+    )
+
+
+def _validate_conversion_metric_config(ds: Dataset, metric: ConversionMetricInput, label: str) -> None:
+    columns = _dataset_column_names(ds)
+    mode = metric.source_mode
+    config = metric.config
+    if mode == "manual":
+        if config.value is None:
+            raise HTTPException(status_code=400, detail=f"value is required for {label} in manual mode")
+    elif mode == "dataset_column":
+        if not config.column:
+            raise HTTPException(status_code=400, detail=f"column is required for {label} in dataset_column mode")
+        if config.column not in columns:
+            raise HTTPException(status_code=400, detail=f"Column not found in dataset: {config.column}")
+    elif mode == "rate_metric":
+        if config.rate_value is None or not config.metric_column:
+            raise HTTPException(
+                status_code=400,
+                detail=f"rate_value and metric_column are required for {label} in rate_metric mode",
+            )
+        if config.metric_column not in columns:
+            raise HTTPException(status_code=400, detail=f"Column not found in dataset: {config.metric_column}")
+    else:
+        raise HTTPException(status_code=400, detail=f"Invalid source_mode for {label}: {mode}")
+
+
+@router.get("/conversion-settings", response_model=Optional[ConversionSettingsOut])
+def get_conversion_settings(
+    dataset_id: str = Query(...),
+    membership: CurrentMembership = Depends(get_current_membership),
+    session: Session = Depends(get_session),
+):
+    ds = get_scoped(session, Dataset, dataset_id, membership.company_id)
+    settings = _load_conversion_settings(session, membership.company_id, ds.id)
+    return _conversion_settings_out(ds.id, settings) if settings else None
+
+
+@router.put("/conversion-settings", response_model=ConversionSettingsOut)
+def upsert_conversion_settings(
+    body: UpdateConversionSettingsRequest,
+    membership: CurrentMembership = Depends(require_write_access),
+    session: Session = Depends(get_session),
+):
+    ds = get_scoped(session, Dataset, body.dataset_id, membership.company_id)
+    _validate_conversion_metric_config(ds, body.conversion_rate, "conversion_rate")
+    _validate_conversion_metric_config(ds, body.avg_value, "avg_value")
+
+    settings = _load_conversion_settings(session, membership.company_id, ds.id)
+    if settings is None:
+        settings = ConversionSettings(
+            id=str(uuid.uuid4()),
+            company_id=membership.company_id,
+            dataset_id=ds.id,
+            conversion_rate_mode=body.conversion_rate.source_mode,
+            conversion_rate_config_json=body.conversion_rate.config.model_dump_json(exclude_none=True),
+            avg_value_mode=body.avg_value.source_mode,
+            avg_value_config_json=body.avg_value.config.model_dump_json(exclude_none=True),
+        )
+    else:
+        settings.conversion_rate_mode = body.conversion_rate.source_mode
+        settings.conversion_rate_config_json = body.conversion_rate.config.model_dump_json(exclude_none=True)
+        settings.avg_value_mode = body.avg_value.source_mode
+        settings.avg_value_config_json = body.avg_value.config.model_dump_json(exclude_none=True)
+    session.add(settings)
+    session.commit()
+    session.refresh(settings)
+    invalidate_cache_for_dataset(ds.id)
+    return _conversion_settings_out(ds.id, settings)
+
+
+@router.delete("/conversion-settings")
+def delete_conversion_settings(
+    dataset_id: str = Query(...),
+    membership: CurrentMembership = Depends(require_write_access),
+    session: Session = Depends(get_session),
+):
+    ds = get_scoped(session, Dataset, dataset_id, membership.company_id)
+    settings = _load_conversion_settings(session, membership.company_id, ds.id)
+    if settings:
+        session.delete(settings)
+        session.commit()
+        invalidate_cache_for_dataset(ds.id)
+    return {"status": "deleted"}
+
+
 def _fit_with_fallback(session: Session, model_id: str, company_id: str, time_col, start_ts, end_ts):
     """Same fallback as analysis.py's summary/stacked: if the date-filtered fit doesn't have
     enough rows, refit on the full history (correct adstock carryover) and slice the raw frame
@@ -260,6 +378,9 @@ def economics_summary(
     if cached is not None:
         return cached
 
+    var_map, sg_map, g_map = _group_maps(session, ds.id, membership.company_id)
+    baseline_predictors = _baseline_predictor_names(var_map, g_map, sg_map)
+
     time_field = getattr(ds, "time_variable", None)
     contrib_result = compute_contributions(
         dataset_id=ds.id,
@@ -271,11 +392,18 @@ def economics_summary(
         end=end_ts,
         params=params,
         predictors=list(X.columns),
+        baseline_predictors=baseline_predictors,
     )
 
     channels = _load_channels(session, membership.company_id, ds.id)
+    conversion_settings = _load_conversion_settings(session, membership.company_id, ds.id)
     per_channel = compute_channel_economics(
-        model=m, filtered_df=contrib_result.frame, contrib_result=contrib_result, channels=channels, time_column=time_field
+        model=m,
+        filtered_df=contrib_result.frame,
+        contrib_result=contrib_result,
+        channels=channels,
+        time_column=time_field,
+        conversion_settings=conversion_settings,
     )
 
     total_investment = sum(float(pc["investment_series"].sum()) for pc in per_channel)
@@ -287,7 +415,7 @@ def economics_summary(
     total_contribution = sum(
         float(pc["contribution_series"].sum()) for pc in per_channel if pc["contribution_series"] is not None
     )
-    economics_configured = m.conversion_rate is not None and m.avg_value is not None
+    _, _, economics_configured = resolve_conversion_settings(conversion_settings, contrib_result.frame)
     roi_total = (
         (total_revenue - total_investment) / total_investment if (economics_configured and total_investment) else None
     )
@@ -329,8 +457,6 @@ def economics_summary(
             dataset_id=m.dataset_id,
             y_var=m.y_var,
             x_vars=json.loads(m.x_vars_json),
-            conversion_rate=m.conversion_rate,
-            avg_value=m.avg_value,
         ).model_dump(),
         "economics_configured": economics_configured,
         "totals": EconomicsTotals(
@@ -376,6 +502,9 @@ def economics_stacked(
     if cached is not None:
         return cached
 
+    var_map, sg_map, g_map = _group_maps(session, ds.id, membership.company_id)
+    baseline_predictors = _baseline_predictor_names(var_map, g_map, sg_map)
+
     contrib_result = compute_contributions(
         dataset_id=ds.id,
         model_id=m.id,
@@ -386,11 +515,18 @@ def economics_stacked(
         end=end_ts,
         params=params,
         predictors=list(X.columns),
+        baseline_predictors=baseline_predictors,
     )
 
     channels = _load_channels(session, membership.company_id, ds.id)
+    conversion_settings = _load_conversion_settings(session, membership.company_id, ds.id)
     per_channel = compute_channel_economics(
-        model=m, filtered_df=contrib_result.frame, contrib_result=contrib_result, channels=channels, time_column=time_col
+        model=m,
+        filtered_df=contrib_result.frame,
+        contrib_result=contrib_result,
+        channels=channels,
+        time_column=time_col,
+        conversion_settings=conversion_settings,
     )
 
     freq_map = {"day": "D", "week": "W", "month": "M"}
@@ -441,15 +577,12 @@ def export_economics_summary(
     session: Session = Depends(get_session),
 ):
     data = economics_summary(model_id, start_date, end_date, membership, session)
-    buf = io.BytesIO()
-    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-        pd.DataFrame(data["channels"]).to_excel(writer, index=False, sheet_name="channels")
-        pd.DataFrame([data["totals"]]).to_excel(writer, index=False, sheet_name="totals")
-    buf.seek(0)
-    return StreamingResponse(
-        buf,
-        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": "attachment; filename=economics_summary.xlsx"},
+    return excel_response(
+        {
+            "channels": pd.DataFrame(data["channels"]),
+            "totals": pd.DataFrame([data["totals"]]),
+        },
+        "economics_summary.xlsx",
     )
 
 
@@ -475,12 +608,4 @@ def export_economics_stacked(
         }
         for i, idx in enumerate(index)
     ]
-    buf = io.BytesIO()
-    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-        pd.DataFrame(rows).to_excel(writer, index=False, sheet_name="stacked")
-    buf.seek(0)
-    return StreamingResponse(
-        buf,
-        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": "attachment; filename=economics_stacked.xlsx"},
-    )
+    return excel_response({"stacked": pd.DataFrame(rows)}, "economics_stacked.xlsx")

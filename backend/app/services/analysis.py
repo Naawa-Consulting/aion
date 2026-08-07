@@ -3,7 +3,7 @@ from __future__ import annotations
 import copy
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from fastapi import HTTPException
 import pandas as pd
@@ -122,6 +122,7 @@ def compute_contributions(
     end: Optional[pd.Timestamp],
     params: pd.Series,
     predictors: List[str],
+    baseline_predictors: Optional[Set[str]] = None,
 ) -> ContributionResult:
     if not time_column:
         raise HTTPException(
@@ -153,6 +154,7 @@ def compute_contributions(
         end=end,
         params=params,
         predictors=predictors,
+        baseline_predictors=baseline_predictors,
     )
     _set_cached_contribution(key, result)
     return result
@@ -167,6 +169,7 @@ def _compute_contributions_impl(
     end: Optional[pd.Timestamp],
     params: pd.Series,
     predictors: List[str],
+    baseline_predictors: Optional[Set[str]] = None,
 ) -> ContributionResult:
     """
     Single source of truth for Module 4 contribution math.
@@ -182,6 +185,11 @@ def _compute_contributions_impl(
     window boundary is correct; `design_frame.reindex(...)` below handles it covering a
     different row set than `df`/`filtered_df` (e.g. when built over full history while
     `filtered_df` is a narrower date-filtered slice, or vice versa).
+
+    `baseline_predictors` (variable names assigned to the company's baseline Group, resolved
+    by the caller) get folded into the intercept's contribution instead of being reported as
+    their own line item — a "baseline" line should represent the whole non-media floor the
+    user chose to model that way, not just the constant term.
     """
 
     time_values = pd.to_datetime(df[time_column], errors="coerce")
@@ -249,17 +257,22 @@ def _compute_contributions_impl(
         .apply(pd.to_numeric, errors="coerce")
         .fillna(0.0)
     )
+    baseline_names = baseline_predictors or set()
     per_row = pd.DataFrame(index=numeric.index)
     per_variable_totals: Dict[str, float] = {}
+    baseline_series = pd.Series(intercept_value, index=numeric.index)
 
     for column in predictors:
         beta = float(params[column])
         contrib_series = numeric[column] * beta
+        if column in baseline_names:
+            baseline_series = baseline_series + contrib_series
+            continue
         per_row[column] = contrib_series
         per_variable_totals[column] = float(contrib_series.sum())
 
-    per_row["__intercept__"] = intercept_value
-    baseline_contribution = intercept_value * len(per_row.index)
+    per_row["__intercept__"] = baseline_series
+    baseline_contribution = float(baseline_series.sum())
     total_contribution = baseline_contribution + sum(per_variable_totals.values())
 
     return ContributionResult(

@@ -5,6 +5,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import clsx from "clsx";
 import { useTheme } from "next-themes";
+import { motion } from "framer-motion";
 import { Moon, Sun } from "lucide-react";
 import { CompanySwitcher } from "@/components/company-switcher";
 import { UserMenu } from "@/components/user-menu";
@@ -17,20 +18,26 @@ const NAV_LINKS = [
   { href: "/predict", label: "Predict" },
 ];
 
-const NavLink = ({ href, label }: { href: string; label: string }) => {
+const NavLink = ({ href, label, layoutScope }: { href: string; label: string; layoutScope: string }) => {
   const pathname = usePathname();
   const active = pathname === href || pathname.startsWith(href === "/" ? "/" : href);
   return (
-    <Link
-      href={href}
-      className={clsx(
-        "px-3 py-1 rounded-full text-sm transition-colors",
-        active
-          ? "bg-[var(--color-accent-soft)] text-[var(--color-accent)]"
-          : "text-[var(--color-muted)] hover:text-[var(--color-foreground)]"
+    <Link href={href} className="relative px-3 py-1 rounded-full text-sm">
+      {active && (
+        <motion.span
+          layoutId={`nav-active-pill-${layoutScope}`}
+          className="absolute inset-0 rounded-full bg-[var(--color-accent-soft)]"
+          transition={{ type: "spring", stiffness: 500, damping: 35 }}
+        />
       )}
-    >
-      {label}
+      <span
+        className={clsx(
+          "relative z-10 transition-colors",
+          active ? "text-[var(--color-accent)]" : "text-[var(--color-muted)] hover:text-[var(--color-foreground)]"
+        )}
+      >
+        {label}
+      </span>
     </Link>
   );
 };
@@ -70,7 +77,7 @@ export default function Header() {
   return (
     <header
       className={clsx(
-        "sticky top-0 z-50 backdrop-blur transition-all border-b border-transparent",
+        "no-print sticky top-0 z-50 backdrop-blur transition-all border-b border-transparent",
         "bg-[color:rgba(248,250,252,0.85)] dark:bg-[rgba(2,6,23,0.85)]",
         shrunken ? "py-2 shadow-sm" : "py-4"
       )}
@@ -82,7 +89,7 @@ export default function Header() {
           </Link>
           <nav className="hidden md:flex items-center gap-2">
             {NAV_LINKS.map((link) => (
-              <NavLink key={link.href} {...link} />
+              <NavLink key={link.href} {...link} layoutScope="desktop" />
             ))}
           </nav>
         </div>
@@ -94,7 +101,7 @@ export default function Header() {
       </div>
       <nav className="md:hidden px-6 mt-3 flex items-center gap-2 overflow-x-auto">
         {NAV_LINKS.map((link) => (
-          <NavLink key={`mobile-${link.href}`} {...link} />
+          <NavLink key={`mobile-${link.href}`} {...link} layoutScope="mobile" />
         ))}
       </nav>
     </header>

@@ -3,6 +3,7 @@
 import { Suspense, useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { getSupabaseBrowserClient } from "@/lib/supabase/client";
+import { ErrorText } from "@/components/ui/error-text";
 
 // Supabase's default email templates (invite, recovery, magic link) send the user to
 // Supabase's own hosted /auth/v1/verify endpoint, which then redirects back here with the
@@ -71,7 +72,7 @@ function AuthCallback() {
   if (error) {
     return (
       <div className="flex min-h-screen items-center justify-center px-6">
-        <p className="text-sm text-red-500">{error}</p>
+        <ErrorText className="text-sm">{error}</ErrorText>
       </div>
     );
   }

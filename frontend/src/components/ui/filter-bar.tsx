@@ -1,5 +1,6 @@
 import React from "react";
 import clsx from "clsx";
+import { Eyebrow } from "@/components/ui/eyebrow";
 
 type FilterBarProps = {
   children: React.ReactNode;
@@ -10,7 +11,7 @@ export function FilterBar({ children, className }: FilterBarProps) {
   return (
     <div
       className={clsx(
-        "mb-4 flex flex-wrap items-start gap-x-4 gap-y-3 border-b border-black/5 pb-3",
+        "mb-4 flex flex-wrap items-start gap-x-4 gap-y-3 border-b border-[var(--color-border)] pb-3",
         className
       )}
     >
@@ -27,8 +28,8 @@ type FilterFieldProps = {
 
 export function FilterField({ label, children, className }: FilterFieldProps) {
   return (
-    <label className={clsx("flex flex-col text-[11px] uppercase text-black/45", className)}>
-      <span className="mb-1 leading-none tracking-wide">{label}</span>
+    <label className={clsx("flex flex-col", className)}>
+      <Eyebrow className="mb-1 leading-none">{label}</Eyebrow>
       {children}
     </label>
   );

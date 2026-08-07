@@ -16,18 +16,18 @@ export function SelectedPredictorsQuickView({ predictors, onRemove, onClear }: P
   }
 
   return (
-    <div className="mt-4 rounded-xl border border-[var(--color-border)] bg-white px-4 py-3">
+    <div className="mt-4 rounded-xl border border-[var(--color-border)] bg-[var(--color-card)] px-4 py-3">
       <div className="mb-2 flex items-center justify-between">
         <p className="text-xs font-medium text-[var(--color-foreground)]">
           Selected predictors
-          <span className="ml-2 rounded-full bg-[var(--color-border)]/50 px-2 py-0.5 text-[11px] font-normal text-[var(--color-muted)]">
+          <span className="ml-2 rounded-full bg-[var(--color-border)]/50 px-2 py-0.5 text-2xs font-normal text-[var(--color-muted)]">
             {predictors.length} selected
           </span>
         </p>
         <button
           type="button"
           onClick={onClear}
-          className="text-[11px] text-[var(--color-muted)] hover:text-[var(--color-foreground)]"
+          className="text-2xs text-[var(--color-muted)] hover:text-[var(--color-foreground)]"
         >
           Clear all
         </button>
@@ -38,12 +38,12 @@ export function SelectedPredictorsQuickView({ predictors, onRemove, onClear }: P
             key={name}
             type="button"
             onClick={() => onRemove(name)}
-            className="group flex items-center gap-1 rounded-full bg-[var(--color-border)]/50 px-2.5 py-1 text-[11px] text-[var(--color-foreground)] hover:bg-[var(--color-border)]"
+            className="group flex items-center gap-1 rounded-full bg-[var(--color-border)]/50 px-2.5 py-1 text-2xs text-[var(--color-foreground)] hover:bg-[var(--color-border)]"
           >
             <span className="max-w-[160px] truncate" title={name}>
               {name}
             </span>
-            <span className="inline-flex h-4 w-4 items-center justify-center rounded-full bg-white text-[10px] text-[var(--color-muted)] group-hover:bg-[var(--color-bg)]">
+            <span className="inline-flex h-4 w-4 items-center justify-center rounded-full bg-[var(--color-card)] text-3xs text-[var(--color-muted)] group-hover:bg-[var(--color-bg)]">
               ×
             </span>
           </button>

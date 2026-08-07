@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from typing import List, Optional
 
@@ -26,6 +27,7 @@ from ..services.model_fit import (
 )
 from ..tenancy import get_scoped
 from ..utils.datasets import load_dataset_frame
+from ..utils.excel import excel_response
 from ..schemas import (
     CorrelationResponse,
     CorrelationItem,
@@ -242,8 +244,6 @@ def _model_to_out(m: Model, mm: ModelMetrics) -> ModelOut:
         is_hero=m.role == "hero",
         role=m.role or "none",
         apply_media_transforms=m.apply_media_transforms,
-        conversion_rate=m.conversion_rate,
-        avg_value=m.avg_value,
         metrics=ModelMetricsOut(
             r2=mm.r2,
             adj_r2=mm.adj_r2,
@@ -380,8 +380,6 @@ def create_model(
         is_hero=False,
         role="none",
         apply_media_transforms=body.apply_media_transforms,
-        conversion_rate=body.conversion_rate,
-        avg_value=body.avg_value,
     )
     session.add(m)
     session.commit()
@@ -427,10 +425,6 @@ def update_model(
 
     if body.name:
         m.name = body.name
-    if body.conversion_rate is not None:
-        m.conversion_rate = body.conversion_rate
-    if body.avg_value is not None:
-        m.avg_value = body.avg_value
     transforms_flag_changed = (
         body.apply_media_transforms is not None and body.apply_media_transforms != m.apply_media_transforms
     )
@@ -472,8 +466,6 @@ def duplicate_model(
         is_hero=False,
         role="none",
         apply_media_transforms=original.apply_media_transforms,
-        conversion_rate=original.conversion_rate,
-        avg_value=original.avg_value,
     )
     session.add(new_model)
     session.commit()
@@ -531,8 +523,6 @@ def create_best_stepwise_model(
         is_hero=False,
         role="none",
         apply_media_transforms=original.apply_media_transforms,
-        conversion_rate=original.conversion_rate,
-        avg_value=original.avg_value,
     )
     session.add(new_model)
     session.commit()
@@ -775,4 +765,36 @@ def model_predictions(
         y_true=grouped["y_true"].tolist(),
         y_pred=grouped["y_pred"].tolist(),
         residuals=grouped["residual"].tolist(),
+    )
+
+
+@router.get("/{model_id}/export/summary.xlsx")
+def export_model_summary(
+    model_id: str,
+    membership: CurrentMembership = Depends(get_current_membership),
+    session: Session = Depends(get_session),
+):
+    m = get_scoped(session, Model, model_id, membership.company_id)
+    mm = session.get(ModelMetrics, model_id)
+    summary_data = model_summary(model_id, membership, session)
+    predictions = model_predictions(model_id, "auto", None, membership, session)
+
+    coef_rows = [item.model_dump() for item in [summary_data.intercept, *summary_data.coefficients]]
+    metrics_rows = [{"r2": mm.r2, "adj_r2": mm.adj_r2, "durbin_watson": mm.durbin_watson,
+                      "mae": mm.mae, "rmse": mm.rmse, "mape": mm.mape}] if mm else []
+    predictions_rows = [
+        {"period": period, "y_true": y_true, "y_pred": y_pred, "residual": residual}
+        for period, y_true, y_pred, residual in zip(
+            predictions.index, predictions.y_true, predictions.y_pred, predictions.residuals
+        )
+    ]
+
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "-", m.name.strip()).strip("-_").lower() or "model"
+    return excel_response(
+        {
+            "metrics": pd.DataFrame(metrics_rows),
+            "coefficients": pd.DataFrame(coef_rows),
+            "predictions": pd.DataFrame(predictions_rows),
+        },
+        f"{slug}-summary.xlsx",
     )

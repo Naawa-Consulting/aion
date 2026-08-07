@@ -2,7 +2,7 @@ import clsx from "clsx";
 
 type BadgeProps = {
   children: React.ReactNode;
-  variant?: "neutral" | "success" | "warning";
+  variant?: "neutral" | "success" | "warning" | "danger";
 };
 
 export function Badge({ children, variant = "neutral" }: BadgeProps) {
@@ -11,8 +11,9 @@ export function Badge({ children, variant = "neutral" }: BadgeProps) {
       className={clsx(
         "inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium",
         variant === "neutral" && "bg-[var(--color-accent-soft)] text-[var(--color-accent)]",
-        variant === "success" && "bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-200",
-        variant === "warning" && "bg-amber-100 text-amber-800 dark:bg-amber-400/20 dark:text-amber-100"
+        variant === "success" && "bg-[var(--color-success-soft)] text-[var(--color-success)]",
+        variant === "warning" && "bg-[var(--color-warning-soft)] text-[var(--color-warning)]",
+        variant === "danger" && "bg-[var(--color-danger-soft)] text-[var(--color-danger)]"
       )}
     >
       {children}

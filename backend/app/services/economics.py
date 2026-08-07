@@ -5,7 +5,7 @@ from typing import Any, Dict, List, Optional
 
 import pandas as pd
 
-from ..models import InvestmentChannel, Model
+from ..models import ConversionSettings, InvestmentChannel, Model
 from .analysis import ContributionResult
 
 
@@ -92,6 +92,59 @@ def channel_investment_series(
         return pd.Series(0.0, index=filtered_df.index), True
 
 
+def parse_conversion_metric_config(mode: str, raw_config_json: str) -> Dict[str, Any]:
+    try:
+        return json.loads(raw_config_json)
+    except (TypeError, ValueError):
+        return {}
+
+
+def resolve_conversion_metric_series(
+    mode: str, config: Dict[str, Any], filtered_df: pd.DataFrame
+) -> tuple[pd.Series, bool]:
+    """Returns (series, misconfigured) for a conversion_rate/avg_value metric — same 3 modes
+    as InvestmentChannel.source_mode, minus the dated-manual-entry case: "manual" here is a
+    single fixed value (these represent a rate or a ticket size, not a $ spend plan)."""
+    try:
+        if mode == "manual":
+            value = config.get("value")
+            if value is None:
+                raise ValueError("value is required for manual mode")
+            return pd.Series(float(value), index=filtered_df.index), False
+        if mode == "dataset_column":
+            col = config.get("column")
+            if not col or col not in filtered_df.columns:
+                raise KeyError(col)
+            return pd.to_numeric(filtered_df[col], errors="coerce").fillna(0.0), False
+        if mode == "rate_metric":
+            rate = config.get("rate_value")
+            col = config.get("metric_column")
+            if rate is None or not col or col not in filtered_df.columns:
+                raise KeyError(col)
+            series = pd.to_numeric(filtered_df[col], errors="coerce").fillna(0.0) * float(rate)
+            return series, False
+        raise ValueError(f"Unknown source_mode: {mode}")
+    except Exception:
+        return pd.Series(0.0, index=filtered_df.index), True
+
+
+def resolve_conversion_settings(
+    settings: Optional[ConversionSettings], filtered_df: pd.DataFrame
+) -> tuple[Optional[pd.Series], Optional[pd.Series], bool]:
+    """Returns (conversion_rate_series, avg_value_series, configured). `configured` is False
+    (both series None) when there's no ConversionSettings row for the dataset yet, or either
+    metric's config is broken — same "degrade, don't 500" policy as InvestmentChannel."""
+    if settings is None:
+        return None, None, False
+    cr_config = parse_conversion_metric_config(settings.conversion_rate_mode, settings.conversion_rate_config_json)
+    av_config = parse_conversion_metric_config(settings.avg_value_mode, settings.avg_value_config_json)
+    cr_series, cr_bad = resolve_conversion_metric_series(settings.conversion_rate_mode, cr_config, filtered_df)
+    av_series, av_bad = resolve_conversion_metric_series(settings.avg_value_mode, av_config, filtered_df)
+    if cr_bad or av_bad:
+        return None, None, False
+    return cr_series, av_series, True
+
+
 def compute_channel_economics(
     *,
     model: Model,
@@ -99,11 +152,14 @@ def compute_channel_economics(
     contrib_result: ContributionResult,
     channels: List[InvestmentChannel],
     time_column: Optional[str],
+    conversion_settings: Optional[ConversionSettings],
 ) -> List[Dict[str, Any]]:
     """Per-channel investment/contribution/revenue series, independent of API response shape
     (summary vs. stacked aggregate these differently) — see routers/economics.py."""
     x_vars = set(json.loads(model.x_vars_json))
-    economics_configured = model.conversion_rate is not None and model.avg_value is not None
+    conversion_rate_series, avg_value_series, economics_configured = resolve_conversion_settings(
+        conversion_settings, filtered_df
+    )
 
     out: List[Dict[str, Any]] = []
     for channel in channels:
@@ -124,7 +180,11 @@ def compute_channel_economics(
                 .fillna(0.0)
             )
             if economics_configured:
-                revenue_series = contribution_series * model.conversion_rate * model.avg_value
+                revenue_series = (
+                    contribution_series
+                    * conversion_rate_series.reindex(contribution_series.index).fillna(0.0)
+                    * avg_value_series.reindex(contribution_series.index).fillna(0.0)
+                )
 
         out.append(
             {

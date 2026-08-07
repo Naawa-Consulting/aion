@@ -45,6 +45,7 @@ class Dataset(SQLModel, table=True):
     time_timezone: str | None = Field(default=None, nullable=True)
     previous_version_id: str | None = Field(default=None, nullable=True)
     version: int = Field(default=1, nullable=False)
+    dependent_variable: str | None = Field(default=None, nullable=True)  # Variable.name
     created_at: datetime = Field(default_factory=utcnow, nullable=False)
     last_used_at: datetime = Field(default_factory=utcnow, nullable=False)
 
@@ -59,6 +60,7 @@ class Variable(SQLModel, table=True):
     source_spec_json: Optional[str] = None
     group_id: Optional[str] = None
     subgroup_id: Optional[str] = None
+    is_excluded: bool = Field(default=False, nullable=False)
     created_at: datetime = Field(default_factory=datetime.utcnow, nullable=False)
 
 
@@ -69,6 +71,7 @@ class Group(SQLModel, table=True):
     company_id: str = Field(index=True, foreign_key="company.id")
     name: str
     apply_media_transform: bool = Field(default=False, nullable=False)
+    is_baseline: bool = Field(default=False, nullable=False)
     created_at: datetime = Field(default_factory=datetime.utcnow, nullable=False)
 
 
@@ -101,8 +104,6 @@ class Model(SQLModel, table=True):
     is_hero: bool = False  # legacy flag
     role: str = Field(default="none")  # hero|challenger1|challenger2|none
     apply_media_transforms: bool = Field(default=True, nullable=False)
-    conversion_rate: float | None = Field(default=None, nullable=True)
-    avg_value: float | None = Field(default=None, nullable=True)
     created_at: datetime = Field(default_factory=datetime.utcnow, nullable=False)
 
 
@@ -152,6 +153,27 @@ class InvestmentChannel(SQLModel, table=True):
     source_mode: str  # "dataset_column" | "rate_metric" | "manual"
     config_json: str  # shape depends on source_mode, see services/economics.py
     proxy_variable: str | None = Field(default=None, nullable=True)  # Variable.name; None = never modeled
+    created_at: datetime = Field(default_factory=utcnow, nullable=False)
+
+
+class ConversionSettings(SQLModel, table=True):
+    """Dataset-scoped conversion_rate/avg_value config, replacing the old per-Model fields of
+    the same name so every model fit on a dataset shares one economics config instead of each
+    needing its own. Each metric has its own source_mode (manual fixed value | dataset_column |
+    rate_metric), mirroring InvestmentChannel's 3 modes, since either can vary by row (e.g. an
+    avg-ticket column) instead of being a single constant."""
+
+    __table_args__ = (
+        UniqueConstraint("company_id", "dataset_id", name="uq_conversion_settings_company_dataset"),
+    )
+
+    id: str = Field(primary_key=True)
+    company_id: str = Field(index=True, foreign_key="company.id")
+    dataset_id: str = Field(index=True)
+    conversion_rate_mode: str  # "manual" | "dataset_column" | "rate_metric"
+    conversion_rate_config_json: str
+    avg_value_mode: str  # "manual" | "dataset_column" | "rate_metric"
+    avg_value_config_json: str
     created_at: datetime = Field(default_factory=utcnow, nullable=False)
 
 

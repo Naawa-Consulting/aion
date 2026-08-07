@@ -11,12 +11,12 @@ type ButtonProps = React.ButtonHTMLAttributes<HTMLButtonElement> & {
 export const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
   ({ className, variant = "primary", size = "md", ...props }, ref) => {
     const classes = clsx(
-      "rounded-full font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2",
+      "rounded-full font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 active:scale-[0.97] transition-transform duration-150",
       {
-        primary: "bg-[var(--color-accent)] text-white hover:bg-blue-600",
+        primary: "bg-[var(--color-accent)] text-white hover:opacity-90",
         secondary: "bg-[var(--color-accent-soft)] text-[var(--color-accent)]",
         ghost: "bg-transparent text-[var(--color-foreground)] hover:bg-[var(--color-accent-soft)]",
-        danger: "bg-red-500 text-white hover:bg-red-600",
+        danger: "bg-[var(--color-danger)] text-white hover:opacity-90",
       }[variant],
       {
         sm: "text-sm px-3 py-1.5",

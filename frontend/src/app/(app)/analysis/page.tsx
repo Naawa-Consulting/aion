@@ -7,17 +7,26 @@ import {
   BarChart,
   CartesianGrid,
   Legend,
+  Line,
+  LineChart,
+  ReferenceLine,
   ResponsiveContainer,
   Tooltip,
   XAxis,
   YAxis,
 } from "recharts";
 import { toast } from "sonner";
+import { useTheme } from "next-themes";
 import { Card, CardHeader } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { FilterBar, FilterField } from "@/components/ui/filter-bar";
 import { apiFetch, ApiError } from "@/lib/api";
-import { EconomicsSection } from "@/components/analysis/economics-section";
+import { ErrorText } from "@/components/ui/error-text";
+import { Select } from "@/components/ui/select";
+import { assignCategoricalColors, chartColor } from "@/lib/chart-colors";
+import { formatChartNumber, formatChartPercent } from "@/lib/chart-format";
+import { downloadBlob } from "@/lib/download";
+import { useGlobalStore } from "@/lib/store";
 
 type Dataset = { id: string; display_name: string; columns: { name: string; dtype: string }[] };
 type ModelRole = "hero" | "challenger1" | "challenger2";
@@ -53,6 +62,47 @@ type DatasetMeta = {
   date_max: string | null;
 };
 type DateBounds = { min: string | null; max: string | null };
+type ChannelEconomics = {
+  id: string;
+  name: string;
+  source_mode: string;
+  proxy_variable: string | null;
+  is_modeled: boolean;
+  proxy_in_current_model: boolean;
+  misconfigured: boolean;
+  investment: number;
+  revenue: number | null;
+  contribution: number | null;
+  roi: number | null;
+  roas: number | null;
+  share_of_investment: number;
+  share_of_contribution: number | null;
+};
+type EconomicsSummaryData = {
+  economics_configured: boolean;
+  totals: {
+    investment: number;
+    revenue: number;
+    contribution: number;
+    roi: number | null;
+    roas: number | null;
+    modeled_investment: number;
+    non_modeled_investment: number;
+  };
+  channels: ChannelEconomics[];
+};
+type EconomicsStackedData = {
+  index: string[];
+  totals: { investment: number[]; revenue: number[] };
+  series: { channel_id: string; channel_name: string; is_modeled: boolean; investment: number[]; revenue: (number | null)[] }[];
+};
+type ModelCoefficient = {
+  name: string;
+  is_media?: boolean;
+  hill_k?: number | null;
+  hill_s?: number | null;
+  raw_mean?: number | null;
+};
 
 const MODEL_ROLES: readonly ModelRole[] = ["hero", "challenger1", "challenger2"];
 const MODEL_ROLE_ORDER: Record<ModelRole, number> = {
@@ -106,6 +156,9 @@ const normalizeDatasetMeta = (raw: any): DatasetMeta => ({
 
 
 export default function AnalysisPage() {
+  const { resolvedTheme } = useTheme();
+  const isDarkTheme = resolvedTheme === "dark";
+  const { activeCompanyId } = useGlobalStore();
   const [datasets, setDatasets] = useState<Dataset[]>([]);
   const [selectedDataset, setSelectedDataset] = useState("");
   const [models, setModels] = useState<Model[]>([]);
@@ -119,8 +172,14 @@ export default function AnalysisPage() {
   const [asPercent, setAsPercent] = useState(false);
   const [includeBaseline, setIncludeBaseline] = useState(true);
   const [viewMode, setViewMode] = useState<"stacked" | "grouped">("stacked");
-  const [mainView, setMainView] = useState<"contribution" | "economics">("contribution");
   const [tableView, setTableView] = useState<"group" | "group_subgroup" | "variable">("group");
+  const [economics, setEconomics] = useState<EconomicsSummaryData | null>(null);
+  const [economicsStacked, setEconomicsStacked] = useState<EconomicsStackedData | null>(null);
+  const [economicsStackedLoading, setEconomicsStackedLoading] = useState(false);
+  const [economicsStackedError, setEconomicsStackedError] = useState<string | null>(null);
+  const [printedAt, setPrintedAt] = useState<string | null>(null);
+  const [highlightedChannel, setHighlightedChannel] = useState<string>("");
+  const [modelCoefficients, setModelCoefficients] = useState<ModelCoefficient[]>([]);
   const [loading, setLoading] = useState(false);
   const [dateRange, setDateRange] = useState<{ start: string | null; end: string | null }>({
     start: null,
@@ -168,8 +227,12 @@ export default function AnalysisPage() {
   }, []);
 
   useEffect(() => {
+    // activeCompanyId hydrates asynchronously (AuthBootstrap fetches /me/memberships and
+    // auto-selects the first company) — fetching before it's set sends no X-Company-Id
+    // header and the backend 422s. Wait for it, then re-fetch once it's ready.
+    if (!activeCompanyId) return;
     fetchDatasets();
-  }, [fetchDatasets]);
+  }, [fetchDatasets, activeCompanyId]);
 
   const fetchDatasetMeta = useCallback(async (datasetId: string) => {
     setTimeColumnDefault(null);
@@ -265,6 +328,36 @@ export default function AnalysisPage() {
     }
   }, [selectedModel, fetchSummary]);
 
+  const fetchEconomics = useCallback(async (modelId: string) => {
+    try {
+      const params = new URLSearchParams();
+      if (dateRange.start) params.set("start_date", dateRange.start);
+      if (dateRange.end) params.set("end_date", dateRange.end);
+      const data = await apiFetch<EconomicsSummaryData>(`/economics/${modelId}/summary?${params.toString()}`);
+      setEconomics(data);
+    } catch {
+      setEconomics(null);
+    }
+  }, [dateRange.start, dateRange.end]);
+
+  useEffect(() => {
+    if (selectedModel) {
+      fetchEconomics(selectedModel);
+    } else {
+      setEconomics(null);
+    }
+  }, [selectedModel, fetchEconomics]);
+
+  useEffect(() => {
+    if (!selectedModel) {
+      setModelCoefficients([]);
+      return;
+    }
+    apiFetch<{ coefficients: ModelCoefficient[] }>(`/models/${selectedModel}/summary`)
+      .then((data) => setModelCoefficients(data.coefficients || []))
+      .catch(() => setModelCoefficients([]));
+  }, [selectedModel]);
+
   const fetchStacked = useCallback(async () => {
     if (!selectedModel || !timeCol || timeCol === TIME_COLUMN_PLACEHOLDER) {
       return;
@@ -334,6 +427,12 @@ export default function AnalysisPage() {
       return next;
     });
   };
+
+  useEffect(() => {
+    const handleBeforePrint = () => setPrintedAt(new Date().toLocaleString());
+    window.addEventListener("beforeprint", handleBeforePrint);
+    return () => window.removeEventListener("beforeprint", handleBeforePrint);
+  }, []);
 
   const downloadSummary = async () => {
     if (!selectedModel) return;
@@ -437,6 +536,12 @@ export default function AnalysisPage() {
 
     value === null || value === undefined ? DASH : numberFormatter.format(value);
 
+  const fmtRoi = (value: number | null | undefined) =>
+    value === null || value === undefined || !Number.isFinite(value) ? DASH : `${(value * 100).toFixed(1)}%`;
+
+  const fmtRoas = (value: number | null | undefined) =>
+    value === null || value === undefined || !Number.isFinite(value) ? DASH : `${value.toFixed(2)}x`;
+
   const percentOfTotal = (value: number | null | undefined) => {
 
     if (!summary || summary.total_contribution === 0 || value === null || value === undefined) {
@@ -451,16 +556,54 @@ export default function AnalysisPage() {
 
   const readyForStacked = Boolean(selectedModel && timeCol && timeCol !== TIME_COLUMN_PLACEHOLDER);
 
-  const formatStackedValue = useCallback((value: number | string | null | undefined) => {
-    const num = Number(value);
-    if (!Number.isFinite(num)) {
-      return asPercent ? "0%" : "0";
+  const fetchEconomicsStacked = useCallback(async () => {
+    if (!selectedModel || !readyForStacked) return;
+    setEconomicsStackedLoading(true);
+    setEconomicsStackedError(null);
+    try {
+      const params = new URLSearchParams({ time_col: timeCol, freq });
+      if (dateRange.start) params.set("start_date", dateRange.start);
+      if (dateRange.end) params.set("end_date", dateRange.end);
+      const data = await apiFetch<EconomicsStackedData>(`/economics/${selectedModel}/stacked?${params.toString()}`);
+      setEconomicsStacked(data);
+    } catch (err) {
+      setEconomicsStacked(null);
+      setEconomicsStackedError(
+        (err instanceof ApiError ? err.message : (err as Error)?.message) || "Failed to load economics timeseries"
+      );
+    } finally {
+      setEconomicsStackedLoading(false);
     }
-    if (asPercent) {
-      return `${num.toFixed(1)}%`;
-    }
-    return Math.round(num).toLocaleString();
-  }, [asPercent]);
+  }, [selectedModel, readyForStacked, timeCol, freq, dateRange.start, dateRange.end]);
+
+  useEffect(() => {
+    const handle = setTimeout(() => {
+      fetchEconomicsStacked();
+    }, 250);
+    return () => clearTimeout(handle);
+  }, [fetchEconomicsStacked]);
+
+  useEffect(() => {
+    setHighlightedChannel("");
+  }, [selectedModel]);
+
+  const economicsChartData = useMemo(() => {
+    if (!economicsStacked) return [];
+    const selectedSeries = economicsStacked.series.find((s) => s.channel_id === highlightedChannel);
+    return economicsStacked.index.map((label, idx) => ({
+      period: label,
+      investment: economicsStacked.totals.investment[idx],
+      revenue: economicsStacked.totals.revenue[idx],
+      channel_investment: selectedSeries ? selectedSeries.investment[idx] : undefined,
+      channel_revenue: selectedSeries ? selectedSeries.revenue[idx] ?? undefined : undefined,
+    }));
+  }, [economicsStacked, highlightedChannel]);
+
+  const formatStackedValue = useCallback(
+    (value: number | string | null | undefined) =>
+      asPercent ? formatChartPercent(value, 1) : formatChartNumber(value, 0),
+    [asPercent]
+  );
 
 
 
@@ -485,6 +628,11 @@ export default function AnalysisPage() {
     return arr;
 
   }, [stacked]);
+
+  const seriesColorMap = useMemo(
+    () => assignCategoricalColors(sortedSeries.map((series) => series.key), isDarkTheme),
+    [sortedSeries, isDarkTheme]
+  );
 
 
 
@@ -580,55 +728,131 @@ export default function AnalysisPage() {
 
   const baselineGroup = summary?.groups.find((g: any) => g.group_id === "baseline");
 
+  const varMetaMap = useMemo(() => {
+    const map = new Map<string, { group_id?: string; subgroup_id?: string }>();
+    (summary?.variables || []).forEach((v: any) => map.set(v.name, { group_id: v.group_id, subgroup_id: v.subgroup_id }));
+    return map;
+  }, [summary]);
+
+  const channelByVariable = useMemo(() => {
+    const map = new Map<string, ChannelEconomics>();
+    (economics?.channels || []).forEach((ch) => {
+      if (ch.proxy_variable && ch.proxy_in_current_model) map.set(ch.proxy_variable, ch);
+    });
+    return map;
+  }, [economics]);
+
+  const unmatchedChannels = useMemo(
+    () => (economics?.channels || []).filter((ch) => !ch.proxy_variable || !ch.proxy_in_current_model),
+    [economics]
+  );
+
+  // Folds ROI/ROAS/investment/revenue onto the same contribution rows instead of a separate
+  // "Economía" table — variable-grain rows match 1:1 via proxy_variable; group/subgroup-grain
+  // rows sum every channel whose proxy variable belongs to that group/subgroup. Channels with no
+  // usable proxy still show up (as "Sin modelar") so real spend is never silently dropped.
+  const enrichedTableRows = useMemo(() => {
+    const rows = tableRows as any[];
+    if (!economics) return rows;
+
+    if (tableView === "variable") {
+      const withEcon = rows.map((row) => {
+        const ch = channelByVariable.get(row.name);
+        return ch
+          ? { ...row, investment: ch.investment, revenue: ch.revenue, roi: ch.roi, roas: ch.roas }
+          : { ...row, investment: null, revenue: null, roi: null, roas: null };
+      });
+      if (unmatchedChannels.length) {
+        withEcon.push(
+          ...unmatchedChannels.map((ch) => ({
+            name: ch.name,
+            group_name: "Sin modelar",
+            subgroup_name: null,
+            contribution: null,
+            percent: null,
+            investment: ch.investment,
+            revenue: ch.revenue,
+            roi: ch.roi,
+            roas: ch.roas,
+          }))
+        );
+      }
+      return withEcon;
+    }
+
+    const keyField = tableView === "group_subgroup" && hasSubgroups ? "subgroup_id" : "group_id";
+    const byKey = new Map<string, { investment: number; revenue: number }>();
+    channelByVariable.forEach((ch, varName) => {
+      const meta = varMetaMap.get(varName);
+      const key = (keyField === "subgroup_id" ? meta?.subgroup_id : meta?.group_id) || "__other__";
+      const agg = byKey.get(key) || { investment: 0, revenue: 0 };
+      agg.investment += ch.investment;
+      agg.revenue += ch.revenue ?? 0;
+      byKey.set(key, agg);
+    });
+    const withEcon = rows.map((row) => {
+      const key = row[keyField] || "__other__";
+      const agg = byKey.get(key);
+      if (!agg) return { ...row, investment: null, revenue: null, roi: null, roas: null };
+      const roi = agg.investment ? (agg.revenue - agg.investment) / agg.investment : null;
+      const roas = agg.investment ? agg.revenue / agg.investment : null;
+      return { ...row, investment: agg.investment, revenue: agg.revenue, roi, roas };
+    });
+    if (unmatchedChannels.length) {
+      const investment = unmatchedChannels.reduce((sum, ch) => sum + ch.investment, 0);
+      withEcon.push({
+        group_id: "__unmatched__",
+        group_name: "Sin modelar",
+        subgroup_id: "__unmatched__",
+        subgroup_name: "Sin modelar",
+        contribution: null,
+        percent: null,
+        investment,
+        revenue: null,
+        roi: null,
+        roas: null,
+      });
+    }
+    return withEcon;
+  }, [tableRows, tableView, hasSubgroups, channelByVariable, unmatchedChannels, varMetaMap, economics]);
+
   return (
     <section className="space-y-6">
       <header className="space-y-4">
-        <div className="flex flex-wrap items-center justify-between gap-4">
+        <div className="flex flex-wrap items-center justify-between gap-4 no-print">
           <div>
             <p className="text-sm text-[var(--color-muted)]">Module 4</p>
             <h1 className="text-2xl font-semibold">Analysis & Attribution</h1>
           </div>
-          <div className="inline-flex overflow-hidden rounded-full border border-[var(--color-border)] text-sm">
-            <button
-              type="button"
-              className={`px-4 py-1.5 transition ${
-                mainView === "contribution" ? "bg-[var(--color-foreground)] text-white" : "text-[var(--color-muted)]"
-              }`}
-              onClick={() => setMainView("contribution")}
-            >
-              Contribución
-            </button>
-            <button
-              type="button"
-              className={`px-4 py-1.5 transition ${
-                mainView === "economics" ? "bg-[var(--color-foreground)] text-white" : "text-[var(--color-muted)]"
-              }`}
-              onClick={() => setMainView("economics")}
-            >
-              Economía
-            </button>
-          </div>
+          <Button variant="ghost" onClick={() => window.print()} disabled={!summary}>
+            Imprimir reporte
+          </Button>
         </div>
-        <FilterBar>
+        <div className="print-only space-y-1 pb-4 border-b border-[var(--color-border)]">
+          <p className="text-sm text-[var(--color-muted)]">Aion — Reporte ejecutivo</p>
+          <h1 className="text-xl font-semibold">
+            {datasets.find((ds) => ds.id === selectedDataset)?.display_name || "Dataset"} · {summary?.model?.name || "Model"}
+          </h1>
+          <p className="text-sm text-[var(--color-muted)]">
+            Variable objetivo: {summary?.model?.y_var || "—"}
+            {dateRange.start || dateRange.end
+              ? ` · Periodo: ${dateRange.start || "inicio"} – ${dateRange.end || "actual"}`
+              : ""}
+          </p>
+          {printedAt && <p className="text-xs text-[var(--color-muted)]">Generado: {printedAt}</p>}
+        </div>
+        <FilterBar className="no-print">
           <FilterField label="DATASET" className="w-[240px]">
-            <select
-              className="w-full rounded-full border border-[var(--color-border)] bg-transparent px-4 py-2"
-              value={selectedDataset}
-              onChange={(e) => setSelectedDataset(e.target.value)}
-            >
+            <Select value={selectedDataset} onChange={(e) => setSelectedDataset(e.target.value)}>
               {datasets.map((ds) => (
                 <option key={ds.id} value={ds.id}>
                   {ds.display_name}
                 </option>
               ))}
-            </select>
+            </Select>
           </FilterField>
           <FilterField label="MODEL" className="w-[260px]">
-            <select
-              className="w-full rounded-full border border-[var(--color-border)] bg-transparent px-4 py-2"
-              value={selectedModel}
-              onChange={(e) => setSelectedModel(e.target.value)}
-            >
+            <Select value={selectedModel} onChange={(e) => setSelectedModel(e.target.value)}>
               {models.map((m) => (
                 <option key={m.id} value={m.id}>
                   {m.role && MODEL_ROLE_LABEL[m.role as ModelRole]
@@ -636,7 +860,7 @@ export default function AnalysisPage() {
                     : m.name}
                 </option>
               ))}
-            </select>
+            </Select>
           </FilterField>
           <FilterField label="DATE RANGE" className="flex-1 min-w-[280px]">
             <div className="flex flex-wrap gap-3">
@@ -664,16 +888,16 @@ export default function AnalysisPage() {
         </FilterBar>
       </header>
 
-      {mainView === "economics" ? (
-        <EconomicsSection
-          modelId={selectedModel}
-          timeCol={timeCol}
-          freq={freq}
-          dateRange={dateRange}
-          readyForTimeseries={readyForStacked}
-        />
-      ) : (
-      <>
+      {economics && economics.channels.length > 0 && !economics.economics_configured && (
+        <Card className="border-[var(--color-warning)]/60 bg-[var(--color-warning-soft)]">
+          <p className="text-sm">
+            Configura tasa de conversión y valor promedio en{" "}
+            <span className="underline font-medium">Transform → Conversion settings</span> para calcular ROI/ROAS de
+            este modelo.
+          </p>
+        </Card>
+      )}
+
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
         <Card padding="sm">
           <CardHeader title="Total" subtitle={summary?.model?.y_var || "—"} />
@@ -700,25 +924,42 @@ export default function AnalysisPage() {
         ))}
       </div>
 
+      {economics && economics.channels.length > 0 && (
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+          <Card padding="sm">
+            <CardHeader title="Inversión total" subtitle="Todos los canales" />
+            <p className="text-lg font-semibold">{formatNumber(economics.totals.investment)}</p>
+          </Card>
+          <Card padding="sm">
+            <CardHeader title="Ingreso total" subtitle="Canales modelados" />
+            <p className="text-lg font-semibold">{formatNumber(economics.totals.revenue)}</p>
+          </Card>
+          <Card padding="sm">
+            <CardHeader title="ROI" subtitle="(ingreso − inversión) / inversión" />
+            <p className="text-lg font-semibold">{fmtRoi(economics.totals.roi)}</p>
+          </Card>
+          <Card padding="sm">
+            <CardHeader title="ROAS" subtitle="ingreso / inversión" />
+            <p className="text-lg font-semibold">{fmtRoas(economics.totals.roas)}</p>
+          </Card>
+        </div>
+      )}
+
       <div className="my-6 border-t border-[var(--color-border)]" />
 
       <Card className="space-y-4">
         <CardHeader title="Summary Table" subtitle="Variable contributions and group mapping" />
-        <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex flex-wrap items-center justify-between gap-3 no-print">
           <div className="flex flex-wrap gap-3 text-sm">
             <label className="flex items-center gap-2">
               <input type="checkbox" checked={includeBaseline} onChange={(e) => setIncludeBaseline(e.target.checked)} />
               Include baseline
             </label>
-            <select
-              className="rounded-full border border-[var(--color-border)] px-3 py-1.5 bg-transparent"
-              value={tableView}
-              onChange={(e) => setTableView(e.target.value as any)}
-            >
+            <Select wrapperClassName="w-auto" value={tableView} onChange={(e) => setTableView(e.target.value as any)}>
               <option value="group">Group</option>
               <option value="group_subgroup">Group / Subgroup</option>
               <option value="variable">Group / Subgroup / Variable</option>
-            </select>
+            </Select>
           </div>
           <Button variant="ghost" onClick={downloadSummaryTable} disabled={!summary}>
             Export Excel
@@ -734,10 +975,18 @@ export default function AnalysisPage() {
                   {tableView === "variable" && <th className="px-2 py-2 text-left">Variable</th>}
                   <th className="px-2 py-2 text-left">Contribution</th>
                   <th className="px-2 py-2 text-left">% of total</th>
+                  {economics && (
+                    <>
+                      <th className="px-2 py-2 text-right">Inversión</th>
+                      <th className="px-2 py-2 text-right">Ingreso</th>
+                      <th className="px-2 py-2 text-right">ROI</th>
+                      <th className="px-2 py-2 text-right">ROAS</th>
+                    </>
+                  )}
                 </tr>
               </thead>
               <tbody>
-                {tableRows.map((row: any, idx: number) => (
+                {enrichedTableRows.map((row: any, idx: number) => (
                   <tr
                     key={`${row.group_id || row.subgroup_id || row.name}-${idx}`}
                     className="odd:bg-transparent even:bg-[var(--color-border)]/20"
@@ -745,12 +994,20 @@ export default function AnalysisPage() {
                     <td className="px-2 py-2">{row.group_name || DASH}</td>
                     {tableView !== "group" && <td className="px-2 py-2">{row.subgroup_name || DASH}</td>}
                     {tableView === "variable" && <td className="px-2 py-2">{row.name}</td>}
-                    <td className="px-2 py-2">{formatNumber(row.contribution)}</td>
+                    <td className="px-2 py-2">{row.contribution != null ? formatNumber(row.contribution) : DASH}</td>
                     <td className="px-2 py-2">
                       {row.percent != null
                         ? `${percentFormatter.format(row.percent)}%`
                         : percentOfTotal(row.contribution)}
                     </td>
+                    {economics && (
+                      <>
+                        <td className="px-2 py-2 text-right">{row.investment != null ? formatNumber(row.investment) : DASH}</td>
+                        <td className="px-2 py-2 text-right">{row.revenue != null ? formatNumber(row.revenue) : DASH}</td>
+                        <td className="px-2 py-2 text-right">{row.roi != null ? fmtRoi(row.roi) : DASH}</td>
+                        <td className="px-2 py-2 text-right">{row.roas != null ? fmtRoas(row.roas) : DASH}</td>
+                      </>
+                    )}
                   </tr>
                 ))}
               </tbody>
@@ -763,36 +1020,24 @@ export default function AnalysisPage() {
 
       <Card className="space-y-4">
         <CardHeader title="Contributions over time" subtitle="Stride through periods and groups" />
-        <div className="flex flex-wrap gap-3 text-sm">
-          <select
-            className="rounded-full border border-[var(--color-border)] px-3 py-1.5 bg-transparent"
-            value={timeCol}
-            onChange={(e) => setTimeCol(e.target.value)}
-          >
+        <div className="flex flex-wrap gap-3 text-sm no-print">
+          <Select wrapperClassName="w-auto" value={timeCol} onChange={(e) => setTimeCol(e.target.value)}>
             <option value={TIME_COLUMN_PLACEHOLDER}>Time column</option>
             {timeColumns.map((col) => (
               <option key={col} value={col}>
                 {col}
               </option>
             ))}
-          </select>
-          <select
-            className="rounded-full border border-[var(--color-border)] px-3 py-1.5 bg-transparent"
-            value={freq}
-            onChange={(e) => setFreq(e.target.value as any)}
-          >
+          </Select>
+          <Select wrapperClassName="w-auto" value={freq} onChange={(e) => setFreq(e.target.value as any)}>
             <option value="day">Day</option>
             <option value="week">Week</option>
             <option value="month">Month</option>
-          </select>
-          <select
-            className="rounded-full border border-[var(--color-border)] px-3 py-1.5 bg-transparent"
-            value={groupBy}
-            onChange={(e) => setGroupBy(e.target.value as any)}
-          >
+          </Select>
+          <Select wrapperClassName="w-auto" value={groupBy} onChange={(e) => setGroupBy(e.target.value as any)}>
             <option value="group">Group</option>
             <option value="subgroup">Subgroup</option>
-          </select>
+          </Select>
           <label className="flex items-center gap-2">
             <input type="checkbox" checked={asPercent} onChange={(e) => setAsPercent(e.target.checked)} />
             Percent mode
@@ -868,8 +1113,8 @@ export default function AnalysisPage() {
                   key={series.key}
                   dataKey={series.key}
                   stackId={viewMode === "stacked" ? "a" : undefined}
-                  fill={colorFor(series.key)}
-                  stroke={colorFor(series.key)}
+                  fill={seriesColorMap[series.key]}
+                  stroke={seriesColorMap[series.key]}
                   fillOpacity={
                     highlightedKey && highlightedKey !== series.key ? 0.25 : 1
                   }
@@ -885,7 +1130,7 @@ export default function AnalysisPage() {
           </ResponsiveContainer>
         </div>
         {stackedError && !stackedLoading && (
-          <p className="text-xs text-red-500">Couldn&rsquo;t load stacked contributions. Please try again.</p>
+          <ErrorText className="text-xs">Couldn&rsquo;t load stacked contributions. Please try again.</ErrorText>
         )}
         {!stackedError && !stackedLoading && chartSeries.length === 0 && readyForStacked && (
           <p className="text-sm text-[var(--color-muted)]">No data for the selected filters.</p>
@@ -896,27 +1141,145 @@ export default function AnalysisPage() {
           </p>
         )}
       </Card>
-      </>
+
+      {economics && economics.channels.length > 0 && (
+        <Card className="space-y-4">
+          <CardHeader title="Inversión vs. ingreso en el tiempo" subtitle="Total por periodo, con canal opcional resaltado" />
+          {!readyForStacked ? (
+            <p className="text-sm text-[var(--color-muted)]">
+              Selecciona una columna de tiempo arriba para ver la serie.
+            </p>
+          ) : (
+            <>
+              <div className="flex flex-wrap items-center gap-3 text-sm">
+                <Select
+                  wrapperClassName="min-w-[220px]"
+                  value={highlightedChannel}
+                  onChange={(e) => setHighlightedChannel(e.target.value)}
+                >
+                  <option value="">Resaltar canal (opcional)</option>
+                  {(economicsStacked?.series || []).map((s) => (
+                    <option key={s.channel_id} value={s.channel_id}>
+                      {s.channel_name}
+                    </option>
+                  ))}
+                </Select>
+              </div>
+              <div
+                className={`h-80 transition-opacity duration-300 ${
+                  economicsStackedLoading ? "opacity-40 pointer-events-none" : "opacity-100"
+                }`}
+              >
+                <ResponsiveContainer width="100%" height="100%">
+                  <LineChart data={economicsChartData} margin={{ top: 10, right: 24, left: 24, bottom: 16 }}>
+                    <CartesianGrid strokeDasharray="3 3" />
+                    <XAxis dataKey="period" tickMargin={8} />
+                    <YAxis tickMargin={12} />
+                    <Tooltip />
+                    <Legend />
+                    <Line type="monotone" dataKey="investment" name="Inversión total" stroke={chartColor(1, isDarkTheme)} dot={false} />
+                    <Line type="monotone" dataKey="revenue" name="Ingreso total" stroke={chartColor(2, isDarkTheme)} dot={false} />
+                    {highlightedChannel && (
+                      <Line
+                        type="monotone"
+                        dataKey="channel_investment"
+                        name="Inversión (canal)"
+                        stroke={chartColor(1, isDarkTheme)}
+                        strokeDasharray="4 4"
+                        dot={false}
+                      />
+                    )}
+                    {highlightedChannel && (
+                      <Line
+                        type="monotone"
+                        dataKey="channel_revenue"
+                        name="Ingreso (canal)"
+                        stroke={chartColor(2, isDarkTheme)}
+                        strokeDasharray="4 4"
+                        dot={false}
+                      />
+                    )}
+                  </LineChart>
+                </ResponsiveContainer>
+              </div>
+              {economicsStackedError && !economicsStackedLoading && (
+                <ErrorText className="text-xs">Couldn&rsquo;t load economics timeseries. Please try again.</ErrorText>
+              )}
+            </>
+          )}
+        </Card>
+      )}
+
+      {modelCoefficients.some((c) => c.is_media) && (
+        <Card className="space-y-4">
+          <CardHeader
+            title="Curvas de saturación"
+            subtitle="Punto de inversión actual vs. la curva de respuesta completa del canal — para justificar decisiones de inversión"
+          />
+          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+            {modelCoefficients
+              .filter((c) => c.is_media)
+              .map((c) => (
+                <SaturationCurveChart
+                  key={c.name}
+                  coef={c}
+                  isDark={isDarkTheme}
+                  channel={channelByVariable.get(c.name)}
+                />
+              ))}
+          </div>
+        </Card>
       )}
     </section>
   );
 }
 
-function colorFor(key: string) {
-  let hash = 0;
-  for (let i = 0; i < key.length; i++) {
-    hash = key.charCodeAt(i) + ((hash << 5) - hash);
-  }
-  const color = Math.floor((Math.abs(hash) % 16777215));
-  return `#${color.toString(16).padStart(6, "0")}`;
-}
-
-function downloadBlob(blob: Blob, filename: string) {
-  const a = document.createElement("a");
-  a.href = URL.createObjectURL(blob);
-  a.download = filename;
-  a.click();
-  URL.revokeObjectURL(a.href);
+function SaturationCurveChart({
+  coef,
+  isDark,
+  channel,
+}: {
+  coef: ModelCoefficient;
+  isDark: boolean;
+  channel?: ChannelEconomics;
+}) {
+  const k = coef.hill_k ?? 0;
+  const s = coef.hill_s ?? 1;
+  if (!k || !s) return null;
+  const maxX = k * 4;
+  const points = Array.from({ length: 61 }, (_, i) => {
+    const x = (maxX * i) / 60;
+    const xs = Math.pow(x, s);
+    const ks = Math.pow(k, s);
+    return { x, y: xs / (ks + xs || 1) };
+  });
+  return (
+    <div className="space-y-1">
+      <p className="text-xs font-medium truncate">{coef.name}</p>
+      <ResponsiveContainer width="100%" height={140}>
+        <LineChart data={points} margin={{ top: 4, right: 8, bottom: 0, left: -20 }}>
+          <CartesianGrid strokeDasharray="3 3" opacity={0.2} />
+          <XAxis dataKey="x" tick={{ fontSize: 10 }} tickFormatter={(v) => Number(v).toFixed(0)} />
+          <YAxis domain={[0, 1]} tick={{ fontSize: 10 }} />
+          <Tooltip formatter={(v: number) => v.toFixed(3)} labelFormatter={(v: number) => `x=${Number(v).toFixed(1)}`} />
+          <Line type="monotone" dataKey="y" stroke={chartColor(0, isDark)} dot={false} strokeWidth={2} />
+          {coef.raw_mean != null && (
+            <ReferenceLine
+              x={coef.raw_mean}
+              stroke={chartColor(7, isDark)}
+              strokeDasharray="4 4"
+              label={{ value: "nivel actual", fontSize: 10, position: "insideTopRight" }}
+            />
+          )}
+        </LineChart>
+      </ResponsiveContainer>
+      {channel && (
+        <p className="text-2xs text-[var(--color-muted)]">
+          Inversión real: {channel.investment.toLocaleString(undefined, { maximumFractionDigits: 0 })} ({channel.name})
+        </p>
+      )}
+    </div>
+  );
 }
 
 
@@ -957,7 +1320,7 @@ const StackChartTooltip: React.FC<CustomTooltipProps> = ({
       : "0.00";
 
   return (
-    <div className="rounded-lg border border-black/10 bg-white/95 px-3 py-2 shadow-lg">
+    <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-card)] px-3 py-2 shadow-lg">
       <div className="mb-1 text-xs font-semibold text-[var(--color-foreground)]">{label}</div>
       <div className="space-y-1">
         {payload.map((entry) => {

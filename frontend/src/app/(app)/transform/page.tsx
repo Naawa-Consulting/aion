@@ -19,11 +19,15 @@ import { Card, CardHeader } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
+import { ErrorText } from "@/components/ui/error-text";
+import { Select } from "@/components/ui/select";
+import { Eyebrow } from "@/components/ui/eyebrow";
 import { useGlobalStore } from "@/lib/store";
 import { useKeyboardShortcut } from "@/hooks/useKeyboardShortcut";
 import { apiFetch, ApiError } from "@/lib/api";
 import { useCanEdit } from "@/hooks/useCanEdit";
 import { InvestmentChannels } from "@/components/transform/investment-channels";
+import { ConversionSettingsCard } from "@/components/transform/conversion-settings";
 
 type Dataset = { id: string; display_name: string; columns: { name: string; dtype: string }[] };
 
@@ -44,9 +48,10 @@ type Group = {
   id: string;
   name: string;
   apply_media_transform: boolean;
+  is_baseline: boolean;
   subgroups: { id: string; name: string; group_id: string; apply_media_transform: boolean }[];
 };
-type TransformOp = "lag" | "decay" | "log" | "add" | "sub" | "mul" | "div";
+type TransformOp = "lag" | "decay" | "log" | "add" | "sub" | "mul" | "div" | "hill" | "adstock";
 type PreviewPayload = {
   dataset_id: string;
   operation: TransformOp;
@@ -59,7 +64,7 @@ type PreviewPayload = {
 type HistoryItem = { id: string; op: string; params: Record<string, any>; created_at: string };
 
 export default function TransformPage() {
-  const { datasetId, setDatasetId } = useGlobalStore();
+  const { datasetId, setDatasetId, activeCompanyId } = useGlobalStore();
   const canEdit = useCanEdit();
   const [datasets, setDatasets] = useState<Dataset[]>([]);
   const [variables, setVariables] = useState<Variable[]>([]);
@@ -70,12 +75,19 @@ export default function TransformPage() {
   const [column, setColumn] = useState("");
   const [n, setN] = useState(1);
   const [alpha, setAlpha] = useState(0.5);
+  const [hillK, setHillK] = useState(1);
+  const [hillS, setHillS] = useState(1);
+  const [adstockDecay, setAdstockDecay] = useState(0.5);
   const [left, setLeft] = useState("");
   const [right, setRight] = useState("");
   const [newName, setNewName] = useState("");
   const [search, setSearch] = useState("");
   const [dtypeFilter, setDtypeFilter] = useState("");
 const [showDerivedOnly, setShowDerivedOnly] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [bulkGroupId, setBulkGroupId] = useState("");
+  const [bulkSubgroupId, setBulkSubgroupId] = useState("");
+  const [bulkApplying, setBulkApplying] = useState(false);
   const [showPreview, setShowPreview] = useState(true);
   const [previewData, setPreviewData] = useState<{ time: (string | number)[]; original: (number | null)[]; transformed: (number | null)[]; stats?: { mean_original?: number; mean_transformed?: number; correlation?: number } } | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
@@ -138,9 +150,17 @@ const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
       if (!column) return null;
       return { ...base, column, params: {} };
     }
+    if (op === "hill") {
+      if (!column) return null;
+      return { ...base, column, params: { k: hillK, s: hillS } as Record<string, string | number | boolean | null> };
+    }
+    if (op === "adstock") {
+      if (!column) return null;
+      return { ...base, column, params: { decay: adstockDecay } as Record<string, string | number | boolean | null> };
+    }
     if (!left || !right) return null;
     return { ...base, column: left, params: { left, right } };
-  }, [activeDatasetId, op, column, n, alpha, left, right]);
+  }, [activeDatasetId, op, column, n, alpha, hillK, hillS, adstockDecay, left, right]);
   const runPreview = useCallback(
     async (payload: PreviewPayload, signal?: AbortSignal) => {
       setPreviewLoading(true);
@@ -293,9 +313,13 @@ const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
     }, []);
 
     useEffect(() => {
+      // activeCompanyId hydrates asynchronously (AuthBootstrap fetches /me/memberships and
+      // auto-selects the first company) — fetching before it's set sends no X-Company-Id
+      // header and the backend 422s ("Failed to load datasets"/"Failed to load groups").
+      if (!activeCompanyId) return;
       fetchDatasets();
       fetchGroups();
-    }, [fetchDatasets, fetchGroups]);
+    }, [fetchDatasets, fetchGroups, activeCompanyId]);
 
   const startGroupRename = (group: Group) => {
     setEditingGroupId(group.id);
@@ -409,6 +433,26 @@ const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
       toast.success(next ? `"${group.name}" now applies adstock + saturation` : `"${group.name}" no longer applies adstock + saturation`);
     } catch (error: any) {
       setGroups((prev) => prev.map((g) => (g.id === group.id ? { ...g, apply_media_transform: !next } : g)));
+      toast.error((error as Error)?.message || "Failed to update group");
+    }
+  };
+
+  const toggleGroupBaseline = async (group: Group) => {
+    const next = !group.is_baseline;
+    // is_baseline is unique per company — the backend clears it on every other group when one is
+    // set, so mirror that locally too (not just flip this one group) to avoid a stale UI showing
+    // two "baseline" groups until the next fetchGroups().
+    const previous = groups;
+    setGroups((prev) => prev.map((g) => ({ ...g, is_baseline: g.id === group.id ? next : next ? false : g.is_baseline })));
+    try {
+      await apiFetch(`/groups/${group.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ is_baseline: next }),
+      });
+      toast.success(next ? `"${group.name}" is now the baseline group` : `"${group.name}" is no longer the baseline group`);
+    } catch (error: any) {
+      setGroups(previous);
       toast.error((error as Error)?.message || "Failed to update group");
     }
   };
@@ -536,6 +580,13 @@ const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
         payload.alpha = alpha;
       } else if (op === "log") {
         payload.column = column;
+      } else if (op === "hill") {
+        payload.column = column;
+        payload.k = hillK;
+        payload.s = hillS;
+      } else if (op === "adstock") {
+        payload.column = column;
+        payload.decay = adstockDecay;
       } else {
         payload.left = left;
         payload.right = right;
@@ -567,6 +618,70 @@ const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
       toast.success("Categorization updated");
     } catch (err: any) {
       toast.error((err as Error)?.message || "Failed to categorize");
+    }
+  };
+
+  const toggleSelected = (variableId: string) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(variableId)) next.delete(variableId);
+      else next.add(variableId);
+      return next;
+    });
+  };
+
+  const toggleSelectAllFiltered = () => {
+    setSelectedIds((prev) => {
+      const allSelected = filteredVariables.length > 0 && filteredVariables.every((v) => prev.has(v.id));
+      if (allSelected) return new Set();
+      return new Set(filteredVariables.map((v) => v.id));
+    });
+  };
+
+  const handleBulkAssign = async () => {
+    if (selectedIds.size === 0) return;
+    setBulkApplying(true);
+    try {
+      const updated = await apiFetch<Variable[]>("/variables/bulk-categorize", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          variable_ids: Array.from(selectedIds),
+          group_id: bulkGroupId || null,
+          subgroup_id: bulkSubgroupId || null,
+        }),
+      });
+      const byId = new Map(updated.map((v) => [v.id, v]));
+      setVariables((prev) => prev.map((v) => byId.get(v.id) ?? v));
+      fetchGroups();
+      toast.success(`Categorized ${updated.length} variable${updated.length === 1 ? "" : "s"}`);
+      setSelectedIds(new Set());
+      setBulkGroupId("");
+      setBulkSubgroupId("");
+    } catch (err: any) {
+      toast.error((err as Error)?.message || "Failed to categorize selection");
+    } finally {
+      setBulkApplying(false);
+    }
+  };
+
+  const handleBulkToggleExcluded = async (exclude: boolean) => {
+    if (selectedIds.size === 0) return;
+    setBulkApplying(true);
+    try {
+      const updated = await apiFetch<Variable[]>("/variables/bulk-categorize", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ variable_ids: Array.from(selectedIds), is_excluded: exclude }),
+      });
+      const byId = new Map(updated.map((v) => [v.id, v]));
+      setVariables((prev) => prev.map((v) => byId.get(v.id) ?? v));
+      toast.success(exclude ? `Hid ${updated.length} variable(s)` : `Unhid ${updated.length} variable(s)`);
+      setSelectedIds(new Set());
+    } catch (err: any) {
+      toast.error((err as Error)?.message || "Failed to update selection");
+    } finally {
+      setBulkApplying(false);
     }
   };
 
@@ -618,8 +733,8 @@ const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
           <h1 className="text-2xl font-semibold tracking-tight">Transform &amp; Categorize</h1>
         </div>
         <div className="flex items-center gap-3">
-          <select
-            className="rounded-full border border-[var(--color-border)] px-4 py-2 text-sm bg-transparent"
+          <Select
+            wrapperClassName="w-auto"
             value={activeDatasetId ?? ""}
             onChange={(e) => {
               setSelectedDataset(e.target.value);
@@ -631,7 +746,7 @@ const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
                 {d.display_name}
               </option>
             ))}
-          </select>
+          </Select>
           <Button
             variant="secondary"
             size="sm"
@@ -649,28 +764,76 @@ const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
           <CardHeader title="Variables" subtitle="Search & drag to categorize" />
           <Input placeholder="Search variables" value={search} onChange={(e) => setSearch(e.target.value)} />
           <div className="flex gap-2 text-sm">
-            <select
-              className="w-full rounded-full border border-[var(--color-border)] px-3 py-2 bg-transparent"
-              value={dtypeFilter}
-              onChange={(e) => setDtypeFilter(e.target.value)}
-            >
+            <Select value={dtypeFilter} onChange={(e) => setDtypeFilter(e.target.value)}>
               <option value="">All dtypes</option>
               {dtypeOptions.map((opt) => (
                 <option key={opt} value={opt}>
                   {opt}
                 </option>
               ))}
-            </select>
+            </Select>
             <label className="flex items-center gap-2 text-xs text-[var(--color-muted)]">
               <input type="checkbox" checked={showDerivedOnly} onChange={(e) => setShowDerivedOnly(e.target.checked)} />
               Derived only
             </label>
           </div>
+          <label className="flex items-center gap-2 text-xs text-[var(--color-muted)]">
+            <input
+              type="checkbox"
+              checked={filteredVariables.length > 0 && filteredVariables.every((v) => selectedIds.has(v.id))}
+              onChange={toggleSelectAllFiltered}
+            />
+            Select all filtered ({filteredVariables.length})
+          </label>
+          {selectedIds.size > 0 && (
+            <div className="rounded-xl border border-dashed border-[var(--color-border)] p-3 space-y-2 text-xs">
+              <p className="font-medium text-sm">{selectedIds.size} selected</p>
+              <div className="flex flex-wrap gap-2 items-center">
+                <Select
+                  wrapperClassName="w-auto"
+                  value={bulkGroupId}
+                  onChange={(e) => {
+                    setBulkGroupId(e.target.value);
+                    setBulkSubgroupId("");
+                  }}
+                >
+                  <option value="">No group</option>
+                  {activeGroups.map((g) => (
+                    <option key={g.id} value={g.id}>
+                      {g.name}
+                    </option>
+                  ))}
+                </Select>
+                <Select wrapperClassName="w-auto" value={bulkSubgroupId} onChange={(e) => setBulkSubgroupId(e.target.value)}>
+                  <option value="">No subgroup</option>
+                  {(activeGroups.find((g) => g.id === bulkGroupId)?.subgroups || []).map((sg) => (
+                    <option key={sg.id} value={sg.id}>
+                      {sg.name}
+                    </option>
+                  ))}
+                </Select>
+                <Button size="sm" onClick={handleBulkAssign} disabled={!canEdit || bulkApplying}>
+                  Assign
+                </Button>
+                <Button size="sm" variant="secondary" onClick={() => handleBulkToggleExcluded(true)} disabled={!canEdit || bulkApplying}>
+                  Hide
+                </Button>
+                <Button size="sm" variant="secondary" onClick={() => handleBulkToggleExcluded(false)} disabled={!canEdit || bulkApplying}>
+                  Unhide
+                </Button>
+                <Button size="sm" variant="ghost" onClick={() => setSelectedIds(new Set())}>
+                  Clear
+                </Button>
+              </div>
+            </div>
+          )}
           <div className="max-h-[500px] space-y-2 overflow-y-auto pr-2">
             {filteredVariables.map((variable) => (
               <VariableRow
                 key={variable.id}
                 variable={variable}
+                selected={selectedIds.has(variable.id)}
+                onToggleSelect={() => toggleSelected(variable.id)}
                 onDragStart={(event) => {
                   event.dataTransfer?.setData("text/plain", variable.id);
                   setDraggingVar(variable);
@@ -687,12 +850,8 @@ const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
             <CardHeader title="Create transformation" subtitle="Lag, decay, arithmetic & more" />
             <div className="grid gap-3 md:grid-cols-2">
               <div className="space-y-2">
-                <label className="text-xs font-medium uppercase tracking-wide text-[var(--color-muted)]">Operation</label>
-                <select
-                  className="w-full rounded-full border border-[var(--color-border)] px-3 py-2 bg-transparent"
-                  value={op}
-                  onChange={(e) => setOp(e.target.value as any)}
-                >
+                <Eyebrow>Operation</Eyebrow>
+                <Select value={op} onChange={(e) => setOp(e.target.value as any)}>
                   <option value="lag">Lag</option>
                   <option value="decay">Decay</option>
                   <option value="log">Log</option>
@@ -700,15 +859,17 @@ const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
                   <option value="sub">Subtract</option>
                   <option value="mul">Multiply</option>
                   <option value="div">Divide</option>
-                </select>
+                  <option value="hill">Hill (saturation)</option>
+                  <option value="adstock">Adstock (carryover)</option>
+                </Select>
               </div>
               <div className="space-y-2">
-                <label className="text-xs font-medium uppercase tracking-wide text-[var(--color-muted)]">New name</label>
+                <Eyebrow>New name</Eyebrow>
                 <Input value={newName} onChange={(e) => setNewName(e.target.value)} placeholder="transformed_variable" />
               </div>
-              {(op === "lag" || op === "decay" || op === "log") && (
+              {(op === "lag" || op === "decay" || op === "log" || op === "hill" || op === "adstock") && (
                 <div className="space-y-2">
-                  <label className="text-xs font-medium uppercase tracking-wide text-[var(--color-muted)]">Column</label>
+                  <Eyebrow>Column</Eyebrow>
                   <div>
                     <Input
                       list="column-options"
@@ -726,20 +887,43 @@ const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
               )}
               {op === "lag" && (
                 <div className="space-y-2">
-                  <label className="text-xs font-medium uppercase tracking-wide text-[var(--color-muted)]">Periods</label>
+                  <Eyebrow>Periods</Eyebrow>
                   <Input type="number" value={n} onChange={(e) => setN(parseInt(e.target.value) || 1)} />
                 </div>
               )}
               {op === "decay" && (
                 <div className="space-y-2">
-                  <label className="text-xs font-medium uppercase tracking-wide text-[var(--color-muted)]">Alpha (0-1)</label>
+                  <Eyebrow>Alpha (0-1)</Eyebrow>
                   <Input type="number" step="0.05" value={alpha} onChange={(e) => setAlpha(parseFloat(e.target.value) || 0.5)} />
+                </div>
+              )}
+              {op === "hill" && (
+                <>
+                  <div className="space-y-2">
+                    <Eyebrow>K (half-saturation)</Eyebrow>
+                    <Input type="number" step="0.1" value={hillK} onChange={(e) => setHillK(parseFloat(e.target.value) || 0)} />
+                  </div>
+                  <div className="space-y-2">
+                    <Eyebrow>S (shape)</Eyebrow>
+                    <Input type="number" step="0.1" value={hillS} onChange={(e) => setHillS(parseFloat(e.target.value) || 0)} />
+                  </div>
+                </>
+              )}
+              {op === "adstock" && (
+                <div className="space-y-2">
+                  <Eyebrow>Decay (0-1)</Eyebrow>
+                  <Input
+                    type="number"
+                    step="0.05"
+                    value={adstockDecay}
+                    onChange={(e) => setAdstockDecay(parseFloat(e.target.value) || 0)}
+                  />
                 </div>
               )}
               {["add", "sub", "mul", "div"].includes(op) && (
                 <>
                   <div className="space-y-2">
-                    <label className="text-xs font-medium uppercase tracking-wide text-[var(--color-muted)]">Left</label>
+                    <Eyebrow>Left</Eyebrow>
                     <div>
                       <Input
                         list="left-options"
@@ -755,7 +939,7 @@ const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
                     </div>
                   </div>
                   <div className="space-y-2">
-                    <label className="text-xs font-medium uppercase tracking-wide text-[var(--color-muted)]">Right</label>
+                    <Eyebrow>Right</Eyebrow>
                     <div>
                       <Input
                         list="right-options"
@@ -795,12 +979,12 @@ const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
                 previewLoading ? (
                   <p className="text-sm text-[var(--color-muted)]">Loading preview…</p>
                 ) : previewError ? (
-                  <div className="text-sm text-red-500">
+                  <ErrorText className="text-sm">
                     {previewError}{" "}
                     <button className="underline" onClick={retryPreview}>
                       Retry
                     </button>
-                  </div>
+                  </ErrorText>
                 ) : previewData ? (
                   <>
                     <PreviewChart data={previewData} />
@@ -825,7 +1009,7 @@ const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
             <CardHeader title="Groups & Subgroups" subtitle="Create targets and drag variables onto them" />
             <div className="grid gap-3 md:grid-cols-2">
               <div className="space-y-2">
-                <label className="text-xs uppercase text-[var(--color-muted)]">New group</label>
+                <Eyebrow>New group</Eyebrow>
                 <div className="flex gap-2">
                   <Input value={newGroupName} onChange={(e) => setNewGroupName(e.target.value)} placeholder="Group name" />
                   <Button
@@ -853,20 +1037,16 @@ const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
                 </div>
               </div>
               <div className="space-y-2">
-                <label className="text-xs uppercase text-[var(--color-muted)]">New subgroup</label>
+                <Eyebrow>New subgroup</Eyebrow>
                 <div className="flex gap-2">
-                  <select
-                    className="w-full rounded-full border border-[var(--color-border)] px-3 py-2 bg-transparent"
-                    value={newSubgroupParent}
-                    onChange={(e) => setNewSubgroupParent(e.target.value)}
-                  >
+                  <Select value={newSubgroupParent} onChange={(e) => setNewSubgroupParent(e.target.value)}>
                     <option value="">Select group</option>
                     {groups.map((g) => (
                       <option key={g.id} value={g.id}>
                         {g.name}
                       </option>
                     ))}
-                  </select>
+                  </Select>
                   <Input value={newSubgroupName} onChange={(e) => setNewSubgroupName(e.target.value)} placeholder="Subgroup" />
                   <Button
                     size="sm"
@@ -950,7 +1130,7 @@ const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
                             disabled={renamingGroupId === group.id}
                             autoFocus
                           />
-                          {groupError && <p className="text-xs text-red-500">{groupError}</p>}
+                          {groupError && <ErrorText className="text-xs">{groupError}</ErrorText>}
                         </div>
                       ) : (
                         <div className="flex items-center gap-2">
@@ -969,7 +1149,7 @@ const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
                           </button>
                           <button
                             type="button"
-                            className="rounded-full p-1 text-[var(--color-muted)] hover:text-red-500 transition disabled:cursor-not-allowed disabled:opacity-60"
+                            className="rounded-full p-1 text-[var(--color-muted)] hover:text-[var(--color-danger)] transition disabled:cursor-not-allowed disabled:opacity-60"
                             onClick={() => {
                               setGroupToDelete(group);
                               setGroupDeleteError("");
@@ -983,6 +1163,7 @@ const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
                       )}
                     </div>
                     <Badge>{group.subgroups.length} subgroups</Badge>
+                    {group.is_baseline && <Badge variant="neutral">Baseline</Badge>}
                   </div>
                   <label
                     className="flex items-center gap-2 text-xs text-[var(--color-muted)]"
@@ -995,6 +1176,18 @@ const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
                       onChange={() => toggleGroupMediaTransform(group)}
                     />
                     Aplica adstock + saturación (medios)
+                  </label>
+                  <label
+                    className="flex items-center gap-2 text-xs text-[var(--color-muted)]"
+                    title="Solo un grupo puede ser el baseline por compañía. Sus variables se suman al intercepto en Analysis en vez de mostrarse como línea propia."
+                  >
+                    <input
+                      type="checkbox"
+                      checked={group.is_baseline}
+                      disabled={!canEdit}
+                      onChange={() => toggleGroupBaseline(group)}
+                    />
+                    Es el grupo Baseline
                   </label>
                   <div className="space-y-2">
                     {group.subgroups.map((sub) => (
@@ -1035,7 +1228,7 @@ const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
                               autoFocus
                             />
                             {subgroupError && editingSubgroupId === sub.id && (
-                              <p className="text-xs text-red-500">{subgroupError}</p>
+                              <ErrorText className="text-xs">{subgroupError}</ErrorText>
                             )}
                           </div>
                         ) : (
@@ -1054,7 +1247,7 @@ const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
                               />
                             </button>
                             <label
-                              className="flex items-center gap-1 text-[10px] uppercase text-[var(--color-muted)] shrink-0"
+                              className="flex items-center gap-1 text-3xs uppercase text-[var(--color-muted)] shrink-0"
                               title="Aplica adstock + saturación (medios) a las variables de este subgrupo"
                             >
                               <input
@@ -1067,7 +1260,7 @@ const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
                             </label>
                             <button
                               type="button"
-                              className="rounded-full p-1 text-[var(--color-muted)] hover:text-red-500 transition disabled:cursor-not-allowed disabled:opacity-60"
+                              className="rounded-full p-1 text-[var(--color-muted)] hover:text-[var(--color-danger)] transition disabled:cursor-not-allowed disabled:opacity-60"
                               onClick={() => {
                                 setSubgroupToDelete({ group, subgroup: sub });
                                 setSubgroupDeleteError("");
@@ -1094,6 +1287,8 @@ const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
             datasetColumns={datasetColumns}
             canEdit={canEdit}
           />
+
+          <ConversionSettingsCard datasetId={activeDatasetId} datasetColumns={datasetColumns} canEdit={canEdit} />
         </div>
       </div>
 
@@ -1136,18 +1331,17 @@ const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
                 Close
               </Button>
             </div>
-            {groupDeleteError && <p className="text-sm text-red-500">{groupDeleteError}</p>}
+            {groupDeleteError && <ErrorText className="text-sm">{groupDeleteError}</ErrorText>}
             <p className="text-sm text-[var(--color-muted)]">
               This group has {groupVariableCount} variables assigned. Deleting it will move them to &quot;Uncategorized&quot;.
             </p>
-            <p className="text-xs text-red-500">This action cannot be undone.</p>
+            <ErrorText className="text-xs">This action cannot be undone.</ErrorText>
             <div className="flex justify-end gap-2">
               <Button variant="ghost" onClick={closeGroupDeleteModal} disabled={groupDeleteLoading}>
                 Cancel
               </Button>
               <Button
-                variant="secondary"
-                className="bg-red-600 text-white hover:bg-red-600/90"
+                variant="danger"
                 onClick={confirmDeleteGroup}
                 disabled={!canEdit || groupDeleteLoading}
                 title={!canEdit ? "Solo lectura: tu rol es Visualizador" : undefined}
@@ -1170,19 +1364,18 @@ const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
                 Close
               </Button>
             </div>
-            {subgroupDeleteError && <p className="text-sm text-red-500">{subgroupDeleteError}</p>}
+            {subgroupDeleteError && <ErrorText className="text-sm">{subgroupDeleteError}</ErrorText>}
             <p className="text-sm text-[var(--color-muted)]">
               This subgroup has {subgroupVariableCount} variables assigned. They will remain in &quot;
               {subgroupToDelete.group.name}&quot; but without subgroup.
             </p>
-            <p className="text-xs text-red-500">This action cannot be undone.</p>
+            <ErrorText className="text-xs">This action cannot be undone.</ErrorText>
             <div className="flex justify-end gap-2">
               <Button variant="ghost" onClick={closeSubgroupDeleteModal} disabled={subgroupDeleteLoading}>
                 Cancel
               </Button>
               <Button
-                variant="secondary"
-                className="bg-red-600 text-white hover:bg-red-600/90"
+                variant="danger"
                 onClick={confirmDeleteSubgroup}
                 disabled={!canEdit || subgroupDeleteLoading}
                 title={!canEdit ? "Solo lectura: tu rol es Visualizador" : undefined}
@@ -1199,31 +1392,43 @@ const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
 
 function VariableRow({
   variable,
+  selected,
+  onToggleSelect,
   onDragStart,
   onDragEnd,
   onHistory,
 }: {
   variable: Variable;
+  selected: boolean;
+  onToggleSelect: () => void;
   onDragStart: (event: React.DragEvent) => void;
   onDragEnd: () => void;
   onHistory: () => void;
 }) {
   return (
     <div
-      className="rounded-2xl border border-[var(--color-border)] p-3 text-sm bg-white/60 dark:bg-white/5 cursor-grab active:cursor-grabbing"
+      className="rounded-2xl border border-[var(--color-border)] p-3 text-sm bg-[var(--color-card)] cursor-grab active:cursor-grabbing"
       draggable
       onDragStart={onDragStart}
       onDragEnd={onDragEnd}
     >
       <div className="flex items-center justify-between">
-        <div>
-          <p className="font-medium">{variable.name}</p>
-          <p className="text-xs text-[var(--color-muted)]">{variable.dtype}</p>
+        <div className="flex items-center gap-2">
+          <input
+            type="checkbox"
+            checked={selected}
+            onClick={(e) => e.stopPropagation()}
+            onChange={onToggleSelect}
+          />
+          <div>
+            <p className="font-medium">{variable.name}</p>
+            <p className="text-xs text-[var(--color-muted)]">{variable.dtype}</p>
+          </div>
         </div>
         <div className="flex gap-1">
           {variable.is_derived && <Badge variant="neutral">fx</Badge>}
           {(variable.group_name || variable.subgroup_name) && (
-            <Badge variant="success">{variable.subgroup_name || variable.group_name}</Badge>
+            <Badge variant="neutral">{variable.subgroup_name || variable.group_name}</Badge>
           )}
           {variable.is_derived && (
             <button className="text-xs text-[var(--color-accent)] underline" onClick={onHistory}>

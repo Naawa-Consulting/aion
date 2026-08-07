@@ -6,6 +6,8 @@ import Link from "next/link";
 import { Card, CardHeader } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
+import { ErrorText } from "@/components/ui/error-text";
+import { Eyebrow } from "@/components/ui/eyebrow";
 import { getSupabaseBrowserClient } from "@/lib/supabase/client";
 
 function LoginForm() {
@@ -37,7 +39,7 @@ function LoginForm() {
       <CardHeader title="Aion" subtitle="Inicia sesión para continuar" />
       <form onSubmit={handleSubmit} className="space-y-4">
         <div className="space-y-1">
-          <label className="text-xs font-medium uppercase text-[var(--color-muted)]">Correo</label>
+          <Eyebrow>Correo</Eyebrow>
           <Input
             type="email"
             value={email}
@@ -47,7 +49,7 @@ function LoginForm() {
           />
         </div>
         <div className="space-y-1">
-          <label className="text-xs font-medium uppercase text-[var(--color-muted)]">Contraseña</label>
+          <Eyebrow>Contraseña</Eyebrow>
           <Input
             type="password"
             value={password}
@@ -56,7 +58,7 @@ function LoginForm() {
             autoComplete="current-password"
           />
         </div>
-        {error && <p className="text-sm text-red-500">{error}</p>}
+        {error && <ErrorText className="text-sm">{error}</ErrorText>}
         <Button type="submit" disabled={loading} className="w-full">
           {loading ? "Ingresando..." : "Ingresar"}
         </Button>

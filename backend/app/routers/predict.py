@@ -21,6 +21,7 @@ from ..routers.analysis import _fit_from_model, _group_maps
 from ..services.media_transform import apply_media_transform
 from ..services.model_fit import load_transform_params
 from ..tenancy import get_scoped
+from ..utils.excel import excel_response
 from ..schemas import (
     Adjustment,
     SimulationRequest,
@@ -56,7 +57,11 @@ def _compute_contributions(session: Session, model_id: str, company_id: str, adj
     for name in X.columns:
         coef = float(params.get(name, 0.0))
         mult = float(adjustments.get(name, 1.0))
-        mean = float(X[name].mean())
+        # Raw historical mean, not the transformed X — the frontend grid seeds its editable
+        # cells from `baseline_mean` and expects/sends values in the variable's natural scale,
+        # never the already-adstocked/saturated one (matches `_compute_plan`/`_scenario_matrix`
+        # below, which already do this correctly).
+        mean = float(pd.to_numeric(work[name], errors="coerce").fillna(0.0).mean())
         media_params = transform_params.get(name)
         if media_params is not None:
             # Adjust the RAW spend series (never the already-adstocked/saturated one), then
@@ -178,6 +183,39 @@ def _label_for_period(period: date, freq: str) -> str:
         iso = period.isocalendar()
         return f"{iso.year}-W{iso.week:02d}"
     return period.strftime("%Y-%m")
+
+
+def _calendar_key(value: date, freq: str):
+    """Groups a date by its position within a year, so a future period's default can be drawn
+    from the same calendar position in history (e.g. "this future row is March" defaults from
+    historical Marches) instead of a single flat all-time mean."""
+    if freq == "day":
+        return (value.month, value.day)
+    if freq == "week":
+        return value.isocalendar().week
+    return value.month
+
+
+def _calendar_bucketed_means(
+    work: pd.DataFrame, hist_dates: "pd.Series | None", columns: list[str], freq: str
+) -> dict[str, dict]:
+    """Per-column historical mean bucketed by `_calendar_key`. Applied uniformly to every
+    variable (media and control) — there's no per-variable "is this seasonal" flag today, and a
+    non-seasonal variable's bucketed mean just converges close to its flat mean anyway, so this
+    never makes things worse. Callers must fall back to the flat mean when a bucket is missing
+    (short history, or a horizon that outruns a year of data)."""
+    if hist_dates is None:
+        return {}
+    valid = hist_dates.notna()
+    if not valid.any():
+        return {}
+    keys = hist_dates[valid].apply(lambda d: _calendar_key(d.date() if hasattr(d, "date") else d, freq))
+    buckets: dict[str, dict] = {}
+    for name in columns:
+        series = pd.to_numeric(work[name], errors="coerce").fillna(0.0)
+        grouped = series[valid].groupby(keys).mean()
+        buckets[name] = {k: float(v) for k, v in grouped.items()}
+    return buckets
 
 
 def _dump_definition(horizon: int, start_date: date, freq: str, adjustments: dict[str, dict[str, PeriodValue]]) -> str:
@@ -357,7 +395,7 @@ def _compute_plan(
     freq: str,
     adjustments: dict[str, dict[str, PeriodValue]],
 ):
-    m, ds, work, X, Xc, y, params, _ = _fit_from_model(session, model_id, company_id)
+    m, ds, work, X, Xc, y, params, raw_df = _fit_from_model(session, model_id, company_id)
     var_map, sg_map, g_map = _group_maps(session, ds.id, company_id)
     transform_params = load_transform_params(session, m.id, company_id)
 
@@ -368,9 +406,18 @@ def _compute_plan(
         baseline_means[name] = float(series.mean())
         coef_map[name] = float(params.get(name, 0.0))
 
+    time_field = getattr(ds, "time_variable", None)
+    hist_dates = (
+        pd.to_datetime(raw_df.loc[work.index, time_field], errors="coerce")
+        if time_field and time_field in raw_df.columns
+        else None
+    )
+    calendar_buckets = _calendar_bucketed_means(work, hist_dates, list(X.columns), freq)
+
     intercept = float(params.get("const", 0.0))
     period_dates = _period_sequence(start_date, horizon, freq)
     labels = [_label_for_period(p, freq) for p in period_dates]
+    period_calendar_keys = [_calendar_key(p, freq) for p in period_dates]
 
     # Media variables: build the projected RAW spend series per period, then run the
     # adstock+Hill transform ONCE over history+future concatenated — this is what makes
@@ -384,13 +431,15 @@ def _compute_plan(
             continue
         raw_history = pd.to_numeric(work[name], errors="coerce").fillna(0.0).to_numpy(dtype=float)
         raw_mean = float(raw_history.mean()) if raw_history.size else 0.0
+        bucketed = calendar_buckets.get(name, {})
         future_raw = []
-        for label in labels:
+        for period_index, label in enumerate(labels):
+            seasonal_mean = bucketed.get(period_calendar_keys[period_index], raw_mean)
             adj = adjustments.get(label, {}).get(name)
             if isinstance(adj, PeriodValue):
-                value = raw_mean * adj.value if adj.mode == "multiplier" else adj.value
+                value = seasonal_mean * adj.value if adj.mode == "multiplier" else adj.value
             else:
-                value = raw_mean
+                value = seasonal_mean
             future_raw.append(value)
         combined = np.concatenate([raw_history, np.asarray(future_raw, dtype=float)])
         transformed = apply_media_transform(combined, tparams.decay, tparams.hill_k, tparams.hill_s, tparams.lag)
@@ -409,7 +458,8 @@ def _compute_plan(
             if name in media_future_transformed:
                 value = float(media_future_transformed[name][period_index])
             else:
-                baseline_val = baseline_means[name]
+                bucketed = calendar_buckets.get(name, {})
+                baseline_val = bucketed.get(period_calendar_keys[period_index], baseline_means[name])
                 adj = period_adjustments.get(name)
                 if isinstance(adj, PeriodValue):
                     value = baseline_val * adj.value if adj.mode == "multiplier" else adj.value
@@ -458,31 +508,43 @@ def _scenario_matrix(
     freq: str,
     adjustments: dict[str, dict[str, PeriodValue]],
 ):
-    _, _, work, X, _, _, _, _ = _fit_from_model(session, model_id, company_id)
+    _, ds, work, X, _, _, _, raw_df = _fit_from_model(session, model_id, company_id)
     baseline_means: dict[str, float] = {}
     for name in X.columns:
         # Raw historical mean, not the transformed X — assumptions/multipliers are defined
         # against raw spend, never against the already-adstocked/saturated value.
         baseline_means[name] = float(pd.to_numeric(work[name], errors="coerce").fillna(0.0).mean())
 
-    labels = [_label_for_period(period, freq) for period in _period_sequence(start_date, horizon, freq)]
+    time_field = getattr(ds, "time_variable", None)
+    hist_dates = (
+        pd.to_datetime(raw_df.loc[work.index, time_field], errors="coerce")
+        if time_field and time_field in raw_df.columns
+        else None
+    )
+    calendar_buckets = _calendar_bucketed_means(work, hist_dates, list(X.columns), freq)
+
+    period_dates = _period_sequence(start_date, horizon, freq)
+    labels = [_label_for_period(period, freq) for period in period_dates]
+    period_calendar_keys = [_calendar_key(p, freq) for p in period_dates]
     rows: list[dict] = []
     for name in X.columns:
         mean = baseline_means[name]
+        bucketed = calendar_buckets.get(name, {})
         values: dict[str, float] = {}
         multipliers: dict[str, float] = {}
-        for label in labels:
+        for period_index, label in enumerate(labels):
+            seasonal_mean = bucketed.get(period_calendar_keys[period_index], mean)
             adj = adjustments.get(label, {}).get(name)
             if isinstance(adj, PeriodValue):
                 if adj.mode == "multiplier":
                     multiplier = float(adj.value)
-                    value = mean * multiplier
+                    value = seasonal_mean * multiplier
                 else:
                     value = float(adj.value)
-                    multiplier = (value / mean) if mean else 0.0
+                    multiplier = (value / seasonal_mean) if seasonal_mean else 0.0
             else:
                 multiplier = 1.0
-                value = mean
+                value = seasonal_mean
             values[label] = float(value)
             multipliers[label] = float(multiplier)
         rows.append({"variable": name, "mean": float(mean), "values": values, "multipliers": multipliers})
@@ -499,15 +561,7 @@ def _safe_filename_part(value: str | None, fallback: str = "scenario") -> str:
 
 
 def _dataframe_response(df: pd.DataFrame, sheet_name: str, filename: str) -> StreamingResponse:
-    buffer = io.BytesIO()
-    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
-        df.to_excel(writer, sheet_name=sheet_name, index=False)
-    buffer.seek(0)
-    return StreamingResponse(
-        buffer,
-        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": f"attachment; filename={filename}"},
-    )
+    return excel_response({sheet_name: df}, filename)
 
 
 def _scenario_out_from_record(record: Scenario, session: Session, company_id: str, summary: ScenarioSummary | None = None) -> ScenarioOut:
@@ -899,15 +953,7 @@ def export_scenario_plan(
 
     filename = f"scenario-{scenario_id}.{format}"
     if format == "xlsx":
-        buffer = io.BytesIO()
-        with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
-            df.to_excel(writer, index=False)
-        buffer.seek(0)
-        return StreamingResponse(
-            buffer,
-            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            headers={"Content-Disposition": f"attachment; filename={filename}"},
-        )
+        return excel_response({"Scenario": df}, filename)
 
     csv_buffer = io.StringIO()
     df.to_csv(csv_buffer, index=False)

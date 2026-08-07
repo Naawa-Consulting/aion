@@ -217,6 +217,7 @@ const ScenarioSheetGlide: React.FC<ScenarioSheetGlideProps> = ({
   const [lastCell, setLastCell] = useState<Item | null>([2, 0]);
 
   const editorRef = useRef<DataEditorRef | null>(null);
+  const containerRef = useRef<HTMLDivElement | null>(null);
   const [activeEdit, setActiveEdit] = useState<{
     cell: Item;
     rect: CellRect;
@@ -247,8 +248,13 @@ const ScenarioSheetGlide: React.FC<ScenarioSheetGlideProps> = ({
       return {
         kind: GridCellKind.Text,
         data: value.toString(),
+        // Editing is handled entirely by our own activeEdit overlay below (via
+        // onCellActivated/handleKeyDown) — allowOverlay:true would additionally let
+        // glide-data-grid's own internal reselect() open its built-in overlay editor on
+        // the same activation (double-click/Enter/typing), a second editor fighting our
+        // custom one for focus and DOM state, which is what caused the arrow-key lockup.
         displayData: formatNumericDisplay(value),
-        allowOverlay: true,
+        allowOverlay: false,
         readonly: false,
       };
     },
@@ -287,17 +293,24 @@ const ScenarioSheetGlide: React.FC<ScenarioSheetGlideProps> = ({
       if (cell[0] <= 1) return;
       const [col, row] = cell;
       const currentValue = gridData[row]?.[col] ?? 0;
-      const bounds = undefined;
+      // getBounds returns viewport-relative coordinates (canvas.getBoundingClientRect()
+      // offset baked in) — translate into the wrapper's own coordinate space since the
+      // overlay <input> is absolutely positioned within it.
+      const cellBounds = editorRef.current?.getBounds(col, row);
+      const containerBounds = containerRef.current?.getBoundingClientRect();
+      const rect =
+        cellBounds && containerBounds
+          ? {
+              x: cellBounds.x - containerBounds.x,
+              y: cellBounds.y - containerBounds.y,
+              width: cellBounds.width,
+              height: cellBounds.height,
+            }
+          : { x: col * 120 + 1, y: row * 32 + 1, width: 120, height: 32 };
       setLastCell(cell);
       setActiveEdit({
         cell,
-        rect:
-          bounds ?? {
-            x: col * 120 + 1,
-            y: row * 32 + 1,
-            width: 120,
-            height: 32,
-          },
+        rect,
         value:
           initialValue ?? (Number.isFinite(currentValue) ? String(currentValue) : ""),
       });
@@ -340,9 +353,16 @@ const ScenarioSheetGlide: React.FC<ScenarioSheetGlideProps> = ({
   }, [lastCell]);
 
   const refocusGrid = useCallback(() => {
+    // Restore selection first so the grid's accessibility-tree focus proxy for the
+    // target cell exists before we focus it — focusing then restoring selection (the
+    // previous order) let the selection update's re-render unmount/replace that same
+    // proxy element right after it received focus, dropping focus to document.body and
+    // leaving arrow-key navigation dead until a manual re-focus (e.g. clicking a cell).
+    restoreSelection();
     requestAnimationFrame(() => {
-      editorRef.current?.focus?.();
-      restoreSelection();
+      requestAnimationFrame(() => {
+        editorRef.current?.focus?.();
+      });
     });
   }, [restoreSelection]);
 
@@ -441,6 +461,7 @@ const ScenarioSheetGlide: React.FC<ScenarioSheetGlideProps> = ({
 
   return (
     <div
+      ref={containerRef}
       style={{
         width: "100%",
         height: 420,
@@ -486,6 +507,13 @@ const ScenarioSheetGlide: React.FC<ScenarioSheetGlideProps> = ({
             return { column: targetColumn, direction: "asc" };
           });
         }}
+        rangeSelect="rect"
+        // glide-data-grid has its own window-level paste listener that, with no onPaste
+        // prop, async-reads the clipboard and writes a single target cell — it resolves
+        // after our synchronous handlePasteCapture (onPasteCapture below) already applied
+        // the correct multi-cell paste, silently stomping it. Disabling it here makes our
+        // own handler the only source of truth.
+        onPaste={false}
         smoothScrollX
         smoothScrollY
       />
@@ -497,12 +525,13 @@ const ScenarioSheetGlide: React.FC<ScenarioSheetGlideProps> = ({
             top: activeEdit.rect.y,
             width: activeEdit.rect.width,
             height: activeEdit.rect.height,
-            border: "2px solid #2563eb",
+            border: "2px solid var(--color-accent)",
             borderRadius: 4,
             padding: "0 8px",
             fontSize: 14,
             zIndex: 5,
-            background: "#fff",
+            background: "var(--color-card)",
+            color: "var(--color-foreground)",
           }}
           value={activeEdit.value}
           onChange={(event) =>

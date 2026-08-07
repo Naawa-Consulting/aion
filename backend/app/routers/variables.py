@@ -13,6 +13,7 @@ from sqlmodel import Session, select, delete
 from ..auth import CurrentMembership, get_current_membership, require_write_access
 from ..db import get_session
 from ..models import Dataset, Variable, VariableHistory, Subgroup, Group
+from ..services.media_transform import adstock_geometric, hill_saturation
 from ..tenancy import get_scoped
 from ..utils.datasets import load_dataset_frame
 from ..utils.storage import get_storage
@@ -23,6 +24,7 @@ from ..schemas import (
     TransformPreviewRequest,
     VariableOut,
     CategorizeRequest,
+    BulkCategorizeRequest,
     VariableHistoryItem,
 )
 
@@ -107,6 +109,7 @@ def _variable_to_out(var: Variable, g_map: dict, sg_map: dict) -> VariableOut:
         subgroup_name=sg.name if sg else None,
         group_id=g.id if g else None,
         group_name=g.name if g else None,
+        is_excluded=var.is_excluded,
         created_at=var.created_at,
     )
 
@@ -117,6 +120,7 @@ def list_variables(
     search: str | None = Query(None),
     dtype: str | None = Query(None),
     derived: bool | None = Query(None),
+    include_excluded: bool = Query(False, description="Include variables hidden via is_excluded"),
     membership: CurrentMembership = Depends(get_current_membership),
     session: Session = Depends(get_session),
 ):
@@ -126,6 +130,8 @@ def list_variables(
     vars_ = _sync_variables_with_dataset(session, ds, df)
 
     results = vars_
+    if not include_excluded:
+        results = [v for v in results if not v.is_excluded]
     if derived is not None:
         results = [v for v in results if v.is_derived == derived]
     if search:
@@ -232,6 +238,22 @@ def create_transformation(
             series = df[body.left] * df[body.right]
         else:
             series = df[body.left] / df[body.right]
+    elif op == "hill":
+        if not body.column or body.k is None or body.s is None:
+            raise HTTPException(status_code=400, detail="column, k and s required for hill")
+        if body.column not in df.columns:
+            raise HTTPException(status_code=400, detail="column not found")
+        vals = pd.to_numeric(df[body.column], errors="coerce").fillna(0.0).to_numpy(dtype=float)
+        series = pd.Series(hill_saturation(vals, float(body.k), float(body.s)), index=df.index)
+    elif op == "adstock":
+        if not body.column or body.decay is None:
+            raise HTTPException(status_code=400, detail="column and decay required for adstock")
+        if not (0 <= float(body.decay) < 1):
+            raise HTTPException(status_code=400, detail="decay must be in [0,1)")
+        if body.column not in df.columns:
+            raise HTTPException(status_code=400, detail="column not found")
+        vals = pd.to_numeric(df[body.column], errors="coerce").fillna(0.0).to_numpy(dtype=float)
+        series = pd.Series(adstock_geometric(vals, float(body.decay)), index=df.index)
     else:
         raise HTTPException(status_code=400, detail="Unsupported operation")
 
@@ -282,16 +304,23 @@ def categorize_variable(
     var = get_scoped(session, Variable, variable_id, membership.company_id)
     ds = get_scoped(session, Dataset, var.dataset_id, membership.company_id)
 
-    group = get_scoped(session, Group, body.group_id, membership.company_id) if body.group_id else None
-    subgroup = get_scoped(session, Subgroup, body.subgroup_id, membership.company_id) if body.subgroup_id else None
+    # group_id/subgroup_id are only touched when the caller actually included the key in the
+    # request body (even as null, to explicitly clear) — distinguished via model_fields_set, not
+    # by truthiness, so a request that only sets is_excluded (e.g. from Datasets' hide toggle,
+    # which has no group/subgroup context at all) never silently wipes the existing category.
+    if "group_id" in body.model_fields_set or "subgroup_id" in body.model_fields_set:
+        group = get_scoped(session, Group, body.group_id, membership.company_id) if body.group_id else None
+        subgroup = get_scoped(session, Subgroup, body.subgroup_id, membership.company_id) if body.subgroup_id else None
 
-    if subgroup and group and subgroup.group_id != group.id:
-        raise HTTPException(status_code=400, detail="Subgroup does not belong to selected group")
-    if subgroup and not group:
-        group = get_scoped(session, Group, subgroup.group_id, membership.company_id)
+        if subgroup and group and subgroup.group_id != group.id:
+            raise HTTPException(status_code=400, detail="Subgroup does not belong to selected group")
+        if subgroup and not group:
+            group = get_scoped(session, Group, subgroup.group_id, membership.company_id)
 
-    var.group_id = group.id if group else None
-    var.subgroup_id = subgroup.id if subgroup else None
+        var.group_id = group.id if group else None
+        var.subgroup_id = subgroup.id if subgroup else None
+    if body.is_excluded is not None:
+        var.is_excluded = body.is_excluded
     session.add(var)
     session.commit()
 
@@ -300,6 +329,46 @@ def categorize_variable(
     ).all()
     g_map, sg_map = _maps_for_variables(session, vars_for_maps, membership.company_id)
     return _variable_to_out(var, g_map, sg_map)
+
+
+@router.patch("/bulk-categorize", response_model=list[VariableOut])
+def bulk_categorize_variables(
+    body: BulkCategorizeRequest,
+    membership: CurrentMembership = Depends(require_write_access),
+    session: Session = Depends(get_session),
+):
+    if not body.variable_ids:
+        raise HTTPException(status_code=400, detail="variable_ids cannot be empty")
+
+    touches_group = "group_id" in body.model_fields_set or "subgroup_id" in body.model_fields_set
+    group = get_scoped(session, Group, body.group_id, membership.company_id) if body.group_id else None
+    subgroup = get_scoped(session, Subgroup, body.subgroup_id, membership.company_id) if body.subgroup_id else None
+    if subgroup and group and subgroup.group_id != group.id:
+        raise HTTPException(status_code=400, detail="Subgroup does not belong to selected group")
+    if subgroup and not group:
+        group = get_scoped(session, Group, subgroup.group_id, membership.company_id)
+
+    variables = [get_scoped(session, Variable, vid, membership.company_id) for vid in body.variable_ids]
+    for var in variables:
+        if touches_group:
+            var.group_id = group.id if group else None
+            var.subgroup_id = subgroup.id if subgroup else None
+        if body.is_excluded is not None:
+            var.is_excluded = body.is_excluded
+        session.add(var)
+    session.commit()
+
+    dataset_ids = {var.dataset_id for var in variables}
+    g_map: dict = {}
+    sg_map: dict = {}
+    for ds_id in dataset_ids:
+        vars_for_maps = session.exec(
+            select(Variable).where(Variable.dataset_id == ds_id, Variable.company_id == membership.company_id)
+        ).all()
+        gm, sgm = _maps_for_variables(session, vars_for_maps, membership.company_id)
+        g_map.update(gm)
+        sg_map.update(sgm)
+    return [_variable_to_out(var, g_map, sg_map) for var in variables]
 
 
 @router.get("/{variable_id}/history", response_model=list[VariableHistoryItem])
@@ -423,26 +492,50 @@ def preview_transformation(
             result = left_vals * right_vals
         else:
             result = left_vals / right_vals.replace({0: np.nan})
+    elif op == "hill":
+        k_value = params.get("k")
+        s_value = params.get("s")
+        if k_value is None or s_value is None:
+            raise HTTPException(status_code=400, detail="k and s parameters required for hill")
+        vals = series.fillna(0.0).to_numpy()
+        result = pd.Series(hill_saturation(vals, float(k_value), float(s_value)), index=series.index)
+    elif op == "adstock":
+        decay_value = params.get("decay")
+        if decay_value is None:
+            raise HTTPException(status_code=400, detail="decay parameter required for adstock")
+        decay = float(decay_value)
+        if not (0 <= decay < 1):
+            raise HTTPException(status_code=400, detail="decay must be in [0,1)")
+        vals = series.fillna(0.0).to_numpy()
+        result = pd.Series(adstock_geometric(vals, decay), index=series.index)
     else:
         raise HTTPException(status_code=400, detail="Unsupported operation")
 
     if result is None:
         raise HTTPException(status_code=400, detail="Unable to compute preview")
 
+    dependent_col = getattr(ds, "dependent_variable", None)
+    dependent_series = (
+        pd.to_numeric(df[dependent_col], errors="coerce")
+        if dependent_col and dependent_col in df.columns and dependent_col != column
+        else None
+    )
+
     limit = min(max(body.limit, 1), 1000)
     time_col = getattr(ds, "time_variable", None)
+    frame = {"original": series, "transformed": result}
+    if dependent_series is not None:
+        frame["dependent"] = dependent_series
     if time_col and time_col in df.columns:
-        ordering = pd.to_datetime(df[time_col], errors="coerce")
-        combined = pd.DataFrame({"time": ordering, "original": series, "transformed": result})
-        combined = combined.sort_values("time").head(limit)
+        frame["time"] = pd.to_datetime(df[time_col], errors="coerce")
+        combined = pd.DataFrame(frame).sort_values("time").head(limit)
         time_values = combined["time"].ffill().bfill().astype(str).tolist()
-        original_values = combined["original"].tolist()
-        transformed_values = combined["transformed"].tolist()
     else:
-        combined = pd.DataFrame({"original": series, "transformed": result}).head(limit)
+        combined = pd.DataFrame(frame).head(limit)
         time_values = list(range(len(combined)))
-        original_values = combined["original"].tolist()
-        transformed_values = combined["transformed"].tolist()
+    original_values = combined["original"].tolist()
+    transformed_values = combined["transformed"].tolist()
+    dependent_values = combined["dependent"].tolist() if dependent_series is not None else None
 
     original_series = pd.Series(original_values, dtype="float64")
     transformed_series = pd.Series(transformed_values, dtype="float64")
@@ -450,10 +543,21 @@ def preview_transformation(
     transformed_mean = transformed_series.dropna().mean()
     corr = original_series.corr(transformed_series)
 
+    corr_dependent_before = None
+    corr_dependent_after = None
+    if dependent_values is not None:
+        dependent_series_s = pd.Series(dependent_values, dtype="float64")
+        corr_before = original_series.corr(dependent_series_s)
+        corr_after = transformed_series.corr(dependent_series_s)
+        corr_dependent_before = None if pd.isna(corr_before) else float(corr_before)
+        corr_dependent_after = None if pd.isna(corr_after) else float(corr_after)
+
     stats = {
         "mean_original": 0.0 if pd.isna(original_mean) else float(original_mean),
         "mean_transformed": 0.0 if pd.isna(transformed_mean) else float(transformed_mean),
         "correlation": 0.0 if pd.isna(corr) else float(corr),
+        "correlation_dependent_before": corr_dependent_before,
+        "correlation_dependent_after": corr_dependent_after,
     }
     return {
         "time": time_values,

@@ -1,18 +1,25 @@
 ﻿"use client";
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import clsx from "clsx";
 import { Bar, CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis, Legend, ComposedChart, ReferenceLine } from "recharts";
 import { toast } from "sonner";
+import { useTheme } from "next-themes";
 
 import { Card, CardHeader } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
+import { ToggleChip } from "@/components/ui/toggle-chip";
+import { Select } from "@/components/ui/select";
+import { Eyebrow } from "@/components/ui/eyebrow";
 import { SelectedPredictorsQuickView } from "@/components/modeling/SelectedPredictorsQuickView";
 import { FilterBar, FilterField } from "@/components/ui/filter-bar";
 import { apiFetch, ApiError } from "@/lib/api";
 import { useCanEdit } from "@/hooks/useCanEdit";
+import { useGlobalStore } from "@/lib/store";
+import { chartColor } from "@/lib/chart-colors";
+import { formatChartNumber } from "@/lib/chart-format";
+import { downloadBlob } from "@/lib/download";
 
 type Dataset = { id: string; display_name: string; columns: { name: string; dtype: string }[] };
 type Variable = { id: string; name: string; dtype: string };
@@ -42,8 +49,6 @@ type Model = {
   x_vars: string[];
   is_hero: boolean;
   apply_media_transforms: boolean;
-  conversion_rate?: number | null;
-  avg_value?: number | null;
   role: "hero" | "challenger1" | "challenger2" | "none";
   metrics: ModelMetrics;
 };
@@ -80,48 +85,15 @@ type SubgroupFilter = "all" | string;
 
 const formatPValue = (value: number) => {
   if (value == null || Number.isNaN(value)) return "-";
-  return value < 0.0001 ? "<0.0001" : value.toFixed(4);
+  const formatted = value < 0.0001 ? "<0.0001" : value.toFixed(4);
+  const stars = value < 0.001 ? "***" : value < 0.01 ? "**" : value < 0.05 ? "*" : "";
+  return stars ? `${formatted} ${stars}` : formatted;
 };
 
 const formatCorr = (value: number | null | undefined) => {
   if (value == null || Number.isNaN(value)) return "-";
   return value.toFixed(3);
 };
-
-function SaturationCurveChart({ coef }: { coef: Coefficient }) {
-  const k = coef.hill_k ?? 0;
-  const s = coef.hill_s ?? 1;
-  if (!k || !s) return null;
-  const maxX = k * 4;
-  const points = Array.from({ length: 61 }, (_, i) => {
-    const x = (maxX * i) / 60;
-    const xs = Math.pow(x, s);
-    const ks = Math.pow(k, s);
-    return { x, y: xs / (ks + xs || 1) };
-  });
-  return (
-    <div className="space-y-1">
-      <p className="text-xs font-medium truncate">{coef.name}</p>
-      <ResponsiveContainer width="100%" height={140}>
-        <LineChart data={points} margin={{ top: 4, right: 8, bottom: 0, left: -20 }}>
-          <CartesianGrid strokeDasharray="3 3" opacity={0.2} />
-          <XAxis dataKey="x" tick={{ fontSize: 10 }} tickFormatter={(v) => Number(v).toFixed(0)} />
-          <YAxis domain={[0, 1]} tick={{ fontSize: 10 }} />
-          <Tooltip formatter={(v: number) => v.toFixed(3)} labelFormatter={(v: number) => `x=${Number(v).toFixed(1)}`} />
-          <Line type="monotone" dataKey="y" stroke="#2563eb" dot={false} strokeWidth={2} />
-          {coef.raw_mean != null && (
-            <ReferenceLine
-              x={coef.raw_mean}
-              stroke="#dc2626"
-              strokeDasharray="4 4"
-              label={{ value: "actual", fontSize: 10, position: "insideTopRight" }}
-            />
-          )}
-        </LineChart>
-      </ResponsiveContainer>
-    </div>
-  );
-}
 
 const formatTimeLabel = (value: string | number, includeYear = true) => {
   const parsed = new Date(value);
@@ -137,6 +109,9 @@ const formatTimeLabel = (value: string | number, includeYear = true) => {
 
 export default function ModelingPage() {
   const canEdit = useCanEdit();
+  const { activeCompanyId } = useGlobalStore();
+  const { resolvedTheme } = useTheme();
+  const isDarkTheme = resolvedTheme === "dark";
   const [datasets, setDatasets] = useState<Dataset[]>([]);
   const [selectedDataset, setSelectedDataset] = useState<string>("");
   const [variables, setVariables] = useState<Variable[]>([]);
@@ -144,8 +119,6 @@ export default function ModelingPage() {
   const [xSelected, setXSelected] = useState<string[]>([]);
   const [modelName, setModelName] = useState("");
   const [applyMediaTransforms, setApplyMediaTransforms] = useState(true);
-  const [conversionRate, setConversionRate] = useState("");
-  const [avgValue, setAvgValue] = useState("");
   const [corr, setCorr] = useState<CorrelationItem[]>([]);
   const [corrSearch, setCorrSearch] = useState("");
   const [models, setModels] = useState<Model[]>([]);
@@ -196,8 +169,12 @@ const [subgroupFilter, setSubgroupFilter] = useState<SubgroupFilter>("all");
   }, []);
 
   useEffect(() => {
+    // activeCompanyId hydrates asynchronously (AuthBootstrap fetches /me/memberships and
+    // auto-selects the first company) — fetching before it's set sends no X-Company-Id
+    // header and the backend 422s. Wait for it, then re-fetch once it's ready.
+    if (!activeCompanyId) return;
     fetchDatasets();
-  }, [fetchDatasets]);
+  }, [fetchDatasets, activeCompanyId]);
 
   const fetchVariables = useCallback(async (datasetId: string) => {
     try {
@@ -260,6 +237,15 @@ const [subgroupFilter, setSubgroupFilter] = useState<SubgroupFilter>("all");
     }
   };
 
+  const downloadModelSummary = async (modelId: string) => {
+    try {
+      const blob = await apiFetch<Blob>(`/models/${modelId}/export/summary.xlsx`, { responseType: "blob" });
+      downloadBlob(blob, "model-summary.xlsx");
+    } catch (err) {
+      toast.error((err instanceof ApiError ? err.message : (err as Error)?.message) || "Failed to export summary");
+    }
+  };
+
   const handleToggleX = (name: string) => {
     setXSelected((prev) => (prev.includes(name) ? prev.filter((x) => x !== name) : [...prev, name]));
   };
@@ -291,8 +277,6 @@ const [subgroupFilter, setSubgroupFilter] = useState<SubgroupFilter>("all");
       return;
     }
     setLoading(true);
-    const parsedConversionRate = conversionRate.trim() === "" ? undefined : parseFloat(conversionRate);
-    const parsedAvgValue = avgValue.trim() === "" ? undefined : parseFloat(avgValue);
     try {
       if (editingModelId) {
         await apiFetch(`/models/${editingModelId}`, {
@@ -302,8 +286,6 @@ const [subgroupFilter, setSubgroupFilter] = useState<SubgroupFilter>("all");
             name: modelName,
             x_vars: xSelected,
             apply_media_transforms: applyMediaTransforms,
-            conversion_rate: parsedConversionRate,
-            avg_value: parsedAvgValue,
           }),
         });
         toast.success("Model updated");
@@ -317,8 +299,6 @@ const [subgroupFilter, setSubgroupFilter] = useState<SubgroupFilter>("all");
             y_var: yVar,
             x_vars: xSelected,
             apply_media_transforms: applyMediaTransforms,
-            conversion_rate: parsedConversionRate,
-            avg_value: parsedAvgValue,
           }),
         });
         toast.success("Model created");
@@ -339,8 +319,6 @@ const [subgroupFilter, setSubgroupFilter] = useState<SubgroupFilter>("all");
     setXSelected([]);
     setEditingModelId(null);
     setApplyMediaTransforms(true);
-    setConversionRate("");
-    setAvgValue("");
   };
 
   const startEdit = (model: Model) => {
@@ -349,8 +327,6 @@ const [subgroupFilter, setSubgroupFilter] = useState<SubgroupFilter>("all");
     setYVar(model.y_var);
     setXSelected(model.x_vars);
     setApplyMediaTransforms(model.apply_media_transforms);
-    setConversionRate(model.conversion_rate != null ? String(model.conversion_rate) : "");
-    setAvgValue(model.avg_value != null ? String(model.avg_value) : "");
   };
 
   const deleteModel = async (model: Model) => {
@@ -578,8 +554,7 @@ const [subgroupFilter, setSubgroupFilter] = useState<SubgroupFilter>("all");
         </div>
         <FilterBar>
           <FilterField label="DATASET" className="w-[240px]">
-            <select
-              className="w-full rounded-full border border-[var(--color-border)] bg-transparent px-4 py-2"
+            <Select
               value={selectedDataset}
               onChange={(e) => {
                 setSelectedDataset(e.target.value);
@@ -591,21 +566,17 @@ const [subgroupFilter, setSubgroupFilter] = useState<SubgroupFilter>("all");
                   {ds.display_name}
                 </option>
               ))}
-            </select>
+            </Select>
           </FilterField>
           <FilterField label="DEPENDENT VARIABLE" className="w-[260px]">
-            <select
-              className="w-full rounded-full border border-[var(--color-border)] bg-transparent px-4 py-2"
-              value={yVar}
-              onChange={(e) => setYVar(e.target.value)}
-            >
+            <Select value={yVar} onChange={(e) => setYVar(e.target.value)}>
               <option value="">Select Y</option>
               {variables.map((v) => (
                 <option key={v.id} value={v.name}>
                   {v.name}
                 </option>
               ))}
-            </select>
+            </Select>
           </FilterField>
         </FilterBar>
       </header>
@@ -614,68 +585,37 @@ const [subgroupFilter, setSubgroupFilter] = useState<SubgroupFilter>("all");
         <Card className="space-y-4">
           <CardHeader title="Correlations" subtitle="Choose predictors" />
           <div className="flex flex-wrap gap-2 text-xs">
-            <button
-              type="button"
+            <ToggleChip
+              active={groupFilter === "all"}
               onClick={() => {
                 setGroupFilter("all");
                 setSubgroupFilter("all");
               }}
-              className={clsx(
-                "rounded-full border px-2.5 py-1 text-[11px]",
-                groupFilter === "all"
-                  ? "border-[var(--color-foreground)] bg-[var(--color-foreground)] text-white"
-                  : "border-[var(--color-border)] text-[var(--color-muted)] hover:bg-[var(--color-border)]/30"
-              )}
             >
               All
-            </button>
+            </ToggleChip>
             {groupOptions.map((group) => (
-              <button
+              <ToggleChip
                 key={group}
-                type="button"
+                active={groupFilter === group}
                 onClick={() => {
                   setGroupFilter(group);
                   setSubgroupFilter("all");
                 }}
-                className={clsx(
-                  "rounded-full border px-2.5 py-1 text-[11px]",
-                  groupFilter === group
-                    ? "border-[var(--color-foreground)] bg-[var(--color-foreground)] text-white"
-                    : "border-[var(--color-border)] text-[var(--color-muted)] hover:bg-[var(--color-border)]/30"
-                )}
               >
                 {group}
-              </button>
+              </ToggleChip>
             ))}
           </div>
           {groupFilter !== "all" && subgroupOptions.length > 0 && (
-            <div className="flex flex-wrap gap-2 text-[11px] text-[var(--color-muted)]">
-              <button
-                type="button"
-                onClick={() => setSubgroupFilter("all")}
-                className={clsx(
-                  "rounded-full border px-2.5 py-1",
-                  subgroupFilter === "all"
-                    ? "border-[var(--color-foreground)] bg-[var(--color-foreground)] text-white"
-                    : "border-[var(--color-border)] hover:bg-[var(--color-border)]/30"
-                )}
-              >
+            <div className="flex flex-wrap gap-2 text-2xs text-[var(--color-muted)]">
+              <ToggleChip active={subgroupFilter === "all"} onClick={() => setSubgroupFilter("all")}>
                 All subgroups
-              </button>
+              </ToggleChip>
               {subgroupOptions.map((subgroup) => (
-                <button
-                  key={subgroup}
-                  type="button"
-                  onClick={() => setSubgroupFilter(subgroup)}
-                  className={clsx(
-                    "rounded-full border px-2.5 py-1",
-                    subgroupFilter === subgroup
-                      ? "border-[var(--color-foreground)] bg-[var(--color-foreground)] text-white"
-                      : "border-[var(--color-border)] hover:bg-[var(--color-border)]/30"
-                  )}
-                >
+                <ToggleChip key={subgroup} active={subgroupFilter === subgroup} onClick={() => setSubgroupFilter(subgroup)}>
                   {subgroup}
-                </button>
+                </ToggleChip>
               ))}
             </div>
           )}
@@ -694,7 +634,7 @@ const [subgroupFilter, setSubgroupFilter] = useState<SubgroupFilter>("all");
             </label>
             <button
               type="button"
-              className="rounded-full border border-[var(--color-border)] px-2.5 py-1 text-[11px] text-[var(--color-muted)] hover:bg-[var(--color-border)]/30"
+              className="rounded-full border border-[var(--color-border)] px-2.5 py-1 text-2xs text-[var(--color-muted)] hover:bg-[var(--color-border)]/30"
               onClick={() => setShowQuickView(true)}
             >
               Selected: {xSelected.length}
@@ -726,11 +666,11 @@ const [subgroupFilter, setSubgroupFilter] = useState<SubgroupFilter>("all");
             <CardHeader title={editingModelId ? "Edit model" : "Create model"} subtitle="Select variables and save" />
             <div className="grid gap-3 md:grid-cols-2">
               <div className="space-y-2">
-                <label className="text-xs uppercase text-[var(--color-muted)]">Model name</label>
+                <Eyebrow>Model name</Eyebrow>
                 <Input value={modelName} onChange={(e) => setModelName(e.target.value)} placeholder="Hero Model" />
               </div>
               <div className="space-y-2">
-                <label className="text-xs uppercase text-[var(--color-muted)]">Predictors selected</label>
+                <Eyebrow>Predictors selected</Eyebrow>
                 <p className="text-sm text-[var(--color-muted)]">
                   {xSelected.length ? `${xSelected.length} selected` : "None yet"}
                 </p>
@@ -752,32 +692,6 @@ const [subgroupFilter, setSubgroupFilter] = useState<SubgroupFilter>("all");
               />
               Aplicar adstock + saturación a variables de medios
             </label>
-            <div className="grid gap-3 md:grid-cols-2">
-              <div className="space-y-2">
-                <label className="text-xs uppercase text-[var(--color-muted)]">Tasa de conversión</label>
-                <Input
-                  type="number"
-                  step="0.0001"
-                  value={conversionRate}
-                  onChange={(e) => setConversionRate(e.target.value)}
-                  placeholder="0.18"
-                />
-              </div>
-              <div className="space-y-2">
-                <label className="text-xs uppercase text-[var(--color-muted)]">Valor promedio</label>
-                <Input
-                  type="number"
-                  step="0.01"
-                  value={avgValue}
-                  onChange={(e) => setAvgValue(e.target.value)}
-                  placeholder="1000"
-                />
-              </div>
-            </div>
-            <p className="text-xs text-[var(--color-muted)]">
-              Ligados a {yVar || "la variable dependiente"}: ingreso = contribución × tasa_conversión × valor_promedio.
-              Opcionales — sin ambos, la sección de Economía en Analysis queda deshabilitada para este modelo.
-            </p>
             <div className="flex gap-2 justify-end">
               {editingModelId && (
                 <Button variant="ghost" onClick={resetForm}>
@@ -816,7 +730,7 @@ const [subgroupFilter, setSubgroupFilter] = useState<SubgroupFilter>("all");
                         {m.name}
                         {!m.apply_media_transforms && (
                           <span
-                            className="ml-2 text-[10px] uppercase text-[var(--color-muted)]"
+                            className="ml-2 text-3xs uppercase text-[var(--color-muted)]"
                             title="Este modelo NO aplica adstock+saturación a variables de medios (valores crudos)"
                           >
                             sin transform
@@ -912,7 +826,7 @@ const [subgroupFilter, setSubgroupFilter] = useState<SubgroupFilter>("all");
               <table className="min-w-full text-sm">
                 <thead className="bg-[var(--color-bg)]/70">
                   <tr>
-                    <th className="px-3 py-2 text-left text-[11px] uppercase tracking-wide text-[var(--color-muted)]">
+                    <th className="px-3 py-2 text-left text-2xs uppercase tracking-wide text-[var(--color-muted)]">
                       Metric
                     </th>
                     {compareModels.map((m, idx) => (
@@ -924,11 +838,7 @@ const [subgroupFilter, setSubgroupFilter] = useState<SubgroupFilter>("all");
                       >
                         <div className="flex flex-col items-center gap-1">
                           <span className="text-sm text-[var(--color-foreground)]">{m.name}</span>
-                          {m.role === "hero" && (
-                            <span className="rounded-full bg-[var(--color-foreground)] px-2 py-0.5 text-[10px] font-semibold text-white">
-                              Hero
-                            </span>
-                          )}
+                          {m.role === "hero" && <Badge variant="neutral">Hero</Badge>}
                         </div>
                       </th>
                     ))}
@@ -944,7 +854,7 @@ const [subgroupFilter, setSubgroupFilter] = useState<SubgroupFilter>("all");
                         const cellClasses = [
                           "px-3 py-2 text-center text-sm transition-colors",
                           isHero ? "bg-[var(--color-border)]/20" : "",
-                          isBest ? "bg-emerald-50 text-emerald-700 font-semibold rounded-md" : "",
+                          isBest ? "bg-[var(--color-success-soft)] text-[var(--color-success)] font-semibold rounded-md" : "",
                         ]
                           .filter(Boolean)
                           .join(" ");
@@ -953,11 +863,7 @@ const [subgroupFilter, setSubgroupFilter] = useState<SubgroupFilter>("all");
                           <td key={`${row.key}-${idx}`} className={cellClasses}>
                             <div className="inline-flex items-center gap-1">
                               <span>{displayValue}</span>
-                              {isBest && (
-                                <span className="rounded-full bg-emerald-100 px-1.5 py-0.5 text-[10px] font-medium">
-                                  Best
-                                </span>
-                              )}
+                              {isBest && <Badge variant="success">Best</Badge>}
                             </div>
                           </td>
                         );
@@ -973,7 +879,13 @@ const [subgroupFilter, setSubgroupFilter] = useState<SubgroupFilter>("all");
                   <ComposedChart data={comparisonChartData} margin={{ top: 10, right: 32, left: 0, bottom: 0 }}>
                     <CartesianGrid strokeDasharray="3 3" />
                     <XAxis dataKey="model" stroke="var(--color-muted)" />
-                    <YAxis yAxisId="left" axisLine={false} tickLine={false} stroke="var(--color-muted)" />
+                    <YAxis
+                      yAxisId="left"
+                      axisLine={false}
+                      tickLine={false}
+                      stroke="var(--color-muted)"
+                      tickFormatter={(value) => formatChartNumber(Number(value), 2)}
+                    />
                     <YAxis
                       yAxisId="right"
                       orientation="right"
@@ -997,7 +909,7 @@ const [subgroupFilter, setSubgroupFilter] = useState<SubgroupFilter>("all");
                       name="MAE"
                       barSize={18}
                       radius={[6, 6, 0, 0]}
-                      fill="#a5b4fc"
+                      fill={chartColor(1, isDarkTheme)}
                     />
                     <Bar
                       yAxisId="left"
@@ -1005,7 +917,7 @@ const [subgroupFilter, setSubgroupFilter] = useState<SubgroupFilter>("all");
                       name="RMSE"
                       barSize={18}
                       radius={[6, 6, 0, 0]}
-                      fill="#c7d2fe"
+                      fill={chartColor(2, isDarkTheme)}
                     />
                     <Line
                       yAxisId="right"
@@ -1013,7 +925,7 @@ const [subgroupFilter, setSubgroupFilter] = useState<SubgroupFilter>("all");
                       dataKey="r2"
                       name="R^2"
                       dot={false}
-                      stroke="#2563eb"
+                      stroke={chartColor(0, isDarkTheme)}
                       strokeWidth={2}
                     />
                   </ComposedChart>
@@ -1028,11 +940,16 @@ const [subgroupFilter, setSubgroupFilter] = useState<SubgroupFilter>("all");
         )}
       </Card>
 
-      <div className="grid gap-6 lg:grid-cols-2">
+      <div className="grid gap-6 lg:grid-cols-[3fr_2fr]">
         <Card className="space-y-4">
-          <CardHeader title="Hero Model Summary" subtitle="Coefficients & diagnostics" />
+          <div className="flex items-center justify-between">
+            <CardHeader title="Hero Model Summary" subtitle="Coefficients & diagnostics" />
+            <Button variant="ghost" onClick={() => heroModel && downloadModelSummary(heroModel.id)} disabled={!summary || !heroModel}>
+              Export Excel
+            </Button>
+          </div>
           {summary ? (
-            <div className="overflow-auto max-h-[360px] pr-2">
+            <div className="overflow-auto max-h-[480px] pr-2">
               <table className="min-w-full text-sm">
                 <thead className="bg-[var(--color-bg)]/70">
                   <tr>
@@ -1054,7 +971,7 @@ const [subgroupFilter, setSubgroupFilter] = useState<SubgroupFilter>("all");
                           {item.is_media && <Badge>Medios</Badge>}
                         </div>
                         {item.is_media && (
-                          <div className="text-[11px] text-[var(--color-muted)]">
+                          <div className="text-2xs text-[var(--color-muted)]">
                             decay {item.decay?.toFixed(2)}
                             {item.half_life != null ? ` (half-life ${item.half_life.toFixed(1)})` : ""} · K{" "}
                             {item.hill_k?.toFixed(2)} · S {item.hill_s?.toFixed(1)}
@@ -1087,7 +1004,7 @@ const [subgroupFilter, setSubgroupFilter] = useState<SubgroupFilter>("all");
             </label>
           </div>
           {predictionSeries.length ? (
-            <div className="h-72">
+            <div className="h-[480px]">
               <ResponsiveContainer>
                 <LineChart data={predictionSeries}>
                   <CartesianGrid strokeDasharray="3 3" />
@@ -1098,7 +1015,7 @@ const [subgroupFilter, setSubgroupFilter] = useState<SubgroupFilter>("all");
                     height={40}
                     tick={{ fontSize: 11 }}
                   />
-                  <YAxis />
+                  <YAxis tickFormatter={(value) => formatChartNumber(Number(value))} />
                   <Tooltip
                     labelFormatter={(value) => formatTimeLabel(String(value), true)}
                     formatter={(value: number | string, name) => {
@@ -1110,11 +1027,11 @@ const [subgroupFilter, setSubgroupFilter] = useState<SubgroupFilter>("all");
                   />
                   <Legend />
                   {showResiduals ? (
-                    <Line type="monotone" dataKey="residual" stroke="#ef4444" dot={false} name="Residual" />
+                    <Line type="monotone" dataKey="residual" stroke={chartColor(7, isDarkTheme)} dot={false} name="Residual" />
                   ) : (
                     <>
-                      <Line type="monotone" dataKey="y_true" stroke="#2563eb" dot={false} name="Actual" />
-                      <Line type="monotone" dataKey="y_pred" stroke="#22c55e" dot={false} name="Model" />
+                      <Line type="monotone" dataKey="y_true" stroke={chartColor(0, isDarkTheme)} dot={false} name="Actual" />
+                      <Line type="monotone" dataKey="y_pred" stroke={chartColor(2, isDarkTheme)} dot={false} name="Model" />
                     </>
                   )}
                 </LineChart>
@@ -1125,27 +1042,11 @@ const [subgroupFilter, setSubgroupFilter] = useState<SubgroupFilter>("all");
           )}
         </Card>
       </div>
-
-      {summary && summary.coefficients.some((c) => c.is_media) && (
-        <Card className="space-y-4">
-          <CardHeader
-            title="Curvas de saturación"
-            subtitle="Rendimiento marginal decreciente (Hill) por variable de medios — línea punteada: nivel actual"
-          />
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-            {summary.coefficients
-              .filter((c) => c.is_media)
-              .map((c) => (
-                <SaturationCurveChart key={c.name} coef={c} />
-              ))}
-          </div>
-        </Card>
-      )}
     </section>
 
     {showQuickView && (
       <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-4">
-        <div className="w-full max-w-sm rounded-2xl bg-white p-4 shadow-2xl">
+        <div className="w-full max-w-sm rounded-2xl bg-[var(--color-card)] p-4 shadow-2xl">
             <div className="mb-3 flex items-center justify-between">
               <div>
                 <h3 className="text-sm font-semibold text-[var(--color-foreground)]">Selected predictors</h3>
@@ -1175,7 +1076,7 @@ const [subgroupFilter, setSubgroupFilter] = useState<SubgroupFilter>("all");
                     </div>
                     <button
                       type="button"
-                      className="rounded-full bg-[var(--color-border)] px-2 py-0.5 text-xs text-[var(--color-muted)] hover:bg-[var(--color-border)]/70"
+                      className="rounded-full border border-[var(--color-border)] px-2 py-0.5 text-xs text-[var(--color-muted)] hover:bg-[var(--color-border)]/30"
                       onClick={() => handleToggleX(item.name)}
                     >
                       remove

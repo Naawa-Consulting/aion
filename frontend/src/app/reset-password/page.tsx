@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { Card, CardHeader } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
+import { ErrorText } from "@/components/ui/error-text";
 import { getSupabaseBrowserClient } from "@/lib/supabase/client";
 
 export default function ResetPasswordPage() {
@@ -72,7 +73,7 @@ export default function ResetPasswordPage() {
                   minLength={8}
                   autoComplete="new-password"
                 />
-                {error && <p className="text-sm text-red-500">{error}</p>}
+                {error && <ErrorText className="text-sm">{error}</ErrorText>}
                 <Button type="submit" disabled={loading} className="w-full">
                   {loading ? "Guardando..." : "Guardar contraseña"}
                 </Button>
@@ -90,7 +91,7 @@ export default function ResetPasswordPage() {
                   required
                   autoComplete="email"
                 />
-                {error && <p className="text-sm text-red-500">{error}</p>}
+                {error && <ErrorText className="text-sm">{error}</ErrorText>}
                 {message && <p className="text-sm text-[var(--color-accent)]">{message}</p>}
                 <Button type="submit" disabled={loading} className="w-full">
                   {loading ? "Enviando..." : "Enviar enlace"}

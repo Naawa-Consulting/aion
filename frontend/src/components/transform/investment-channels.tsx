@@ -9,6 +9,9 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Modal } from "@/components/ui/modal";
+import { ErrorText } from "@/components/ui/error-text";
+import { Select } from "@/components/ui/select";
+import { Eyebrow } from "@/components/ui/eyebrow";
 import { apiFetch, ApiError } from "@/lib/api";
 
 type SourceMode = "dataset_column" | "rate_metric" | "manual";
@@ -72,6 +75,7 @@ export function InvestmentChannels({
   const [formError, setFormError] = useState("");
   const [deleteTarget, setDeleteTarget] = useState<InvestmentChannel | null>(null);
   const [deleteLoading, setDeleteLoading] = useState(false);
+  const [heroXVars, setHeroXVars] = useState<string[] | null>(null);
 
   const fetchChannels = useCallback(async () => {
     if (!datasetId) {
@@ -92,6 +96,31 @@ export function InvestmentChannels({
   useEffect(() => {
     fetchChannels();
   }, [fetchChannels]);
+
+  useEffect(() => {
+    if (!datasetId) {
+      setHeroXVars(null);
+      return;
+    }
+    apiFetch<{ role: string; x_vars: string[] }[]>(`/models?dataset_id=${datasetId}`)
+      .then((models) => {
+        const hero = models.find((m) => m.role === "hero");
+        setHeroXVars(hero ? hero.x_vars : null);
+      })
+      .catch(() => setHeroXVars(null));
+  }, [datasetId]);
+
+  // Proxy variable options are scoped to the current hero model's x_vars, when one exists —
+  // picking a variable outside the winning model silently misaligns economics (the channel would
+  // show as non-modeled). Falls back to every dataset variable when there's no hero yet, or when
+  // the channel's already-saved proxy isn't (or is no longer) one of the hero's x_vars, so editing
+  // an existing misaligned channel doesn't hide its current value.
+  const proxyOptions = useMemo(() => {
+    if (!heroXVars) return variableNames;
+    const options = new Set(heroXVars);
+    if (form.proxy_variable !== NO_PROXY) options.add(form.proxy_variable);
+    return variableNames.filter((name) => options.has(name));
+  }, [heroXVars, variableNames, form.proxy_variable]);
 
   const openCreate = () => {
     setEditingId(null);
@@ -268,7 +297,7 @@ export function InvestmentChannels({
                 </button>
                 <button
                   type="button"
-                  className="rounded-full p-1.5 text-[var(--color-muted)] hover:text-red-500 disabled:cursor-not-allowed disabled:opacity-60"
+                  className="rounded-full p-1.5 text-[var(--color-muted)] hover:text-[var(--color-danger)] disabled:cursor-not-allowed disabled:opacity-60"
                   onClick={() => setDeleteTarget(channel)}
                   disabled={!canEdit}
                   title={!canEdit ? "Solo lectura: tu rol es Visualizador" : "Delete"}
@@ -284,26 +313,25 @@ export function InvestmentChannels({
       <Modal open={modalOpen} onClose={closeModal} title={editingId ? "Editar canal" : "Nuevo canal de inversión"}>
         <div className="space-y-4">
           <div className="space-y-2">
-            <label className="text-xs font-medium uppercase tracking-wide text-[var(--color-muted)]">Nombre</label>
+            <Eyebrow>Nombre</Eyebrow>
             <Input value={form.name} onChange={(e) => setForm((p) => ({ ...p, name: e.target.value }))} placeholder="YouTube" />
           </div>
 
           <div className="space-y-2">
-            <label className="text-xs font-medium uppercase tracking-wide text-[var(--color-muted)]">Fuente de inversión</label>
-            <select
-              className="w-full rounded-full border border-[var(--color-border)] px-3 py-2 bg-transparent text-sm"
+            <Eyebrow>Fuente de inversión</Eyebrow>
+            <Select
               value={form.source_mode}
               onChange={(e) => setForm((p) => ({ ...p, source_mode: e.target.value as SourceMode }))}
             >
               <option value="dataset_column">Columna del dataset</option>
               <option value="rate_metric">Tasa × métrica</option>
               <option value="manual">Manual</option>
-            </select>
+            </Select>
           </div>
 
           {form.source_mode === "dataset_column" && (
             <div className="space-y-2">
-              <label className="text-xs font-medium uppercase tracking-wide text-[var(--color-muted)]">Columna de costo ($)</label>
+              <Eyebrow>Columna de costo ($)</Eyebrow>
               <div>
                 <Input
                   list="channel-cost-columns"
@@ -323,7 +351,7 @@ export function InvestmentChannels({
           {form.source_mode === "rate_metric" && (
             <div className="grid gap-3 md:grid-cols-2">
               <div className="space-y-2">
-                <label className="text-xs font-medium uppercase tracking-wide text-[var(--color-muted)]">Tasa (ej. CPV)</label>
+                <Eyebrow>Tasa (ej. CPV)</Eyebrow>
                 <Input
                   type="number"
                   step="0.0001"
@@ -333,7 +361,7 @@ export function InvestmentChannels({
                 />
               </div>
               <div className="space-y-2">
-                <label className="text-xs font-medium uppercase tracking-wide text-[var(--color-muted)]">Columna de métrica</label>
+                <Eyebrow>Columna de métrica</Eyebrow>
                 <div>
                   <Input
                     list="channel-metric-columns"
@@ -353,7 +381,7 @@ export function InvestmentChannels({
 
           {form.source_mode === "manual" && (
             <div className="space-y-2">
-              <label className="text-xs font-medium uppercase tracking-wide text-[var(--color-muted)]">Periodos de inversión</label>
+              <Eyebrow>Periodos de inversión</Eyebrow>
               <div className="space-y-2">
                 {form.entries.map((entry, index) => (
                   <div key={index} className="flex items-center gap-2">
@@ -377,7 +405,7 @@ export function InvestmentChannels({
                     />
                     <button
                       type="button"
-                      className="rounded-full p-1.5 text-[var(--color-muted)] hover:text-red-500"
+                      className="rounded-full p-1.5 text-[var(--color-muted)] hover:text-[var(--color-danger)]"
                       onClick={() => removeEntryRow(index)}
                     >
                       <X size={14} />
@@ -392,28 +420,26 @@ export function InvestmentChannels({
           )}
 
           <div className="space-y-2">
-            <label className="text-xs font-medium uppercase tracking-wide text-[var(--color-muted)]">
-              Variable proxy (modelo)
-            </label>
-            <select
-              className="w-full rounded-full border border-[var(--color-border)] px-3 py-2 bg-transparent text-sm"
+            <Eyebrow>Variable proxy (modelo)</Eyebrow>
+            <Select
               value={form.proxy_variable}
               onChange={(e) => setForm((p) => ({ ...p, proxy_variable: e.target.value }))}
             >
               <option value={NO_PROXY}>— sin variable de modelo (no modelado) —</option>
-              {variableNames.map((name) => (
+              {proxyOptions.map((name) => (
                 <option key={name} value={name}>
                   {name}
                 </option>
               ))}
-            </select>
+            </Select>
             <p className="text-xs text-[var(--color-muted)]">
               Qué variable del modelo representa este canal. Si no se selecciona, la inversión sigue contando en
               el total pero no se le atribuye contribución/ROI.
+              {heroXVars && " Solo se muestran las variables del modelo Hero actual, para evitar desalineamiento."}
             </p>
           </div>
 
-          {formError && <p className="text-sm text-red-500">{formError}</p>}
+          {formError && <ErrorText className="text-sm">{formError}</ErrorText>}
 
           <div className="flex justify-end gap-2">
             <Button variant="ghost" onClick={closeModal} disabled={saving}>
@@ -430,17 +456,12 @@ export function InvestmentChannels({
         <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center px-4">
           <div className="w-full max-w-md rounded-2xl bg-[var(--color-card)] p-6 shadow-lg space-y-4">
             <h3 className="text-lg font-semibold">Delete channel &quot;{deleteTarget.name}&quot;?</h3>
-            <p className="text-xs text-red-500">This action cannot be undone.</p>
+            <ErrorText className="text-xs">This action cannot be undone.</ErrorText>
             <div className="flex justify-end gap-2">
               <Button variant="ghost" onClick={() => setDeleteTarget(null)} disabled={deleteLoading}>
                 Cancel
               </Button>
-              <Button
-                variant="secondary"
-                className="bg-red-600 text-white hover:bg-red-600/90"
-                onClick={confirmDelete}
-                disabled={deleteLoading}
-              >
+              <Button variant="danger" onClick={confirmDelete} disabled={deleteLoading}>
                 {deleteLoading ? "Deleting..." : "Delete channel"}
               </Button>
             </div>

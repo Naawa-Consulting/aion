@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import io
 import json
 from typing import Dict, List, Optional
 
@@ -8,7 +7,6 @@ import numpy as np
 import pandas as pd
 import statsmodels.api as sm
 from fastapi import APIRouter, Depends, HTTPException, Query
-from fastapi.responses import StreamingResponse
 from sqlmodel import Session, select
 
 from ..auth import CurrentMembership, get_current_membership
@@ -23,6 +21,7 @@ from ..services.analysis import (
 )
 from ..services.model_fit import build_design_matrix, load_transform_params, resolve_media_flags
 from ..tenancy import get_scoped
+from ..utils.excel import excel_response
 from ..utils.datasets import load_dataset_frame
 
 
@@ -151,6 +150,23 @@ def _group_maps(session: Session, dataset_id: str, company_id: str):
     return var_map, sg_map, g_map
 
 
+def _baseline_predictor_names(var_map: dict, g_map: dict, sg_map: dict) -> set[str]:
+    """Variable names whose Group (directly, or via Subgroup) is flagged Group.is_baseline —
+    their contribution gets folded into the intercept instead of reported as its own line."""
+    names: set[str] = set()
+    for name, mapping in var_map.items():
+        gid = mapping.get("group_id")
+        group = g_map.get(gid) if gid else None
+        if group is None:
+            sid = mapping.get("subgroup_id")
+            sg = sg_map.get(sid) if sid else None
+            if sg:
+                group = g_map.get(sg.group_id)
+        if group is not None and group.is_baseline:
+            names.add(name)
+    return names
+
+
 @router.get("/{model_id}/summary")
 def summary(
     model_id: str,
@@ -198,6 +214,9 @@ def summary(
     if cached_summary is not None:
         return cached_summary
 
+    var_map, sg_map, g_map = _group_maps(session, ds.id, membership.company_id)
+    baseline_predictors = _baseline_predictor_names(var_map, g_map, sg_map)
+
     time_field = getattr(ds, "time_variable", None)
     contrib_result = compute_contributions(
         dataset_id=ds.id,
@@ -209,9 +228,9 @@ def summary(
         end=end_ts,
         params=params,
         predictors=list(X.columns),
+        baseline_predictors=baseline_predictors,
     )
 
-    var_map, sg_map, g_map = _group_maps(session, ds.id, membership.company_id)
     other_label = "Other"
     other_group_key = "__other__"
     other_sub_key = "__other_sub__"
@@ -443,6 +462,9 @@ def stacked(
     if cached_stacked is not None:
         return cached_stacked
 
+    var_map, sg_map, g_map = _group_maps(session, ds.id, membership.company_id)
+    baseline_predictors = _baseline_predictor_names(var_map, g_map, sg_map)
+
     contrib_result = compute_contributions(
         dataset_id=ds.id,
         model_id=m.id,
@@ -453,9 +475,8 @@ def stacked(
         end=end_ts,
         params=params,
         predictors=list(X.columns),
+        baseline_predictors=baseline_predictors,
     )
-
-    var_map, sg_map, g_map = _group_maps(session, ds.id, membership.company_id)
 
     freq_map = {"day": "D", "week": "W", "month": "M"}
     rule = freq_map.get(freq, "M")
@@ -541,20 +562,13 @@ def export_summary(
     data = summary(
         model_id, include_intercept, as_percent, start_date, end_date, membership, session
     )
-    buf = io.BytesIO()
-    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-        pd.DataFrame(data["variables"]).to_excel(
-            writer, index=False, sheet_name="variables"
-        )
-        pd.DataFrame(data["groups"]).to_excel(writer, index=False, sheet_name="groups")
-        pd.DataFrame(data["subgroups"]).to_excel(
-            writer, index=False, sheet_name="subgroups"
-        )
-    buf.seek(0)
-    return StreamingResponse(
-        buf,
-        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": "attachment; filename=summary.xlsx"},
+    return excel_response(
+        {
+            "variables": pd.DataFrame(data["variables"]),
+            "groups": pd.DataFrame(data["groups"]),
+            "subgroups": pd.DataFrame(data["subgroups"]),
+        },
+        "summary.xlsx",
     )
 
 
@@ -616,18 +630,10 @@ def export_summary_table_excel(
         raise HTTPException(status_code=400, detail="Invalid group mode")
 
     df = pd.DataFrame(table_rows)
-    buf = io.BytesIO()
-    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False, sheet_name="Summary")
-    buf.seek(0)
     filename = (
         f"summary_table_{dataset_id or 'dataset'}_{model_info.get('id')}.xlsx"
     )
-    return StreamingResponse(
-        buf,
-        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
-    )
+    return excel_response({"Summary": df}, filename)
 
 
 @router.get("/{model_id}/export/stacked.xlsx")
@@ -655,18 +661,10 @@ def export_stacked(
         membership,
         session,
     )
-    buf = io.BytesIO()
     # Convert to a flat table for Excel
     index = data["index"]
     rows = [
         {"period": idx, **{s["key"]: s["values"][i] for s in data["series"]}}
         for i, idx in enumerate(index)
     ]
-    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-        pd.DataFrame(rows).to_excel(writer, index=False, sheet_name="stacked")
-    buf.seek(0)
-    return StreamingResponse(
-        buf,
-        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": "attachment; filename=stacked.xlsx"},
-    )
+    return excel_response({"stacked": pd.DataFrame(rows)}, "stacked.xlsx")

@@ -11,6 +11,8 @@ import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Progress } from "@/components/ui/progress";
 import { Modal } from "@/components/ui/modal";
+import { Select } from "@/components/ui/select";
+import { ErrorText } from "@/components/ui/error-text";
 import { useGlobalStore } from "@/lib/store";
 import { formatDate, formatNumber } from "@/lib/format";
 import { useKeyboardShortcut } from "@/hooks/useKeyboardShortcut";
@@ -28,6 +30,7 @@ type Dataset = {
   time_variable?: string | null;
   time_format?: string | null;
   time_timezone?: string | null;
+  dependent_variable?: string | null;
   version?: number;
   previous_version_id?: string | null;
   created_at: string;
@@ -50,6 +53,8 @@ type Preview = {
 type Differences = { added: string[]; removed: string[]; dtype_mismatch: string[] };
 
 type VersionInfo = { version: number; created_at: string };
+
+type VariableFlag = { id: string; name: string; is_excluded: boolean };
 
 type DatasetSummary = {
   name: string;
@@ -83,7 +88,7 @@ export default function DatasetsPage() {
   const [deleteState, setDeleteState] = useState<{ open: boolean; dataset?: Dataset; cascade: boolean }>(
     { open: false, cascade: true }
   );
-  const { datasetId, setDatasetId } = useGlobalStore();
+  const { datasetId, setDatasetId, activeCompanyId } = useGlobalStore();
   const canEdit = useCanEdit();
   const [sampleMode, setSampleMode] = useState<"all" | "custom">("all");
   const [customSample, setCustomSample] = useState<number>(0);
@@ -119,6 +124,10 @@ export default function DatasetsPage() {
     loading: boolean;
     data?: DatasetSummary;
   }>({ open: false, loading: false });
+  const [summaryVariables, setSummaryVariables] = useState<VariableFlag[]>([]);
+  const [togglingVariableId, setTogglingVariableId] = useState<string | null>(null);
+  const [dependentVariable, setDependentVariable] = useState("");
+  const [dependentVariableSaving, setDependentVariableSaving] = useState(false);
 
   const dismissUpdateModal = useCallback(() => {
     setUpdateState({ open: false, strategy: "strict", uploading: false });
@@ -130,6 +139,7 @@ export default function DatasetsPage() {
 
   const closeSummary = useCallback(() => {
     setSummaryState({ open: false, loading: false, data: undefined });
+    setSummaryVariables([]);
   }, []);
 
   const fetchDatasets = useCallback(async () => {
@@ -145,8 +155,12 @@ export default function DatasetsPage() {
   }, [datasetId, setDatasetId]);
 
   useEffect(() => {
+    // activeCompanyId hydrates asynchronously (AuthBootstrap fetches /me/memberships and
+    // auto-selects the first company) — fetching before it's set sends no X-Company-Id
+    // header and the backend 422s. Wait for it, then re-fetch once it's ready.
+    if (!activeCompanyId) return;
     fetchDatasets();
-  }, [fetchDatasets]);
+  }, [fetchDatasets, activeCompanyId]);
 
   const loadPreview = useCallback(async (id: string) => {
     setLoadingPreview(true);
@@ -210,8 +224,12 @@ export default function DatasetsPage() {
     async (dataset: Dataset) => {
       setSummaryState({ open: true, loading: true });
       try {
-        const data = await apiFetch<DatasetSummary>(`/datasets/${dataset.id}/summary`);
+        const [data, variables] = await Promise.all([
+          apiFetch<DatasetSummary>(`/datasets/${dataset.id}/summary`),
+          apiFetch<VariableFlag[]>(`/variables?dataset_id=${dataset.id}&include_excluded=true`),
+        ]);
         setSummaryState({ open: true, loading: false, data });
+        setSummaryVariables(variables);
       } catch (error: any) {
         console.error(error);
         toast.error(error?.message || "Failed to load dataset summary");
@@ -220,6 +238,29 @@ export default function DatasetsPage() {
     },
     []
   );
+
+  const handleToggleExcluded = useCallback(async (variable: VariableFlag) => {
+    const next = !variable.is_excluded;
+    setTogglingVariableId(variable.id);
+    setSummaryVariables((prev) =>
+      prev.map((v) => (v.id === variable.id ? { ...v, is_excluded: next } : v))
+    );
+    try {
+      await apiFetch(`/variables/${variable.id}/categorization`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ is_excluded: next }),
+      });
+    } catch (error: any) {
+      console.error(error);
+      toast.error(error?.message || "Failed to update variable");
+      setSummaryVariables((prev) =>
+        prev.map((v) => (v.id === variable.id ? { ...v, is_excluded: !next } : v))
+      );
+    } finally {
+      setTogglingVariableId(null);
+    }
+  }, []);
 
   const currentDataset = useMemo(
     () => datasets.find((ds) => ds.id === datasetId) || null,
@@ -237,6 +278,7 @@ export default function DatasetsPage() {
     setTimeFormat(currentDataset.time_format ?? "");
     setTimeTimezone(currentDataset.time_timezone ?? "");
     setTimeCoerce(!currentDataset.time_variable);
+    setDependentVariable(currentDataset.dependent_variable ?? "");
   }, [currentDataset]);
 
   const totalRows = currentDataset?.total_rows ?? currentDataset?.n_rows ?? 0;
@@ -371,6 +413,31 @@ export default function DatasetsPage() {
     }
   }, [currentDataset, fetchTimeCandidates]);
 
+  const handleChangeDependentVariable = useCallback(
+    async (column: string) => {
+      if (!currentDataset) return;
+      const previous = currentDataset.dependent_variable ?? "";
+      setDependentVariable(column);
+      setDependentVariableSaving(true);
+      try {
+        const updated = await apiFetch<Dataset>(`/datasets/${currentDataset.id}/dependent_variable`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ column: column || null }),
+        });
+        setDatasets((prev) => prev.map((ds) => (ds.id === updated.id ? updated : ds)));
+        toast.success(column ? "✅ Dependent variable saved" : "Dependent variable cleared");
+      } catch (error: any) {
+        console.error(error);
+        toast.error(error?.message || "Failed to save dependent variable");
+        setDependentVariable(previous);
+      } finally {
+        setDependentVariableSaving(false);
+      }
+    },
+    [currentDataset]
+  );
+
   const handleUpdateUpload = useCallback((fileList: FileList | null) => {
     const file = fileList?.[0];
     setUpdateState((state) => ({ ...state, file }));
@@ -504,6 +571,7 @@ export default function DatasetsPage() {
       "text/csv": [".csv"],
       "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": [".xlsx"],
       "application/vnd.ms-excel": [".xls"],
+      "application/octet-stream": [".parquet"],
     },
   });
 
@@ -588,11 +656,11 @@ export default function DatasetsPage() {
             >
               <input {...getInputProps()} id="dataset-upload-input" />
               <p className="font-medium text-lg">Drop files here or click to browse</p>
-              <p className="text-sm text-[var(--color-muted)] mt-1">Accepted: CSV, XLSX, XLS</p>
+              <p className="text-sm text-[var(--color-muted)] mt-1">Accepted: CSV, XLSX, XLS, Parquet</p>
               <div className="mt-3 flex justify-center gap-2 text-xs">
                 <Badge>CSV</Badge>
                 <Badge>Excel</Badge>
-                <Badge>Parquet Store</Badge>
+                <Badge>Parquet</Badge>
               </div>
               {uploading && (
                 <div className="mt-4">
@@ -716,7 +784,7 @@ export default function DatasetsPage() {
           </Card>
         </div>
 
-        <Card className="space-y-4">
+        <Card className="space-y-4 min-w-0">
           {currentDataset ? (
             <div className="relative space-y-4">
               <div
@@ -762,11 +830,7 @@ export default function DatasetsPage() {
                   </div>
                   {timeCandidatesLoading && <span className="text-xs text-[var(--color-muted)]">Detecting…</span>}
                 </div>
-                <select
-                  className="w-full rounded-2xl border border-[var(--color-border)] bg-transparent px-4 py-2 text-sm"
-                  value={timeColumn}
-                  onChange={(event) => setTimeColumn(event.target.value)}
-                >
+                <Select value={timeColumn} onChange={(event) => setTimeColumn(event.target.value)}>
                   <option value="">Select column</option>
                   {timeCandidates.length > 0 && (
                     <optgroup label="Suggested">
@@ -786,7 +850,7 @@ export default function DatasetsPage() {
                       ))}
                     </optgroup>
                   )}
-                </select>
+                </Select>
                 <div className="space-y-2 rounded-xl border border-dashed border-[var(--color-border)] p-3 text-xs">
                   <label className="flex items-center gap-2 text-sm">
                     <input type="checkbox" checked={timeCoerce} onChange={(event) => setTimeCoerce(event.target.checked)} />
@@ -840,11 +904,31 @@ export default function DatasetsPage() {
                   </Button>
                 </div>
               </div>
+              <div className="rounded-2xl border border-[var(--color-border)] p-4 space-y-3">
+                <div>
+                  <p className="font-medium">Dependent variable</p>
+                  <p className="text-xs text-[var(--color-muted)]">
+                    Used in Transform to show correlation against this column while previewing transformations.
+                  </p>
+                </div>
+                <Select
+                  value={dependentVariable}
+                  onChange={(event) => handleChangeDependentVariable(event.target.value)}
+                  disabled={!canEdit || !currentDataset || dependentVariableSaving}
+                >
+                  <option value="">None selected</option>
+                  {currentDataset?.columns.map((col) => (
+                    <option key={`dep-${col.name}`} value={col.name}>
+                      {col.name}
+                    </option>
+                  ))}
+                </Select>
+              </div>
               <div className="rounded-2xl border border-[var(--color-border)] p-4 space-y-2">
                 <div className="flex flex-wrap items-center gap-3">
                   <p className="text-sm font-medium">Working Sample Size</p>
-                  <select
-                    className="rounded-2xl border border-[var(--color-border)] bg-transparent px-4 py-2 text-sm transition-colors"
+                  <Select
+                    wrapperClassName="w-auto"
                     value={sampleMode}
                     onChange={(event) => {
                       const nextMode = event.target.value as "all" | "custom";
@@ -858,14 +942,14 @@ export default function DatasetsPage() {
                   >
                     <option value="all">All rows</option>
                     <option value="custom">Custom…</option>
-                  </select>
+                  </Select>
                   {sampleMode === "custom" && (
                     <input
                       type="number"
                       min={sampleMin}
                       max={totalRows}
                       className={`w-24 rounded-xl border px-3 py-2 text-sm transition-all duration-200 ${
-                        sampleInvalid ? "border-red-500" : "border-[var(--color-border)]"
+                        sampleInvalid ? "border-[var(--color-danger)]" : "border-[var(--color-border)]"
                       } bg-transparent`}
                       value={customSample}
                       onChange={(event) => setCustomSample(Number(event.target.value) || 0)}
@@ -881,9 +965,9 @@ export default function DatasetsPage() {
                   </Button>
                 </div>
                 {sampleMode === "custom" && sampleInvalid && (
-                  <p className="text-xs text-red-500">
+                  <ErrorText className="text-xs">
                     Enter a value between {formatNumber(sampleMin, 0)} and {formatNumber(totalRows, 0)} rows.
-                  </p>
+                  </ErrorText>
                 )}
                 <p className="text-xs text-[var(--color-muted)]">
                   {activeRows === totalRows || !totalRows
@@ -960,10 +1044,13 @@ export default function DatasetsPage() {
                       <th className="px-4 py-2 text-left">Unique</th>
                       <th className="px-4 py-2 text-left">Min / Max</th>
                       <th className="px-4 py-2 text-left">Preview</th>
+                      <th className="px-4 py-2 text-left">Hide</th>
                     </tr>
                   </thead>
                   <tbody>
-                {summaryState.data.columns.map((col) => (
+                {summaryState.data.columns.map((col) => {
+                  const variable = summaryVariables.find((v) => v.name === col.name);
+                  return (
                   <tr
                     key={col.name}
                     className="border-t border-[var(--color-border)]/70"
@@ -979,8 +1066,20 @@ export default function DatasetsPage() {
                         <td className="px-4 py-3 text-[var(--color-muted)] truncate">
                           {col.samples?.length ? col.samples.join(", ") : "–"}
                         </td>
+                        <td className="px-4 py-3">
+                          {variable && (
+                            <input
+                              type="checkbox"
+                              checked={variable.is_excluded}
+                              disabled={!canEdit || togglingVariableId === variable.id}
+                              onChange={() => handleToggleExcluded(variable)}
+                              title="Hide this variable from Transform/Modeling selectors"
+                            />
+                          )}
+                        </td>
                       </tr>
-                    ))}
+                  );
+                    })}
                   </tbody>
                 </table>
               </div>
@@ -1006,14 +1105,13 @@ export default function DatasetsPage() {
         </p>
         <input
           type="file"
-          accept=".csv,.xlsx,.xls"
+          accept=".csv,.xlsx,.xls,.parquet"
           onChange={(event) => handleUpdateUpload(event.target.files)}
           className="w-full rounded-lg border border-dashed border-[var(--color-border)] px-3 py-2 text-sm"
         />
         <label className="mt-3 flex flex-col gap-1 text-sm">
           Replace strategy
-          <select
-            className="rounded-lg border border-[var(--color-border)] bg-transparent px-3 py-2"
+          <Select
             value={updateState.strategy}
             onChange={(event) =>
               setUpdateState((state) => ({ ...state, strategy: event.target.value as "strict" | "force" }))
@@ -1021,10 +1119,10 @@ export default function DatasetsPage() {
           >
             <option value="strict">Strict (schema must match)</option>
             <option value="force">Force (allow added/removed columns)</option>
-          </select>
+          </Select>
         </label>
         {updateState.error && (
-          <div className="mt-3 rounded-lg border border-red-500/50 bg-red-500/10 p-3 text-sm text-red-600">
+          <div className="mt-3 rounded-lg border border-[var(--color-danger)]/50 bg-[var(--color-danger-soft)] p-3 text-sm text-[var(--color-danger)]">
             {updateState.error}
           </div>
         )}
