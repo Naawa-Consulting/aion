@@ -600,8 +600,13 @@ class CreateCompanyRequest(BaseModel):
     admin_user_id: str
 
 
+class UpdateCompanyRequest(BaseModel):
+    name: str
+
+
 class MembershipOut(BaseModel):
     user_id: str
+    email: str | None = None
     company_id: str
     role: MembershipRole
     created_at: datetime
@@ -616,10 +621,20 @@ class UpdateMembershipRequest(BaseModel):
     role: MembershipRole
 
 
+class UserLookupOut(BaseModel):
+    user_id: str
+    email: str
+
+
 class MyMembershipOut(BaseModel):
     company_id: str
     company_name: str
     role: MembershipRole
+
+
+class MyMembershipsOut(BaseModel):
+    is_platform_admin: bool
+    memberships: list[MyMembershipOut]
 
 
 # Rebuild models so FastAPI/Pydantic resolve forward references with future annotations

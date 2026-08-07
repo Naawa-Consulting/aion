@@ -308,3 +308,40 @@ continuous view now. `economics-section.tsx`'s old responsibilities moved as fol
   and has no concept of a channel's *projected* raw investment either (a channel's cost column may not even be
   one of the model's `x_vars`). Wiring `compute_channel_economics` (Module 4) to projected data needs new return
   shapes from the scenario engine first, not just a new call site.
+
+## Admin (companies & memberships)
+
+Company/member management is not one of the 5 pipeline modules — it's a platform-level concern gated by
+`is_platform_admin`/`admin_compania`, not by the dataset→...→predict flow. Backend was already complete before
+the frontend existed (`routers/admin.py`); Fase 5 of the UI/UX redesign added the frontend plus 3 small backend
+gaps found while building it.
+
+- **Auth model**: `platform_admin` is a pure email allowlist (`AION_PLATFORM_ADMIN_EMAILS`, checked via
+  `auth.py::is_platform_admin`) — no DB flag. `admin_compania` is a `Membership.role`, scoped to one company.
+  `auth.py::require_company_admin` resolves `company_id` from the **URL path**, not `X-Company-Id`, so a company
+  admin can't manage a different company by swapping the header.
+- **Companies**: `POST /admin/companies` (`require_platform_admin`) creates a `Company` + its first
+  `admin_compania` `Membership` in one call (`{name, admin_user_id}` → `CompanyOut`). `GET /admin/companies`
+  lists all companies. `PATCH /admin/companies/{id}` (`{name}`) renames. `DELETE /admin/companies/{id}` only
+  succeeds if the company has zero memberships and zero datasets (400 with counts otherwise) — no cascading
+  delete across the ~10 other company-scoped tables (Variable/Group/Model/Scenario/...) or Supabase Storage
+  objects is implemented, by design: remove members/datasets first, then delete the empty company.
+- **Members**: `GET/POST /admin/companies/{id}/members` and `PATCH/DELETE /admin/companies/{id}/members/{user_id}`
+  (all `require_company_admin`) list/add/update-role/remove a membership. `POST` 409s if the user is already a
+  member; `PATCH`/`DELETE` 404 if the membership doesn't exist. `MembershipOut` now also carries `email: str |
+  None` (looked up per-row via `find_user_by_id`, best-effort — `None` if the Admin API call fails or the auth
+  user is gone) so the members table doesn't show raw Supabase UUIDs.
+- **Email → user_id lookup**: `GET /admin/users/lookup?email=...` (`require_admin_privilege` — platform admin OR
+  `admin_compania` of any company) calls the Supabase GoTrue Admin API (`utils/supabase_admin.py::find_user_by_email`,
+  service-role `httpx` call, same pattern as `utils/storage.py`) since neither `POST /admin/companies` nor
+  `POST /admin/companies/{id}/members` accept an email — both need a raw Supabase `user_id`. 404s if no user has
+  that email (the user must already have a Supabase auth account — there's no invite-by-email/signup-trigger flow).
+- **Client-side platform-admin signal**: `GET /me/memberships` now returns `{is_platform_admin, memberships[]}`
+  instead of a bare array (`MyMembershipsOut`) — `is_platform_admin` is computed the same way the backend gates
+  `require_platform_admin`, so the frontend never duplicates the allowlist. `AuthBootstrap` stores it in
+  `useGlobalStore` (`isPlatformAdmin: boolean`); `useIsPlatformAdmin()` (`hooks/useCanEdit.ts`) reads it.
+- **UI**: `/admin` (inside the `(app)` route group, so it keeps `Header`/nav). Visible in the Header only when
+  `useIsPlatformAdmin()` or `useCanManageUsers()` (existing `admin_compania` check) is true. Platform admins see
+  a "Companies" panel (create/rename/delete, backed by the email-lookup for `admin_user_id`); company admins see
+  a "Members" panel scoped to their `activeCompanyId` (add by email, change role, remove). The backend 403s
+  independently of this UI gating, per the multi-tenancy convention in `CLAUDE.md`.
