@@ -145,6 +145,36 @@ def resolve_conversion_settings(
     return cr_series, av_series, True
 
 
+def resolve_channel_dollar_rate(channel: InvestmentChannel, config: Dict[str, Any]) -> Optional[float]:
+    """Dollars-per-unit of `channel.proxy_variable`, needed to project future $ investment from
+    a scenario/budget expressed on the model's x-variable (which may not itself be dollars —
+    e.g. impressions). Returns None when the channel's own investment config doesn't tie cost
+    directly to proxy_variable (dataset_column with a different cost_column, manual dated
+    entries, or no proxy at all) — callers should exclude the channel from projection-based
+    economics rather than compute a misleading number."""
+    proxy = channel.proxy_variable
+    if not proxy:
+        return None
+    if channel.source_mode == "rate_metric" and config.get("metric_column") == proxy:
+        rate = config.get("rate_value")
+        return float(rate) if rate is not None else None
+    if channel.source_mode == "dataset_column" and config.get("cost_column") == proxy:
+        return 1.0
+    return None
+
+
+def resolve_conversion_scalars(
+    settings: Optional[ConversionSettings], filtered_df: pd.DataFrame
+) -> tuple[Optional[float], Optional[float], bool]:
+    """Scalar (not per-row) conversion_rate/avg_value, for projections beyond the historical
+    frame (budget optimizer, Predict scenario economics) where there's no future row to index a
+    series against — takes the historical average as the steady-state assumption."""
+    cr_series, av_series, configured = resolve_conversion_settings(settings, filtered_df)
+    if not configured or cr_series is None or av_series is None:
+        return None, None, False
+    return float(cr_series.mean()), float(av_series.mean()), True
+
+
 def compute_channel_economics(
     *,
     model: Model,

@@ -404,6 +404,26 @@ class ScenarioSeriesPoint(BaseModel):
     y_pred: float
 
 
+class ScenarioChannelEconomics(BaseModel):
+    channel_id: str
+    name: str
+    proxy_variable: str
+    investment: float
+    contribution: float
+    revenue: Optional[float] = None
+    roi: Optional[float] = None
+    roas: Optional[float] = None
+
+
+class ScenarioEconomics(BaseModel):
+    channels: list[ScenarioChannelEconomics]
+    total_investment: float
+    total_revenue: Optional[float] = None
+    roi_total: Optional[float] = None
+    roas_total: Optional[float] = None
+    economics_configured: bool
+
+
 class ScenarioSummary(BaseModel):
     periods: list[str]
     total: float
@@ -411,6 +431,7 @@ class ScenarioSummary(BaseModel):
     groups: list[ContributionSlice]
     subgroups: list[ContributionSlice]
     series: list[ScenarioSeriesPoint]
+    economics: Optional[ScenarioEconomics] = None
 
 
 class ScenarioOut(BaseModel):
@@ -565,6 +586,35 @@ class EconomicsSummaryResponse(BaseModel):
     economics_configured: bool
     totals: EconomicsTotals
     channels: list[ChannelEconomics]
+
+
+# Budget optimizer (Fase 6 — Planner mode / Resumen Ejecutivo, shared engine)
+class BudgetOptimizationRequest(BaseModel):
+    budget: float = Field(gt=0)
+
+
+class ChannelAllocation(BaseModel):
+    channel_id: str
+    name: str
+    proxy_variable: str
+    suggested_spend: float
+    projected_contribution: float
+    projected_revenue: Optional[float] = None
+
+
+class ExcludedChannel(BaseModel):
+    channel_id: str
+    name: str
+    reason: Literal["not_modeled", "no_transform_params", "no_dollar_rate"]
+
+
+class BudgetOptimizationOut(BaseModel):
+    allocations: list[ChannelAllocation]
+    excluded_channels: list[ExcludedChannel]
+    total_budget: float
+    total_projected_contribution: float
+    total_projected_revenue: Optional[float] = None
+    economics_configured: bool
 
 
 class EconomicsChannelSeries(BaseModel):

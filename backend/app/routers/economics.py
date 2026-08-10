@@ -22,6 +22,9 @@ from ..routers.analysis import (
 )
 from ..utils.excel import excel_response
 from ..schemas import (
+    BudgetOptimizationOut,
+    BudgetOptimizationRequest,
+    ChannelAllocation,
     ChannelEconomics,
     ConversionMetricConfig,
     ConversionMetricInput,
@@ -31,6 +34,7 @@ from ..schemas import (
     EconomicsModelInfo,
     EconomicsStackedTotals,
     EconomicsTotals,
+    ExcludedChannel,
     InvestmentChannelConfig,
     InvestmentChannelOut,
     UpdateConversionSettingsRequest,
@@ -43,7 +47,15 @@ from ..services.analysis import (
     invalidate_cache_for_dataset,
     set_cached_view,
 )
-from ..services.economics import compute_channel_economics, resolve_conversion_settings
+from ..services.budget_optimizer import OptimizableChannel, optimize_budget
+from ..services.economics import (
+    compute_channel_economics,
+    parse_channel_config,
+    resolve_channel_dollar_rate,
+    resolve_conversion_scalars,
+    resolve_conversion_settings,
+)
+from ..services.model_fit import load_transform_params
 from ..tenancy import get_scoped
 
 router = APIRouter()
@@ -472,6 +484,67 @@ def economics_summary(
     }
     set_cached_view(cache_key, response)
     return response
+
+
+@router.post("/{model_id}/optimize-budget", response_model=BudgetOptimizationOut)
+def optimize_budget_endpoint(
+    model_id: str,
+    body: BudgetOptimizationRequest,
+    membership: CurrentMembership = Depends(get_current_membership),
+    session: Session = Depends(get_session),
+):
+    """Shared budget-allocation engine for Predict's Planner mode and Resumen Ejecutivo's
+    'presupuesto inverso' — steady-state allocation (one constant spend per channel, not a
+    per-period plan), maximizing projected revenue (or contribution, if the economic layer
+    isn't configured for this dataset)."""
+    m, ds, work, X, Xc, y, params, filtered_df = _fit_with_fallback(
+        session, model_id, membership.company_id, None, None, None
+    )
+    x_vars = set(X.columns)
+    transform_params = load_transform_params(session, m.id, membership.company_id)
+    channels = _load_channels(session, membership.company_id, ds.id)
+    conversion_settings = _load_conversion_settings(session, membership.company_id, ds.id)
+    conversion_rate, avg_value, economics_configured = resolve_conversion_scalars(conversion_settings, filtered_df)
+
+    optimizable: List[OptimizableChannel] = []
+    excluded: List[ExcludedChannel] = []
+    for channel in channels:
+        proxy = channel.proxy_variable
+        if not proxy or proxy not in x_vars:
+            excluded.append(ExcludedChannel(channel_id=channel.id, name=channel.name, reason="not_modeled"))
+            continue
+        tparams = transform_params.get(proxy)
+        if tparams is None:
+            excluded.append(ExcludedChannel(channel_id=channel.id, name=channel.name, reason="no_transform_params"))
+            continue
+        dollar_rate = resolve_channel_dollar_rate(channel, parse_channel_config(channel))
+        if dollar_rate is None:
+            excluded.append(ExcludedChannel(channel_id=channel.id, name=channel.name, reason="no_dollar_rate"))
+            continue
+        optimizable.append(
+            OptimizableChannel(
+                channel_id=channel.id,
+                name=channel.name,
+                proxy_variable=proxy,
+                coef=float(params.get(proxy, 0.0)),
+                decay=tparams.decay,
+                hill_k=tparams.hill_k,
+                hill_s=tparams.hill_s,
+                dollar_rate=dollar_rate,
+                conversion_rate=conversion_rate if economics_configured else None,
+                avg_value=avg_value if economics_configured else None,
+            )
+        )
+
+    result = optimize_budget(optimizable, body.budget)
+    return BudgetOptimizationOut(
+        allocations=[ChannelAllocation(**a) for a in result["allocations"]],
+        excluded_channels=excluded,
+        total_budget=body.budget,
+        total_projected_contribution=result["total_projected_contribution"],
+        total_projected_revenue=result["total_projected_revenue"],
+        economics_configured=economics_configured,
+    )
 
 
 @router.get("/{model_id}/stacked")

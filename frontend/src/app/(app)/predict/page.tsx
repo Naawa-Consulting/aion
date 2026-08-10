@@ -10,6 +10,7 @@ import { ErrorText } from "@/components/ui/error-text";
 import { Select } from "@/components/ui/select";
 import { Eyebrow } from "@/components/ui/eyebrow";
 import ScenarioSheetGlide, { type MultipliersMap } from "@/components/predict/ScenarioSheetGlide";
+import PlannerView, { type ChannelAllocation } from "@/components/predict/PlannerView";
 import { apiFetch, ApiError } from "@/lib/api";
 import { useCanEdit } from "@/hooks/useCanEdit";
 import { formatChartNumber } from "@/lib/chart-format";
@@ -41,6 +42,26 @@ type PeriodValue = {
 type ContributionSlice = { id?: string | null; name?: string | null; value: number };
 type ScenarioSeriesPoint = { period: string; y_pred: number };
 
+type ScenarioChannelEconomics = {
+  channel_id: string;
+  name: string;
+  proxy_variable: string;
+  investment: number;
+  contribution: number;
+  revenue: number | null;
+  roi: number | null;
+  roas: number | null;
+};
+
+type ScenarioEconomics = {
+  channels: ScenarioChannelEconomics[];
+  total_investment: number;
+  total_revenue: number | null;
+  roi_total: number | null;
+  roas_total: number | null;
+  economics_configured: boolean;
+};
+
 type ScenarioSummary = {
   periods: string[];
   total: number;
@@ -48,6 +69,7 @@ type ScenarioSummary = {
   groups: ContributionSlice[];
   subgroups: ContributionSlice[];
   series: ScenarioSeriesPoint[];
+  economics?: ScenarioEconomics | null;
 };
 
 type Scenario = {
@@ -94,6 +116,7 @@ export default function PredictPage() {
   const [heroSeries, setHeroSeries] = useState<ScenarioSeriesPoint[]>([]);
   const [heroLoading, setHeroLoading] = useState(false);
   const [showProjectedTable, setShowProjectedTable] = useState(false);
+  const [viewMode, setViewMode] = useState<"advanced" | "planner">("advanced");
   const [assumptionsExporting, setAssumptionsExporting] = useState(false);
   const [totalsExporting, setTotalsExporting] = useState(false);
 
@@ -289,6 +312,22 @@ export default function PredictPage() {
       );
     },
     [editablePeriods, variables]
+  );
+  const handleApplyAllocations = useCallback(
+    (allocations: ChannelAllocation[]) => {
+      setAdjustments((prev) => {
+        const next = cloneAdjustments(prev);
+        editablePeriods.forEach((period) => {
+          if (!next[period]) next[period] = {};
+          allocations.forEach((allocation) => {
+            next[period][allocation.proxy_variable] = { mode: "value", value: allocation.suggested_spend };
+          });
+        });
+        return next;
+      });
+      setCurrentScenarioId(null);
+    },
+    [editablePeriods]
   );
   const handleResetAll = useCallback(() => {
     if (!window.confirm("Reset to base scenario? This will overwrite all current adjustments.")) return;
@@ -529,6 +568,11 @@ export default function PredictPage() {
     otherContribution,
     formatShareLabel,
   ]);
+  const economics = preview?.economics ?? null;
+  const roiLabel = (value: number | null | undefined) =>
+    value === null || value === undefined || !Number.isFinite(value) ? "-" : `${(value * 100).toFixed(1)}%`;
+  const roasLabel = (value: number | null | undefined) =>
+    value === null || value === undefined || !Number.isFinite(value) ? "-" : `${value.toFixed(2)}x`;
   const chartData = useMemo(() => {
     const map = new Map<string, { hero?: number | null; scenario?: number | null }>();
     scenarioSeries.forEach((point) => {
@@ -762,25 +806,78 @@ export default function PredictPage() {
         ))}
       </div>
 
-      <Card className="space-y-4">
-        <CardHeader title="Scenario builder" subtitle="Edit absolute values by period and variable" />
-        <div className="flex flex-wrap items-center justify-between gap-3 text-sm">
-          <Eyebrow>Mode: Absolute values</Eyebrow>
-          <div className="flex flex-wrap items-center gap-2">
-            <Button variant="ghost" size="sm" onClick={handleResetAll}>
-              Reset to base scenario
-            </Button>
-            <Button
-              variant="secondary"
-              size="sm"
-              onClick={handleExportAssumptions}
-              disabled={assumptionsExporting || !variables.length}
-            >
-              {assumptionsExporting ? "Exporting..." : "Export Excel"}
-            </Button>
-          </div>
+      {economics && (
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+          <Card padding="sm">
+            <CardHeader title="Investment" subtitle="Projected spend" />
+            <p className="text-lg font-semibold">{formatChartNumber(economics.total_investment, 1)}</p>
+          </Card>
+          <Card padding="sm">
+            <CardHeader title="Revenue" subtitle="Projected revenue" />
+            <p className="text-lg font-semibold">
+              {economics.total_revenue !== null ? formatChartNumber(economics.total_revenue, 1) : "-"}
+            </p>
+          </Card>
+          <Card padding="sm">
+            <CardHeader title="ROI" subtitle="(revenue - investment) / investment" />
+            <p className="text-lg font-semibold">{roiLabel(economics.roi_total)}</p>
+          </Card>
+          <Card padding="sm">
+            <CardHeader title="ROAS" subtitle="revenue / investment" />
+            <p className="text-lg font-semibold">{roasLabel(economics.roas_total)}</p>
+          </Card>
         </div>
-        {variables.length ? (
+      )}
+
+      <Card className="space-y-4">
+        <CardHeader title="Scenario builder" subtitle="Planner mode or the raw grid" />
+        <div className="flex flex-wrap items-center justify-between gap-3 text-sm">
+          <div className="inline-flex rounded-full border border-[var(--color-border)] p-1">
+            <button
+              type="button"
+              onClick={() => setViewMode("planner")}
+              className={`rounded-full px-3 py-1 text-xs font-medium transition-colors ${
+                viewMode === "planner"
+                  ? "bg-[var(--color-accent-soft)] text-[var(--color-accent)]"
+                  : "text-[var(--color-muted)]"
+              }`}
+            >
+              Planner
+            </button>
+            <button
+              type="button"
+              onClick={() => setViewMode("advanced")}
+              className={`rounded-full px-3 py-1 text-xs font-medium transition-colors ${
+                viewMode === "advanced"
+                  ? "bg-[var(--color-accent-soft)] text-[var(--color-accent)]"
+                  : "text-[var(--color-muted)]"
+              }`}
+            >
+              Vista avanzada
+            </button>
+          </div>
+          {viewMode === "advanced" && (
+            <div className="flex flex-wrap items-center gap-2">
+              <Eyebrow>Mode: Absolute values</Eyebrow>
+              <Button variant="ghost" size="sm" onClick={handleResetAll}>
+                Reset to base scenario
+              </Button>
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={handleExportAssumptions}
+                disabled={assumptionsExporting || !variables.length}
+              >
+                {assumptionsExporting ? "Exporting..." : "Export Excel"}
+              </Button>
+            </div>
+          )}
+        </div>
+        {!variables.length ? (
+          <p className="text-sm text-[var(--color-muted)]">Select a model to load variables.</p>
+        ) : viewMode === "planner" ? (
+          <PlannerView modelId={selectedModel} onApply={handleApplyAllocations} />
+        ) : (
           <ScenarioSheetGlide
             variables={gridVariables}
             periods={editablePeriods}
@@ -789,8 +886,6 @@ export default function PredictPage() {
             editMode={editMode}
             onMultipliersChange={handleGridMultipliersChange}
           />
-        ) : (
-          <p className="text-sm text-[var(--color-muted)]">Select a model to load variables.</p>
         )}
       </Card>
 

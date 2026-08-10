@@ -284,6 +284,36 @@ continuous view now. `economics-section.tsx`'s old responsibilities moved as fol
     "business intuition" framing the plan asked for: current level vs. the full response curve, to help justify
     investment decisions, rather than exposing it as a model-fit diagnostic.
 
+### Budget optimizer (Fase 6 — shared by Predict's Planner mode and Resumen Ejecutivo)
+
+`POST /economics/{model_id}/optimize-budget` with `{budget: float}` → `{allocations: [{channel_id,
+name, proxy_variable, suggested_spend, projected_contribution, projected_revenue}], excluded_channels:
+[{channel_id, name, reason: "not_modeled"|"no_transform_params"|"no_dollar_rate"}], total_budget,
+total_projected_contribution, total_projected_revenue, economics_configured}`. One engine
+(`backend/app/services/budget_optimizer.py`), two frontend consumers (Predict's Planner mode,
+`/executive-summary`'s "presupuesto inverso") — see `BITACORA.md` Fase 6 for the design decisions
+(v1 scope: single objective, no per-channel bounds).
+
+- **Steady-state, not a per-period plan**: allocates one constant spend per channel for the whole
+  horizon, by simulating `STEADY_STATE_PERIODS=500` steps of constant spend through the existing
+  `adstock_geometric`/`hill_saturation` (`services/media_transform.py`) and reading the converged
+  value — reuses the exact same transform as model-fit/Predict, no separate formula to keep in sync.
+  Optimizes `Σ coef_c × Hill(spend_c) × conversion_rate × avg_value` subject to `Σ spend_c = budget`
+  via `scipy.optimize.minimize` (SLSQP), with 3 seeded starts (uniform, coef-weighted,
+  coef×hill_s-weighted) to hedge against Hill's non-convexity when `hill_s > 1`.
+- **Only channels with a resolvable $ rate participate**: `spend` is optimized in dollars (what
+  "budget" means to the user), but Hill/adstock were fit on the model variable's own units
+  (which may be impressions/GRPs, not dollars). `services/economics.py::resolve_channel_dollar_rate`
+  derives dollars-per-unit only when the channel's own investment config ties cost directly to
+  `proxy_variable` (`rate_metric` with `metric_column == proxy_variable`, or `dataset_column` with
+  `cost_column == proxy_variable`); everything else (a `dataset_column`/`rate_metric` channel whose
+  configured column differs from its proxy, `manual` dated entries, or no proxy/model membership at
+  all) is excluded rather than producing a misleading number, same "degrade, don't lie" policy as
+  the rest of this module.
+- If the dataset has no `ConversionSettings` configured, `economics_configured=false` and the
+  optimizer maximizes projected contribution instead of revenue (same allocation logic, one factor
+  dropped) — usable before the economic layer is set up, not blocked by it.
+
 ## Module 5
 
 - Scenario builder is now a time-phased planner: choose horizon, start date, and frequency, then edit a grid of periods × variables (either multipliers or absolute overrides). Saved scenarios (max 3 per model) surface as cards with quick metrics and load/delete actions; comparisons and projected totals update in real time with toasts + micro loading states.
@@ -301,13 +331,27 @@ continuous view now. `economics-section.tsx`'s old responsibilities moved as fol
   so this never makes results worse, only more accurate for genuinely seasonal ones. `/predict/{model_id}/simulate`
   (the flat, non-period multiplier preview used by `_compute_contributions`) is intentionally untouched — it has
   no period/calendar concept to be seasonal about.
-- **Deferred** (needs its own design pass, tracked alongside the Fase 6 budget-optimization engine — see
-  `BITACORA.md`): ROI/ROAS KPIs on Predict's *projected* scenario numbers. Predict's contribution engine
-  (`_compute_plan`) computes a per-variable-per-period contribution internally but only ever persists
-  Group/Subgroup-level aggregates (`ScenarioSummary`/`ScenarioTimeseriesSlice` have no per-variable breakdown),
-  and has no concept of a channel's *projected* raw investment either (a channel's cost column may not even be
-  one of the model's `x_vars`). Wiring `compute_channel_economics` (Module 4) to projected data needs new return
-  shapes from the scenario engine first, not just a new call site.
+- **ROI/ROAS on the projected scenario (Fase 6)**: `_compute_plan` now also captures per-variable
+  raw-value and contribution series across the horizon (`variable_raw_series`/
+  `variable_contribution_series`, alongside the existing group/subgroup aggregation — no change to
+  what gets aggregated there) and derives per-channel economics from them via
+  `_compute_scenario_economics`, added as an optional `economics` field on `ScenarioSummary`:
+  `{channels: [{channel_id, name, proxy_variable, investment, contribution, revenue, roi, roas}],
+  total_investment, total_revenue, roi_total, roas_total, economics_configured}` (`null` when the
+  dataset has no `InvestmentChannel`s, or none resolve). Same `resolve_channel_dollar_rate` units
+  handling as the budget optimizer above — a channel whose cost can't be tied to its `proxy_variable`
+  in dollars is silently omitted from this per-channel breakdown (lighter-weight than the full
+  Module 4 Economics view, not a replacement for it). `conversion_rate`/`avg_value` are held constant
+  at their historical average for the whole projection (`resolve_conversion_scalars`) — future rows
+  of a `dataset_column`-mode metric are not projected.
+- **Modo Planner (Fase 6)**: `/predict` gained a Planner/"Vista avanzada" toggle next to the scenario
+  builder. Planner mode renders `components/predict/PlannerView.tsx` instead of the raw grid: a
+  budget input + "Optimizar presupuesto" button calling the budget optimizer above, editable
+  per-channel suggested spend, and "Aplicar al escenario" which writes `{mode: "value",
+  value: suggested_spend}` into every period of the active horizon for each channel's
+  `proxy_variable` (same `PeriodValue` shape the grid already writes) — no new scenario-update
+  endpoint. Vista avanzada is unchanged. New Investment/Revenue/ROI/ROAS KPI cards render above the
+  toggle when `preview.economics` is present.
 
 ## Admin (companies & memberships)
 
@@ -345,3 +389,19 @@ gaps found while building it.
   a "Companies" panel (create/rename/delete, backed by the email-lookup for `admin_user_id`); company admins see
   a "Members" panel scoped to their `activeCompanyId` (add by email, change role, remove). The backend 403s
   independently of this UI gating, per the multi-tenancy convention in `CLAUDE.md`.
+
+## Resumen Ejecutivo (Fase 6)
+
+Not one of the 5 pipeline modules — a condensed top-level view for the "decision maker" persona
+(see `BITACORA.md` Fase 6), self-contained the same way `/analysis`/`/predict` are (its own
+dataset/model selectors, not the global store's `datasetId`/`modelId`).
+
+- **UI**: `/executive-summary` (inside the `(app)` route group), linked from the Header for every
+  role (this is a consumption mode, not a permission).
+- **No new read endpoints**: KPIs (`fit R²`/`adj. R²` from `GET /datasets/{id}/models-with-roles`,
+  total contribution + top groups from `GET /analysis/{model_id}/summary`, ROI/ROAS totals from
+  `GET /economics/{model_id}/summary`) reuse exactly the calls `/analysis` already makes — no
+  aggregation endpoint was added for this page.
+- **"Presupuesto inverso"**: renders `PlannerView` (see Module 5) with `onApply` omitted, so only the
+  budget input, "Optimizar presupuesto" button, and the resulting per-channel allocation show — no
+  "Aplicar al escenario" action, since there's no scenario/flow concept on this page.

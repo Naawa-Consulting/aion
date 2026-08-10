@@ -18,6 +18,8 @@ from ..auth import CurrentMembership, get_current_membership, require_write_acce
 from ..db import get_session
 from ..models import Scenario, Model, utcnow
 from ..routers.analysis import _fit_from_model, _group_maps
+from ..routers.economics import _load_channels, _load_conversion_settings
+from ..services.economics import parse_channel_config, resolve_channel_dollar_rate, resolve_conversion_scalars
 from ..services.media_transform import apply_media_transform
 from ..services.model_fit import load_transform_params
 from ..tenancy import get_scoped
@@ -35,6 +37,8 @@ from ..schemas import (
     ScenarioSeriesPoint,
     ScenarioTimeseriesResponse,
     ScenarioTimeseriesSlice,
+    ScenarioChannelEconomics,
+    ScenarioEconomics,
     ContributionSlice,
     PeriodValue,
 )
@@ -425,6 +429,7 @@ def _compute_plan(
     # period's decay state from scratch. Control variables keep the existing
     # mean*multiplier-or-absolute-value math untouched.
     media_future_transformed: dict[str, np.ndarray] = {}
+    media_future_raw: dict[str, np.ndarray] = {}
     for name in X.columns:
         tparams = transform_params.get(name)
         if tparams is None:
@@ -444,10 +449,16 @@ def _compute_plan(
         combined = np.concatenate([raw_history, np.asarray(future_raw, dtype=float)])
         transformed = apply_media_transform(combined, tparams.decay, tparams.hill_k, tparams.hill_s, tparams.lag)
         media_future_transformed[name] = transformed[-len(future_raw):] if future_raw else np.array([])
+        media_future_raw[name] = np.asarray(future_raw, dtype=float)
 
     aggregate_groups: defaultdict[str, float] = defaultdict(float)
     aggregate_subgroups: defaultdict[str, float] = defaultdict(float)
     series_points: list[ScenarioTimeseriesSlice] = []
+    # Per-variable raw (model-units) and contribution series across the horizon, captured
+    # alongside the group/subgroup aggregation below (which discards this detail) — needed to
+    # derive per-channel ROI/ROAS for the scenario without recomputing the projection.
+    variable_raw_series: defaultdict[str, list[float]] = defaultdict(list)
+    variable_contribution_series: defaultdict[str, list[float]] = defaultdict(list)
 
     for period_index, label in enumerate(labels):
         group_totals: defaultdict[str, float] = defaultdict(float)
@@ -457,6 +468,7 @@ def _compute_plan(
         for name in X.columns:
             if name in media_future_transformed:
                 value = float(media_future_transformed[name][period_index])
+                raw_value = float(media_future_raw[name][period_index])
             else:
                 bucketed = calendar_buckets.get(name, {})
                 baseline_val = bucketed.get(period_calendar_keys[period_index], baseline_means[name])
@@ -465,8 +477,11 @@ def _compute_plan(
                     value = baseline_val * adj.value if adj.mode == "multiplier" else adj.value
                 else:
                     value = baseline_val
+                raw_value = value
             contribution = coef_map[name] * value
             total += contribution
+            variable_raw_series[name].append(raw_value)
+            variable_contribution_series[name].append(contribution)
             _accumulate_contribution(group_totals, subgroup_totals, name, contribution, var_map, sg_map, g_map)
 
         total += intercept
@@ -487,6 +502,9 @@ def _compute_plan(
         )
 
     total_value = sum(point.y_pred for point in series_points)
+    economics = _compute_scenario_economics(
+        session, ds.id, company_id, work, X.columns, variable_raw_series, variable_contribution_series
+    )
     summary = ScenarioSummary(
         periods=labels,
         total=total_value,
@@ -494,8 +512,75 @@ def _compute_plan(
         groups=_serialize_group_totals(aggregate_groups, g_map),
         subgroups=_serialize_subgroup_totals(aggregate_subgroups, sg_map, g_map),
         series=[ScenarioSeriesPoint(period=point.period, y_pred=point.y_pred) for point in series_points],
+        economics=economics,
     )
     return summary, series_points
+
+
+def _compute_scenario_economics(
+    session: Session,
+    dataset_id: str,
+    company_id: str,
+    filtered_df: pd.DataFrame,
+    x_vars,
+    variable_raw_series: dict[str, list[float]],
+    variable_contribution_series: dict[str, list[float]],
+) -> ScenarioEconomics | None:
+    """Per-channel ROI/ROAS for the projected scenario, reusing the same InvestmentChannel/
+    ConversionSettings catalog as Analysis/Economics — see services/economics.py. Channels
+    whose cost can't be tied to their proxy_variable in dollars (resolve_channel_dollar_rate
+    returns None) are silently omitted here rather than shown with a misleading number; this is
+    a lighter-weight KPI breakdown than the full Economics module, not a replacement for it."""
+    channels = _load_channels(session, company_id, dataset_id)
+    if not channels:
+        return None
+    conversion_settings = _load_conversion_settings(session, company_id, dataset_id)
+    conversion_rate, avg_value, configured = resolve_conversion_scalars(conversion_settings, filtered_df)
+
+    rows: list[ScenarioChannelEconomics] = []
+    total_investment = 0.0
+    total_revenue: float | None = 0.0 if configured else None
+    x_var_set = set(x_vars)
+    for channel in channels:
+        proxy = channel.proxy_variable
+        if not proxy or proxy not in x_var_set or proxy not in variable_raw_series:
+            continue
+        dollar_rate = resolve_channel_dollar_rate(channel, parse_channel_config(channel))
+        if dollar_rate is None:
+            continue
+        investment = sum(variable_raw_series[proxy]) * dollar_rate
+        contribution = sum(variable_contribution_series[proxy])
+        revenue = contribution * conversion_rate * avg_value if configured else None
+        roi = (revenue - investment) / investment if (revenue is not None and investment) else None
+        roas = (revenue / investment) if (revenue is not None and investment) else None
+        total_investment += investment
+        if configured:
+            total_revenue = (total_revenue or 0.0) + revenue
+        rows.append(
+            ScenarioChannelEconomics(
+                channel_id=channel.id,
+                name=channel.name,
+                proxy_variable=proxy,
+                investment=investment,
+                contribution=contribution,
+                revenue=revenue,
+                roi=roi,
+                roas=roas,
+            )
+        )
+
+    if not rows:
+        return None
+    roi_total = (total_revenue - total_investment) / total_investment if (total_revenue is not None and total_investment) else None
+    roas_total = (total_revenue / total_investment) if (total_revenue is not None and total_investment) else None
+    return ScenarioEconomics(
+        channels=rows,
+        total_investment=total_investment,
+        total_revenue=total_revenue,
+        roi_total=roi_total,
+        roas_total=roas_total,
+        economics_configured=configured,
+    )
 
 
 def _scenario_matrix(

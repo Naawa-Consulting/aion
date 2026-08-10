@@ -42,7 +42,8 @@ aportan contexto). Convenciones y arquitectura conceptual completas en `CLAUDE.m
 - `app/routers/predict.py` — Módulo 5: escenarios, preview, CRUD, series de tiempo,
   import/export.
 - `app/routers/economics.py` — capa económica: CRUD de `InvestmentChannel` por dataset,
-  `GET /economics/{model_id}/summary`/`.../stacked` (ROI/ROAS) + exports Excel.
+  `GET /economics/{model_id}/summary`/`.../stacked` (ROI/ROAS) + exports Excel,
+  `POST /economics/{model_id}/optimize-budget` (optimizador de presupuesto, Fase 6).
 - `app/routers/admin.py` — crear compañías (`platform_admin`), gestionar miembros
   (`admin_compania`).
 - `app/routers/me.py` — `GET /me/memberships` (compañías + rol del usuario actual).
@@ -52,7 +53,13 @@ aportan contexto). Convenciones y arquitectura conceptual completas en `CLAUDE.m
   Hill, usadas tanto al ajustar modelos como al proyectar escenarios en Predict.
 - `app/services/economics.py` — cálculo por canal de inversión/contribución/ingreso (dataset
   column / rate×metric / manual con proración por día), reutilizando `compute_contributions` de
-  `services/analysis.py`; usado por `routers/economics.py`.
+  `services/analysis.py`; usado por `routers/economics.py`. `resolve_channel_dollar_rate`/
+  `resolve_conversion_scalars` (Fase 6) resuelven valores escalares para proyecciones futuras
+  (optimizador de presupuesto, economía proyectada de Predict).
+- `app/services/budget_optimizer.py` — optimizador de presupuesto steady-state (Fase 6): reparte
+  un monto constante por canal maximizando retorno/contribución proyectada vía
+  `scipy.optimize`, reutilizando `adstock_geometric`/`hill_saturation` de `media_transform.py`.
+  Usado por `routers/economics.py` (`/optimize-budget`).
 - `app/services/model_fit.py` — `build_design_matrix()`: punto único que arma la matriz de diseño
   (variables de medios transformadas, control crudas) usado por `routers/models.py`,
   `routers/analysis.py` y `routers/predict.py`; incluye el grid-search por canal
@@ -75,6 +82,9 @@ aportan contexto). Convenciones y arquitectura conceptual completas en `CLAUDE.m
   `AuthBootstrap`); el paréntesis no afecta las URLs (`/datasets` sigue siendo `/datasets`).
   - `datasets/page.tsx` — UI Módulo 1. `transform/page.tsx` — Módulo 2. `modeling/page.tsx` —
     Módulo 3. `analysis/page.tsx` — Módulo 4. `predict/page.tsx` — Módulo 5.
+  - `executive-summary/page.tsx` — "Resumen Ejecutivo" (Fase 6): vista de nivel superior
+    autocontenida (selectores propios, no el store global), reusa las llamadas de `/analysis` +
+    el optimizador de presupuesto compartido con el modo Planner de Predict.
   - `upload/page.tsx` — pantalla legacy de upload, reemplazada por `/datasets` (candidata a
     limpieza).
 - `src/app/login/page.tsx`, `src/app/auth/callback/route.ts`, `src/app/reset-password/page.tsx`
@@ -107,6 +117,10 @@ aportan contexto). Convenciones y arquitectura conceptual completas en `CLAUDE.m
 - `src/components/predict/ScenarioGrid.tsx` y `ScenarioSheetGlide.tsx` — dos implementaciones de
   la grilla editable de escenarios (`react-data-grid` vs. `@glideapps/glide-data-grid`) —
   revisar cuál usa cada vista antes de asumir que aplica a ambas.
+- `src/components/predict/PlannerView.tsx` (Fase 6) — input de presupuesto + optimizador +
+  asignación editable por canal; renderizado dentro de `/predict` (modo Planner, con
+  `onApply` para escribir la asignación en el escenario) y dentro de `/executive-summary`
+  (sin `onApply`, solo lectura de la asignación sugerida).
 - `src/lib/format.ts` — formateo de números/fechas.
 - `src/lib/i18n.ts` — diccionario de traducción (incipiente, solo unas pocas claves hoy).
 - `next.config.mjs` — `typescript.ignoreBuildErrors: true` (tapón temporal, ver pendiente de
@@ -123,9 +137,3 @@ aportan contexto). Convenciones y arquitectura conceptual completas en `CLAUDE.m
 
 - Placeholder para lógica de dominio compartida entre módulos (data/transform/modeling/analysis/
   predict) — vacío por ahora, no contiene código activo.
-
-## Archivos sueltos en la raíz (no forman parte de la app)
-
-- `replace_block.py`, `write_modeling.py`, `tmp_chars.py`, `temp_modeling.tsx` — scripts scratch
-  usados en ediciones puntuales pasadas; no se importan desde la app. Candidatos a limpieza (ver
-  pendiente en `BITACORA.md`, confirmar con el usuario antes de borrar).

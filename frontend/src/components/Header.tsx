@@ -17,6 +17,7 @@ const NAV_LINKS = [
   { href: "/modeling", label: "Modeling" },
   { href: "/analysis", label: "Analysis" },
   { href: "/predict", label: "Predict" },
+  { href: "/executive-summary", label: "Resumen Ejecutivo" },
 ];
 
 const ADMIN_LINK = { href: "/admin", label: "Admin" };

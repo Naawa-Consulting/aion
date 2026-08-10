@@ -22,9 +22,15 @@ Resumen por módulo (detalle técnico completo — endpoints y contratos — en 
    (`/modeling`) alimentan una vista de Economía/ROI en `/analysis` (cards, tabla por canal,
    serie de tiempo inversión vs. ingreso).
 5. **Predict** — funcional (MVP). Escenarios time-phased, comparación, import/export CSV/XLSX.
-6. **Configuración** (paleta de color, usuarios) — usuarios ya cubierto por auth multi-company
+   Modo Planner (toggle junto a la grilla): optimizador de presupuesto (steady-state, un solo
+   objetivo v1 — maximizar retorno dado un presupuesto) + KPIs de ROI/ROAS sobre el escenario
+   proyectado.
+6. **Resumen Ejecutivo** (`/executive-summary`) — vista de nivel superior para decisiones rápidas:
+   KPIs agregados (contribución, fit del modelo, ROI/ROAS) reusando lo ya calculado en Analysis, y
+   un "presupuesto inverso" (mismo motor de optimización que el modo Planner de Predict).
+7. **Configuración** (paleta de color, usuarios) — usuarios ya cubierto por auth multi-company
    (ver abajo); paleta de color pendiente.
-7. **Perfil** (password) — cubierto por Supabase Auth (`/reset-password`).
+8. **Perfil** (password) — cubierto por Supabase Auth (`/reset-password`).
 
 **Auth + multi-company** — implementado en código, pendiente de desplegar: login con Supabase
 Auth, compañías con membresía por usuario (rol `modelador`/`visualizador`/`admin_compania`),

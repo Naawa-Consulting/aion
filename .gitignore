@@ -32,3 +32,6 @@ backend/.env
 .claude/
 CLAUDE.md
 BITACORA.md
+
+# Temporary UI review workspace (Fase 7 - eliminar al cerrar la fase)
+_ui-review/
