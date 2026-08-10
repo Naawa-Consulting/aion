@@ -940,7 +940,54 @@ const [subgroupFilter, setSubgroupFilter] = useState<SubgroupFilter>("all");
         )}
       </Card>
 
-      <div className="grid gap-6 lg:grid-cols-[3fr_2fr]">
+      <div className="space-y-6">
+        <Card className="space-y-4">
+          <div className="flex items-center justify-between">
+            <CardHeader title="Actual vs Model" subtitle="Toggle residuals for diagnostics" />
+            <label className="text-xs flex items-center gap-2">
+              <input type="checkbox" checked={showResiduals} onChange={(e) => setShowResiduals(e.target.checked)} />
+              Residuals
+            </label>
+          </div>
+          {predictionSeries.length ? (
+            <div className="h-[480px]">
+              <ResponsiveContainer>
+                <LineChart data={predictionSeries}>
+                  <CartesianGrid strokeDasharray="3 3" />
+                  <XAxis
+                    dataKey="label"
+                    tickFormatter={(value) => formatTimeLabel(String(value), true)}
+                    minTickGap={12}
+                    height={40}
+                    tick={{ fontSize: 11 }}
+                  />
+                  <YAxis tickFormatter={(value) => formatChartNumber(Number(value))} />
+                  <Tooltip
+                    labelFormatter={(value) => formatTimeLabel(String(value), true)}
+                    formatter={(value: number | string, name) => {
+                      if (typeof value === "number") {
+                        return [value.toFixed(4), name];
+                      }
+                      return [value, name];
+                    }}
+                  />
+                  <Legend />
+                  {showResiduals ? (
+                    <Line type="monotone" dataKey="residual" stroke={chartColor(7, isDarkTheme)} dot={false} name="Residual" />
+                  ) : (
+                    <>
+                      <Line type="monotone" dataKey="y_true" stroke={chartColor(0, isDarkTheme)} dot={false} name="Actual" />
+                      <Line type="monotone" dataKey="y_pred" stroke={chartColor(2, isDarkTheme)} dot={false} name="Model" />
+                    </>
+                  )}
+                </LineChart>
+              </ResponsiveContainer>
+            </div>
+          ) : (
+            <p className="text-sm text-[var(--color-muted)]">No prediction data yet.</p>
+          )}
+        </Card>
+
         <Card className="space-y-4">
           <div className="flex items-center justify-between">
             <CardHeader title="Hero Model Summary" subtitle="Coefficients & diagnostics" />
@@ -992,53 +1039,6 @@ const [subgroupFilter, setSubgroupFilter] = useState<SubgroupFilter>("all");
             </div>
           ) : (
             <p className="text-sm text-[var(--color-muted)]">Select a Hero model to view details.</p>
-          )}
-        </Card>
-
-        <Card className="space-y-4">
-          <div className="flex items-center justify-between">
-            <CardHeader title="Actual vs Model" subtitle="Toggle residuals for diagnostics" />
-            <label className="text-xs flex items-center gap-2">
-              <input type="checkbox" checked={showResiduals} onChange={(e) => setShowResiduals(e.target.checked)} />
-              Residuals
-            </label>
-          </div>
-          {predictionSeries.length ? (
-            <div className="h-[480px]">
-              <ResponsiveContainer>
-                <LineChart data={predictionSeries}>
-                  <CartesianGrid strokeDasharray="3 3" />
-                  <XAxis
-                    dataKey="label"
-                    tickFormatter={(value) => formatTimeLabel(String(value), true)}
-                    minTickGap={12}
-                    height={40}
-                    tick={{ fontSize: 11 }}
-                  />
-                  <YAxis tickFormatter={(value) => formatChartNumber(Number(value))} />
-                  <Tooltip
-                    labelFormatter={(value) => formatTimeLabel(String(value), true)}
-                    formatter={(value: number | string, name) => {
-                      if (typeof value === "number") {
-                        return [value.toFixed(4), name];
-                      }
-                      return [value, name];
-                    }}
-                  />
-                  <Legend />
-                  {showResiduals ? (
-                    <Line type="monotone" dataKey="residual" stroke={chartColor(7, isDarkTheme)} dot={false} name="Residual" />
-                  ) : (
-                    <>
-                      <Line type="monotone" dataKey="y_true" stroke={chartColor(0, isDarkTheme)} dot={false} name="Actual" />
-                      <Line type="monotone" dataKey="y_pred" stroke={chartColor(2, isDarkTheme)} dot={false} name="Model" />
-                    </>
-                  )}
-                </LineChart>
-              </ResponsiveContainer>
-            </div>
-          ) : (
-            <p className="text-sm text-[var(--color-muted)]">No prediction data yet.</p>
           )}
         </Card>
       </div>

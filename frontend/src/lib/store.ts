@@ -18,9 +18,10 @@ type GlobalState = {
   userId: string | null;
   userEmail: string | null;
   memberships: Membership[];
+  isPlatformAdmin: boolean;
   activeCompanyId: string | null;
   setSession: (user: { id: string; email: string | null } | null) => void;
-  setMemberships: (memberships: Membership[]) => void;
+  setMemberships: (memberships: Membership[], isPlatformAdmin: boolean) => void;
   setActiveCompanyId: (companyId: string | null) => void;
 };
 
@@ -35,16 +36,18 @@ export const useGlobalStore = create<GlobalState>()(
       userId: null,
       userEmail: null,
       memberships: [],
+      isPlatformAdmin: false,
       activeCompanyId: null,
       setSession: (user) =>
         set(
           user
             ? { userId: user.id, userEmail: user.email }
-            : { userId: null, userEmail: null, memberships: [], activeCompanyId: null }
+            : { userId: null, userEmail: null, memberships: [], isPlatformAdmin: false, activeCompanyId: null }
         ),
-      setMemberships: (memberships) =>
+      setMemberships: (memberships, isPlatformAdmin) =>
         set((state) => ({
           memberships,
+          isPlatformAdmin,
           // Keep the current selection if it's still valid; otherwise default to the first membership.
           activeCompanyId: memberships.some((m) => m.companyId === state.activeCompanyId)
             ? state.activeCompanyId
