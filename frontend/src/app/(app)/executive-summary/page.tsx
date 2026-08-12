@@ -1,14 +1,30 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import type { ReactNode } from "react";
+import Link from "next/link";
 import { toast } from "sonner";
+import { useTranslations } from "next-intl";
+import { useTheme } from "next-themes";
+import { Bar, BarChart, CartesianGrid, Cell, ResponsiveContainer, Tooltip as RechartsTooltip, XAxis, YAxis } from "recharts";
+import { Info, Printer } from "lucide-react";
 
 import { Card, CardHeader } from "@/components/ui/card";
 import { Select } from "@/components/ui/select";
-import { Eyebrow } from "@/components/ui/eyebrow";
+import { Input } from "@/components/ui/input";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { PageHeader } from "@/components/ui/page-header";
+import { StatCard } from "@/components/ui/stat-card";
+import { EmptyState } from "@/components/ui/empty-state";
+import { Skeleton } from "@/components/ui/skeleton";
+import { Tooltip } from "@/components/ui/tooltip";
+import { FilterBar, FilterField } from "@/components/ui/filter-bar";
 import PlannerView from "@/components/predict/PlannerView";
 import { apiFetch } from "@/lib/api";
-import { formatChartNumber } from "@/lib/chart-format";
+import { EMPTY_VALUE } from "@/lib/format";
+import { formatChartNumber, formatChartPercent } from "@/lib/chart-format";
+import { assignCategoricalColors } from "@/lib/chart-colors";
 import { useGlobalStore } from "@/lib/store";
 
 type Dataset = { id: string; display_name: string };
@@ -27,13 +43,68 @@ type EconomicsTotals = {
   roas: number | null;
 };
 type EconomicsSummary = { economics_configured: boolean; totals: EconomicsTotals };
+type DateBounds = { min: string | null; max: string | null };
 
-const roiLabel = (value: number | null | undefined) =>
-  value === null || value === undefined || !Number.isFinite(value) ? "-" : `${(value * 100).toFixed(1)}%`;
+const clampDateValue = (value: string | null, bounds: DateBounds): string | null => {
+  if (!value) return null;
+  let next = value;
+  if (bounds.min && next < bounds.min) next = bounds.min;
+  if (bounds.max && next > bounds.max) next = bounds.max;
+  return next;
+};
+
+const clampRange = (
+  range: { start: string | null; end: string | null },
+  bounds: DateBounds,
+  changed: "start" | "end" | "bounds" = "bounds"
+) => {
+  const start = clampDateValue(range.start, bounds);
+  const end = clampDateValue(range.end, bounds);
+  if (start && end && start > end) {
+    if (changed === "end") return { start: end, end };
+    return { start, end: start };
+  }
+  return { start, end };
+};
+
+const pctLabel = (value: number | null | undefined, decimals = 1) =>
+  value === null || value === undefined || !Number.isFinite(value) ? EMPTY_VALUE : formatChartPercent(value, decimals);
 const roasLabel = (value: number | null | undefined) =>
-  value === null || value === undefined || !Number.isFinite(value) ? "-" : `${value.toFixed(2)}x`;
+  value === null || value === undefined || !Number.isFinite(value) ? EMPTY_VALUE : `${value.toFixed(2)}x`;
+
+function SecondaryLink({ href, children }: { href: string; children: ReactNode }) {
+  return (
+    <Link
+      href={href}
+      className="inline-flex h-control-md items-center rounded-lg bg-accent-bg px-4 text-sm font-medium text-accent hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2"
+    >
+      {children}
+    </Link>
+  );
+}
+
+function InfoTooltip({ label, content }: { label: string; content: string }) {
+  return (
+    <Tooltip
+      content={
+        <span style={{ whiteSpace: "normal", display: "block", maxWidth: 220 }}>{content}</span>
+      }
+    >
+      <button
+        type="button"
+        aria-label={label}
+        className="rounded-full p-0.5 text-muted transition hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+      >
+        <Info className="h-3.5 w-3.5" />
+      </button>
+    </Tooltip>
+  );
+}
 
 export default function ExecutiveSummaryPage() {
+  const t = useTranslations("executiveSummary");
+  const { resolvedTheme } = useTheme();
+  const isDarkTheme = resolvedTheme === "dark";
   const { activeCompanyId } = useGlobalStore();
   const [datasets, setDatasets] = useState<Dataset[]>([]);
   const [selectedDataset, setSelectedDataset] = useState("");
@@ -42,6 +113,18 @@ export default function ExecutiveSummaryPage() {
   const [summary, setSummary] = useState<Summary | null>(null);
   const [economics, setEconomics] = useState<EconomicsSummary | null>(null);
   const [loading, setLoading] = useState(false);
+  const [loadError, setLoadError] = useState(false);
+  const [dateBounds, setDateBounds] = useState<DateBounds>({ min: null, max: null });
+  const [dateRange, setDateRange] = useState<{ start: string | null; end: string | null }>({ start: null, end: null });
+  const [printedAt, setPrintedAt] = useState<string | null>(null);
+  const [initializing, setInitializing] = useState(true);
+  const [modelsLoading, setModelsLoading] = useState(false);
+
+  useEffect(() => {
+    const handleBeforePrint = () => setPrintedAt(new Date().toLocaleString());
+    window.addEventListener("beforeprint", handleBeforePrint);
+    return () => window.removeEventListener("beforeprint", handleBeforePrint);
+  }, []);
 
   const fetchDatasets = useCallback(async () => {
     try {
@@ -50,6 +133,20 @@ export default function ExecutiveSummaryPage() {
       if (data.length) setSelectedDataset((prev) => prev || data[0].id);
     } catch {
       toast.error("Failed to load datasets");
+    } finally {
+      setInitializing(false);
+    }
+  }, []);
+
+  const fetchDatasetMeta = useCallback(async (datasetId: string) => {
+    try {
+      const raw = await apiFetch<any>(`/datasets/${datasetId}/meta`);
+      const bounds: DateBounds = { min: raw.date_min ?? null, max: raw.date_max ?? null };
+      setDateBounds(bounds);
+      setDateRange(clampRange({ start: bounds.min, end: bounds.max }, bounds, "bounds"));
+    } catch {
+      setDateBounds({ min: null, max: null });
+      setDateRange({ start: null, end: null });
     }
   }, []);
 
@@ -70,20 +167,27 @@ export default function ExecutiveSummaryPage() {
       toast.error("Failed to load models");
       setModels([]);
       setSelectedModel("");
+    } finally {
+      setModelsLoading(false);
     }
   }, []);
 
-  const fetchKpis = useCallback(async (modelId: string) => {
+  const fetchKpis = useCallback(async (modelId: string, range: { start: string | null; end: string | null }) => {
     setLoading(true);
+    setLoadError(false);
     try {
+      const params = new URLSearchParams();
+      if (range.start) params.set("start_date", range.start);
+      if (range.end) params.set("end_date", range.end);
+      const qs = params.toString() ? `?${params.toString()}` : "";
       const [summaryData, economicsData] = await Promise.all([
-        apiFetch<Summary>(`/analysis/${modelId}/summary`),
-        apiFetch<EconomicsSummary>(`/economics/${modelId}/summary`),
+        apiFetch<Summary>(`/analysis/${modelId}/summary${qs}`),
+        apiFetch<EconomicsSummary>(`/economics/${modelId}/summary${qs}`),
       ]);
       setSummary(summaryData);
       setEconomics(economicsData);
     } catch {
-      toast.error("Failed to load KPIs");
+      setLoadError(true);
       setSummary(null);
       setEconomics(null);
     } finally {
@@ -97,114 +201,322 @@ export default function ExecutiveSummaryPage() {
   }, [fetchDatasets, activeCompanyId]);
 
   useEffect(() => {
-    if (selectedDataset) fetchModels(selectedDataset);
-  }, [selectedDataset, fetchModels]);
+    if (!selectedDataset) return;
+    setModelsLoading(true);
+    fetchModels(selectedDataset);
+    fetchDatasetMeta(selectedDataset);
+  }, [selectedDataset, fetchModels, fetchDatasetMeta]);
 
   useEffect(() => {
-    if (selectedModel) fetchKpis(selectedModel);
+    if (selectedModel) fetchKpis(selectedModel, dateRange);
     else {
       setSummary(null);
       setEconomics(null);
     }
-  }, [selectedModel, fetchKpis]);
+    // Depend on the primitive start/end values, not the `dateRange` object — a new object is
+    // created on every render, which would refetch even when the actual dates didn't change.
+  }, [selectedModel, dateRange.start, dateRange.end, fetchKpis]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const updateDateField = (field: "start" | "end", value: string) => {
+    setDateRange((prev) => clampRange({ ...prev, [field]: value || null }, dateBounds, field));
+  };
 
   const selectedModelInfo = models.find((m) => m.id === selectedModel);
-  const topGroups = (summary?.groups ?? [])
-    .filter((g) => g.group_id !== "baseline" && g.group_name?.toLowerCase() !== "baseline")
-    .sort((a, b) => Math.abs(b.contribution) - Math.abs(a.contribution))
-    .slice(0, 3);
+  const groups = summary?.groups ?? [];
+  const baselineGroup = groups.find((g) => g.group_id === "baseline" || g.group_name?.toLowerCase() === "baseline");
+  const nonBaselineGroups = groups.filter((g) => g !== baselineGroup);
+  const colorOrder = [...nonBaselineGroups]
+    .map((g) => g.group_name || g.group_id || "")
+    .sort((a, b) => a.localeCompare(b));
+  const colorMap = assignCategoricalColors(colorOrder, isDarkTheme);
+  const chartGroups = [...nonBaselineGroups].sort((a, b) => Math.abs(b.contribution) - Math.abs(a.contribution));
+  const yVar = summary?.model?.y_var ?? "";
+
+  const chartData = chartGroups.map((g) => {
+    const key = g.group_name || g.group_id || "";
+    return {
+      key,
+      name: g.group_name || key,
+      contribution: g.contribution,
+      percent: g.percent,
+      color: colorMap[key],
+    };
+  });
+
+  const fitBadge =
+    selectedModelInfo?.r2 !== null && selectedModelInfo?.r2 !== undefined
+      ? selectedModelInfo.r2 > 0.7
+        ? { variant: "success" as const, label: t("kpis.reliable") }
+        : { variant: "warning" as const, label: t("kpis.review") }
+      : null;
+
+  const roiValue = economics?.totals.roi ?? null;
+  const roiBadge = !economics?.economics_configured
+    ? { variant: "neutral" as const, label: t("kpis.notConfigured") }
+    : roiValue !== null && Number.isFinite(roiValue)
+      ? roiValue > 0
+        ? { variant: "success" as const, label: t("kpis.positive") }
+        : { variant: "warning" as const, label: t("kpis.negative") }
+      : null;
+
+  let insight: string | null = null;
+  if (chartGroups.length >= 2) {
+    insight = t("insight.double", {
+      group: chartGroups[0].group_name || "",
+      percent: pctLabel(chartGroups[0].percent),
+      group2: chartGroups[1].group_name || "",
+      percent2: pctLabel(chartGroups[1].percent),
+    });
+  } else if (chartGroups.length === 1) {
+    insight = t("insight.single", {
+      group: chartGroups[0].group_name || "",
+      percent: pctLabel(chartGroups[0].percent),
+      yVar,
+    });
+  }
+
+  const mutedColor = isDarkTheme ? "#81858e" : "#6d7178";
+  const lineColor = isDarkTheme ? "#262a2f" : "#e5e6ea";
+  const surfaceColor = isDarkTheme ? "#16181b" : "#ffffff";
 
   return (
     <section className="space-y-6">
-      <header className="flex flex-wrap items-center justify-between gap-4">
-        <div>
-          <p className="text-sm text-[var(--color-muted)]">Vista ejecutiva</p>
-          <h1 className="text-2xl font-semibold">Resumen Ejecutivo</h1>
-        </div>
-        <div className="flex flex-wrap gap-3 items-center">
-          <label className="flex flex-col">
-            <Eyebrow>Dataset</Eyebrow>
-            <Select wrapperClassName="mt-1" value={selectedDataset} onChange={(e) => setSelectedDataset(e.target.value)}>
-              {datasets.map((ds) => (
-                <option key={ds.id} value={ds.id}>
-                  {ds.display_name}
-                </option>
-              ))}
-            </Select>
-          </label>
-          <label className="flex flex-col">
-            <Eyebrow>Model</Eyebrow>
-            <Select wrapperClassName="mt-1" value={selectedModel} onChange={(e) => setSelectedModel(e.target.value)}>
-              {models.map((m) => (
-                <option key={m.id} value={m.id}>
-                  {m.name}
-                  {m.role === "hero" ? " (hero)" : ""}
-                </option>
-              ))}
-            </Select>
-          </label>
-        </div>
-      </header>
+      <PageHeader
+        title={t("title")}
+        subtitle={t("eyebrow")}
+        className="no-print"
+        actions={
+          <Button variant="ghost" onClick={() => window.print()} disabled={!summary}>
+            <Printer className="mr-2 h-4 w-4" />
+            {t("print")}
+          </Button>
+        }
+      />
 
-      {!selectedModel ? (
+      <div className="print-only space-y-1 pb-4 border-b border-line">
+        <h1 className="text-2xl font-semibold text-ink">{t("title")}</h1>
+        <p className="text-sm text-muted">
+          {datasets.find((d) => d.id === selectedDataset)?.display_name} · {selectedModelInfo?.name} · {yVar}
+        </p>
+        {(dateRange.start || dateRange.end) && (
+          <p className="text-sm text-muted">
+            {dateRange.start ?? EMPTY_VALUE} — {dateRange.end ?? EMPTY_VALUE}
+          </p>
+        )}
+        {printedAt && <p className="text-xs text-muted">{t("printedAt", { value: printedAt })}</p>}
+      </div>
+
+      {initializing || modelsLoading ? (
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+          {Array.from({ length: 4 }).map((_, i) => (
+            <Skeleton key={i} className="h-[104px]" />
+          ))}
+        </div>
+      ) : datasets.length === 0 ? (
         <Card>
-          <p className="text-sm text-[var(--color-muted)]">Selecciona un dataset y un modelo para ver el resumen.</p>
+          <EmptyState
+            title={t("noDatasets.title")}
+            description={t("noDatasets.description")}
+            action={<SecondaryLink href="/datasets">{t("noDatasets.cta")}</SecondaryLink>}
+          />
+        </Card>
+      ) : !selectedDataset || (models.length === 0 && !selectedModel) ? (
+        <Card>
+          <EmptyState
+            title={t("noModel.title")}
+            description={t("noModel.description")}
+            action={<SecondaryLink href="/modeling">{t("noModel.cta")}</SecondaryLink>}
+          />
         </Card>
       ) : (
         <>
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-            <Card padding="sm">
-              <CardHeader title="Fit del modelo" subtitle="R² / R² ajustado" />
-              <p className="text-lg font-semibold">
-                {selectedModelInfo?.r2 !== null && selectedModelInfo?.r2 !== undefined
-                  ? `${formatChartNumber(selectedModelInfo.r2 * 100, 1)}%`
-                  : "-"}
-                {selectedModelInfo?.adj_r2 !== null && selectedModelInfo?.adj_r2 !== undefined && (
-                  <span className="text-xs text-[var(--color-muted)]"> ({formatChartNumber(selectedModelInfo.adj_r2 * 100, 1)}% adj.)</span>
-                )}
-              </p>
-            </Card>
-            <Card padding="sm">
-              <CardHeader title="Contribución total" subtitle={summary?.model?.y_var} />
-              <p className="text-lg font-semibold">
-                {summary ? formatChartNumber(summary.total_contribution, 1) : "-"}
-              </p>
-            </Card>
-            <Card padding="sm">
-              <CardHeader title="ROI" subtitle="(ingreso - inversión) / inversión" />
-              <p className="text-lg font-semibold">{roiLabel(economics?.totals.roi)}</p>
-            </Card>
-            <Card padding="sm">
-              <CardHeader title="ROAS" subtitle="ingreso / inversión" />
-              <p className="text-lg font-semibold">{roasLabel(economics?.totals.roas)}</p>
-            </Card>
-          </div>
-
-          <Card className="space-y-3">
-            <CardHeader title="Top grupos por contribución" />
-            {topGroups.length ? (
-              <div className="grid gap-3 sm:grid-cols-3">
-                {topGroups.map((group, index) => (
-                  <div key={group.group_id ?? group.group_name ?? index} className="space-y-1">
-                    <Eyebrow>{group.group_name || "Grupo"}</Eyebrow>
-                    <p className="text-base font-semibold">{formatChartNumber(group.contribution, 1)}</p>
-                  </div>
+          <FilterBar className="no-print">
+            <FilterField label={t("filters.dataset")} className="w-[240px]">
+              <Select value={selectedDataset} onChange={(e) => setSelectedDataset(e.target.value)}>
+                {datasets.map((ds) => (
+                  <option key={ds.id} value={ds.id}>
+                    {ds.display_name}
+                  </option>
                 ))}
-              </div>
-            ) : (
-              <p className="text-sm text-[var(--color-muted)]">
-                {loading ? "Cargando..." : "Sin datos de contribución todavía."}
-              </p>
+              </Select>
+            </FilterField>
+            <FilterField label={t("filters.model")} className="w-[260px]">
+              <Select value={selectedModel} onChange={(e) => setSelectedModel(e.target.value)}>
+                {models.map((m) => (
+                  <option key={m.id} value={m.id}>
+                    {m.name}
+                    {m.role === "hero" ? " (hero)" : ""}
+                  </option>
+                ))}
+              </Select>
+            </FilterField>
+            {(dateBounds.min || dateBounds.max) && (
+              <FilterField label={t("filters.dateRange")} className="flex-1 min-w-[280px]">
+                <div className="flex flex-wrap gap-3">
+                  <Input
+                    type="date"
+                    aria-label={t("filters.dateStart")}
+                    className="w-[180px]"
+                    value={dateRange.start ?? ""}
+                    min={dateBounds.min ?? undefined}
+                    max={dateBounds.max ?? undefined}
+                    onChange={(e) => updateDateField("start", e.target.value)}
+                  />
+                  <Input
+                    type="date"
+                    aria-label={t("filters.dateEnd")}
+                    className="w-[180px]"
+                    value={dateRange.end ?? ""}
+                    min={dateBounds.min ?? undefined}
+                    max={dateBounds.max ?? undefined}
+                    onChange={(e) => updateDateField("end", e.target.value)}
+                  />
+                </div>
+              </FilterField>
             )}
-          </Card>
+          </FilterBar>
 
-          <Card className="space-y-4">
-            <CardHeader
-              title="Presupuesto inverso"
-              subtitle="Escribe un presupuesto disponible y obtén la asignación sugerida por canal"
-            />
-            <PlannerView modelId={selectedModel} />
-          </Card>
+          {loadError ? (
+            <Card>
+              <EmptyState
+                title={t("error.title")}
+                action={
+                  <Button variant="secondary" onClick={() => fetchKpis(selectedModel, dateRange)}>
+                    {t("error.retry")}
+                  </Button>
+                }
+              />
+            </Card>
+          ) : (
+            <>
+              {economics && !economics.economics_configured && (
+                <div className="rounded-xl bg-warn-bg px-4 py-3 text-sm text-warn no-print">
+                  {t("economicsNotConfigured")}
+                </div>
+              )}
+
+              {insight && !loading && (
+                <p className="text-md text-ink">{insight}</p>
+              )}
+
+              <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4" aria-busy={loading}>
+                {loading ? (
+                  Array.from({ length: 4 }).map((_, i) => <Skeleton key={i} className="h-[104px]" />)
+                ) : (
+                  <>
+                    <StatCard
+                      label={t("kpis.fit")}
+                      value={
+                        selectedModelInfo?.r2 !== null && selectedModelInfo?.r2 !== undefined
+                          ? pctLabel(selectedModelInfo.r2 * 100)
+                          : EMPTY_VALUE
+                      }
+                      icon={
+                        <InfoTooltip
+                          label={t("kpis.fit")}
+                          content={t("kpis.fitTooltip", { yVar: yVar || t("kpis.targetFallback") })}
+                        />
+                      }
+                      trend={
+                        fitBadge ? <Badge variant={fitBadge.variant}>{fitBadge.label}</Badge> : undefined
+                      }
+                    />
+                    <StatCard
+                      label={t("kpis.totalContribution")}
+                      value={summary ? formatChartNumber(summary.total_contribution, 1) : EMPTY_VALUE}
+                      icon={
+                        <InfoTooltip
+                          label={t("kpis.totalContribution")}
+                          content={t("kpis.totalContributionTooltip", { yVar: yVar || t("kpis.targetFallback") })}
+                        />
+                      }
+                    />
+                    <StatCard
+                      label={t("kpis.roi")}
+                      value={economics?.economics_configured ? pctLabel(roiValue !== null ? roiValue * 100 : null) : EMPTY_VALUE}
+                      icon={<InfoTooltip label={t("kpis.roi")} content={t("kpis.roiTooltip")} />}
+                      trend={roiBadge ? <Badge variant={roiBadge.variant}>{roiBadge.label}</Badge> : undefined}
+                    />
+                    <StatCard
+                      label={t("kpis.roas")}
+                      value={economics?.economics_configured ? roasLabel(economics?.totals.roas) : EMPTY_VALUE}
+                      icon={<InfoTooltip label={t("kpis.roas")} content={t("kpis.roasTooltip")} />}
+                    />
+                  </>
+                )}
+              </div>
+
+              <Card className="space-y-3">
+                <CardHeader as="h2" title={t("groups.title")} subtitle={t("groups.subtitle", { yVar: yVar || t("kpis.targetFallback") })} />
+                {loading ? (
+                  <Skeleton className="h-chart-sm" />
+                ) : chartData.length ? (
+                  <>
+                    <div className="h-chart-sm">
+                      <ResponsiveContainer width="100%" height="100%">
+                        <BarChart data={chartData} layout="vertical" margin={{ left: 8, right: 24 }}>
+                          <CartesianGrid horizontal={false} stroke={lineColor} />
+                          <XAxis
+                            type="number"
+                            tickFormatter={(v) => formatChartPercent(v, 0)}
+                            tick={{ fill: mutedColor, fontSize: 12 }}
+                            axisLine={{ stroke: lineColor }}
+                            tickLine={false}
+                          />
+                          <YAxis
+                            type="category"
+                            dataKey="name"
+                            width={120}
+                            tick={{ fill: mutedColor, fontSize: 12 }}
+                            axisLine={{ stroke: lineColor }}
+                            tickLine={false}
+                          />
+                          <RechartsTooltip
+                            cursor={{ fill: lineColor, opacity: 0.4 }}
+                            content={({ active, payload }) => {
+                              if (!active || !payload?.length) return null;
+                              const d = payload[0].payload as (typeof chartData)[number];
+                              return (
+                                <div
+                                  className="rounded-lg border px-3 py-2 text-xs shadow-[var(--shadow-soft)]"
+                                  style={{ background: surfaceColor, borderColor: lineColor }}
+                                >
+                                  <p className="font-medium text-ink">{d.name}</p>
+                                  <p className="text-muted">
+                                    {t("groups.tooltipValue")}: {formatChartNumber(d.contribution, 1)}
+                                  </p>
+                                  <p className="text-muted">
+                                    {t("groups.tooltipPercent")}: {formatChartPercent(d.percent, 1)}
+                                  </p>
+                                </div>
+                              );
+                            }}
+                          />
+                          <Bar dataKey="percent" radius={[0, 4, 4, 0]} barSize={20}>
+                            {chartData.map((d) => (
+                              <Cell key={d.key} fill={d.color} />
+                            ))}
+                          </Bar>
+                        </BarChart>
+                      </ResponsiveContainer>
+                    </div>
+                    {baselineGroup && (
+                      <p className="text-xs text-muted">
+                        {t("groups.baselineNote", { percent: pctLabel(baselineGroup.percent), yVar: yVar || t("kpis.targetFallback") })}
+                      </p>
+                    )}
+                  </>
+                ) : (
+                  <EmptyState title={t("groups.empty")} />
+                )}
+              </Card>
+
+              <Card className="space-y-4">
+                <CardHeader as="h2" title={t("planner.title")} subtitle={t("planner.subtitle")} />
+                <PlannerView modelId={selectedModel} />
+              </Card>
+            </>
+          )}
         </>
       )}
     </section>

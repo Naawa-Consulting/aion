@@ -2,9 +2,12 @@
 
 import { useState } from "react";
 import { toast } from "sonner";
+import { useTranslations } from "next-intl";
 
 import { Card, CardHeader } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Eyebrow } from "@/components/ui/eyebrow";
 import { apiFetch } from "@/lib/api";
 import { formatChartNumber } from "@/lib/chart-format";
 
@@ -28,10 +31,10 @@ export type BudgetOptimizationOut = {
   economics_configured: boolean;
 };
 
-const EXCLUSION_LABELS: Record<string, string> = {
-  not_modeled: "sin variable en el modelo actual",
-  no_transform_params: "sin curva de saturación ajustada",
-  no_dollar_rate: "costo no ligado a la variable modelada",
+const EXCLUSION_KEYS: Record<string, string> = {
+  not_modeled: "notModeled",
+  no_transform_params: "noTransformParams",
+  no_dollar_rate: "noDollarRate",
 };
 
 export default function PlannerView({
@@ -41,6 +44,7 @@ export default function PlannerView({
   modelId: string;
   onApply?: (allocations: ChannelAllocation[]) => void;
 }) {
+  const t = useTranslations("planner");
   const [budget, setBudget] = useState<number>(0);
   const [result, setResult] = useState<BudgetOptimizationOut | null>(null);
   const [editedSpend, setEditedSpend] = useState<Record<string, number>>({});
@@ -48,11 +52,11 @@ export default function PlannerView({
 
   const handleOptimize = async () => {
     if (!modelId) {
-      toast.error("Selecciona un modelo primero");
+      toast.error(t("selectModelFirst"));
       return;
     }
     if (!budget || budget <= 0) {
-      toast.error("Ingresa un presupuesto mayor a 0");
+      toast.error(t("budgetRequired"));
       return;
     }
     setLoading(true);
@@ -67,10 +71,10 @@ export default function PlannerView({
         Object.fromEntries(data.allocations.map((allocation) => [allocation.proxy_variable, allocation.suggested_spend]))
       );
       if (!data.allocations.length) {
-        toast.error("Ningún canal configurado es optimizable todavía (revisa Transform → Investment channels).");
+        toast.error(t("noOptimizableChannels"));
       }
     } catch (error: any) {
-      toast.error(error?.message || "No se pudo optimizar el presupuesto");
+      toast.error(error?.message || t("optimizeFailed"));
     } finally {
       setLoading(false);
     }
@@ -84,28 +88,27 @@ export default function PlannerView({
         suggested_spend: editedSpend[allocation.proxy_variable] ?? allocation.suggested_spend,
       }))
     );
-    toast.success("Asignación aplicada al escenario — usa 'Preview scenario' para ver el resultado proyectado.");
+    toast.success(t("applied"));
   };
 
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-end gap-3">
-        <label className="flex flex-col gap-2 text-sm">
-          Presupuesto total
-          <input
+        <label className="flex flex-col gap-2 text-sm text-ink">
+          {t("budgetLabel")}
+          <Input
             type="number"
             min={0}
-            className="rounded-lg border border-[var(--color-border)] px-3 py-2 bg-transparent"
             value={budget || ""}
             onChange={(event) => setBudget(Number(event.target.value) || 0)}
           />
         </label>
         <Button onClick={handleOptimize} disabled={loading || !modelId}>
-          {loading ? "Optimizando..." : "Optimizar presupuesto"}
+          {loading ? t("optimizing") : t("optimize")}
         </Button>
         {onApply && result && result.allocations.length > 0 && (
           <Button variant="secondary" onClick={handleApply}>
-            Aplicar al escenario
+            {t("apply")}
           </Button>
         )}
       </div>
@@ -117,12 +120,12 @@ export default function PlannerView({
               {result.allocations.map((allocation) => (
                 <Card key={allocation.channel_id} padding="sm" className="space-y-2">
                   <CardHeader title={allocation.name} subtitle={allocation.proxy_variable} />
-                  <label className="flex flex-col gap-1 text-xs text-[var(--color-muted)]">
-                    Gasto sugerido
-                    <input
+                  <label className="flex flex-col gap-1">
+                    <Eyebrow>{t("suggestedSpend")}</Eyebrow>
+                    <Input
                       type="number"
                       min={0}
-                      className="rounded-lg border border-[var(--color-border)] px-3 py-2 bg-transparent text-sm text-[var(--color-foreground)]"
+                      className="mt-1"
                       value={editedSpend[allocation.proxy_variable] ?? allocation.suggested_spend}
                       onChange={(event) =>
                         setEditedSpend((prev) => ({
@@ -132,12 +135,12 @@ export default function PlannerView({
                       }
                     />
                   </label>
-                  <p className="text-xs text-[var(--color-muted)]">
-                    Contribución proyectada: {formatChartNumber(allocation.projected_contribution, 1)}
+                  <p className="text-xs text-muted">
+                    {t("projectedContribution", { value: formatChartNumber(allocation.projected_contribution, 1) })}
                   </p>
                   {allocation.projected_revenue !== null && (
-                    <p className="text-xs text-[var(--color-muted)]">
-                      Ingreso proyectado: {formatChartNumber(allocation.projected_revenue, 1)}
+                    <p className="text-xs text-muted">
+                      {t("projectedRevenue", { value: formatChartNumber(allocation.projected_revenue, 1) })}
                     </p>
                   )}
                 </Card>
@@ -145,10 +148,16 @@ export default function PlannerView({
             </div>
           )}
           {result.excluded_channels.length > 0 && (
-            <p className="text-xs text-[var(--color-muted)]">
-              Sin optimizar: {result.excluded_channels
-                .map((channel) => `${channel.name} (${EXCLUSION_LABELS[channel.reason] ?? channel.reason})`)
-                .join(", ")}
+            <p className="text-xs text-muted">
+              {t("excluded", {
+                value: result.excluded_channels
+                  .map((channel) => {
+                    const key = EXCLUSION_KEYS[channel.reason];
+                    const reasonLabel = key ? t(`exclusions.${key}`) : channel.reason;
+                    return `${channel.name} (${reasonLabel})`;
+                  })
+                  .join(", "),
+              })}
             </p>
           )}
         </div>

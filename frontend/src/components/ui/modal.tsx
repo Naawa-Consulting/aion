@@ -35,7 +35,7 @@ export function Modal({ open, onClose, title, children }: ModalProps) {
           transition={{ duration: 0.15 }}
         >
           <motion.div
-            className="w-full max-w-lg rounded-2xl bg-[var(--color-card)] p-6 shadow-lg"
+            className="w-full max-w-lg rounded-xl border border-line bg-surface p-6 shadow-[var(--shadow-soft)]"
             onClick={(event) => event.stopPropagation()}
             initial={{ opacity: 0, scale: 0.96, y: 8 }}
             animate={{ opacity: 1, scale: 1, y: 0 }}
@@ -43,8 +43,8 @@ export function Modal({ open, onClose, title, children }: ModalProps) {
             transition={{ duration: 0.18, ease: "easeOut" }}
           >
             <div className="mb-4 flex items-center justify-between">
-              <h3 className="text-lg font-semibold">{title}</h3>
-              <button onClick={onClose} className="rounded-full p-2 hover:bg-[var(--color-border)]/40">
+              <h3 className="text-lg font-semibold text-ink">{title}</h3>
+              <button onClick={onClose} className="rounded-full p-2 hover:bg-surface-2">
                 <X className="h-4 w-4" />
               </button>
             </div>

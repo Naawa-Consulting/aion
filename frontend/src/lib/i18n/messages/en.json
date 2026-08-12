@@ -1,0 +1,118 @@
+{
+  "common": {
+    "save": "Save",
+    "cancel": "Cancel",
+    "delete": "Delete",
+    "close": "Close",
+    "confirm": "Confirm",
+    "loading": "Loading…"
+  },
+  "nav": {
+    "datasets": "Datasets",
+    "transform": "Transform",
+    "modeling": "Modeling",
+    "analysis": "Analysis",
+    "predict": "Predict",
+    "executiveSummary": "Executive Summary",
+    "admin": "Admin"
+  },
+  "sidebar": {
+    "collapse": "Collapse navigation",
+    "expand": "Expand navigation",
+    "openMenu": "Open menu",
+    "closeMenu": "Close menu",
+    "incompleteDatasets": "Time variable not set",
+    "incompleteModeling": "No hero model yet"
+  },
+  "context": {
+    "dataset": "Dataset",
+    "model": "Model",
+    "none": "None selected"
+  },
+  "executiveSummary": {
+    "eyebrow": "Executive view",
+    "title": "Executive Summary",
+    "print": "Print report",
+    "printedAt": "Generated: {value}",
+    "filters": {
+      "dataset": "Dataset",
+      "model": "Model",
+      "dateRange": "Period",
+      "dateStart": "Start date",
+      "dateEnd": "End date"
+    },
+    "emptySelection": {
+      "title": "Select a dataset and a model",
+      "description": "Choose a dataset and a model to see its key indicators."
+    },
+    "noDatasets": {
+      "title": "No datasets yet",
+      "description": "Upload a dataset to start seeing executive summaries.",
+      "cta": "Go to Datasets"
+    },
+    "noModel": {
+      "title": "This dataset has no model yet",
+      "description": "Go to Modeling to train the first model for this dataset.",
+      "cta": "Go to Modeling"
+    },
+    "error": {
+      "title": "Couldn't load the indicators",
+      "retry": "Retry"
+    },
+    "economicsNotConfigured": "Set a conversion rate and average value in Transform → Conversion settings to calculate ROI/ROAS for this model.",
+    "kpis": {
+      "targetFallback": "the target variable",
+      "fit": "Model fit",
+      "fitTooltip": "R² measures how well the model explains {yVar}. Below 70% it's worth reviewing the model before deciding with it.",
+      "fitAdjSuffix": "({value} adjusted)",
+      "reliable": "Reliable",
+      "review": "Review",
+      "totalContribution": "Total contribution",
+      "totalContributionTooltip": "Sum of every variable's contribution to {yVar} over the selected period.",
+      "roi": "ROI",
+      "roiTooltip": "(revenue − investment) / investment, over the selected period.",
+      "roas": "ROAS",
+      "roasTooltip": "revenue / investment, over the selected period.",
+      "notConfigured": "Not configured",
+      "positive": "Positive",
+      "negative": "Negative"
+    },
+    "insight": {
+      "single": "{group} explains {percent} of {yVar} over the selected period.",
+      "double": "{group} explains {percent} of {yVar}, followed by {group2} at {percent2}.",
+      "none": "Not enough per-group contribution yet to summarize this period."
+    },
+    "groups": {
+      "title": "Contribution by group",
+      "subtitle": "Each group's share of {yVar}",
+      "empty": "No contribution data yet.",
+      "baselineNote": "Baseline (seasonality and trend): {percent} of {yVar}.",
+      "tooltipValue": "Contribution",
+      "tooltipPercent": "% of total"
+    },
+    "planner": {
+      "title": "Reverse budget",
+      "subtitle": "Enter an available budget and get the suggested allocation per channel"
+    }
+  },
+  "planner": {
+    "budgetLabel": "Total budget",
+    "optimize": "Optimize budget",
+    "optimizing": "Optimizing...",
+    "apply": "Apply to scenario",
+    "suggestedSpend": "Suggested spend",
+    "projectedContribution": "Projected contribution: {value}",
+    "projectedRevenue": "Projected revenue: {value}",
+    "excluded": "Not optimized: {value}",
+    "selectModelFirst": "Select a model first",
+    "budgetRequired": "Enter a budget greater than 0",
+    "noOptimizableChannels": "No configured channel is optimizable yet (check Transform → Investment channels).",
+    "optimizeFailed": "Couldn't optimize the budget",
+    "applied": "Allocation applied to the scenario — use 'Preview scenario' to see the projected result.",
+    "exclusions": {
+      "notModeled": "no variable in the current model",
+      "noTransformParams": "no fitted saturation curve",
+      "noDollarRate": "cost not tied to the modeled variable"
+    }
+  }
+}

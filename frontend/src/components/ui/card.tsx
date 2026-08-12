@@ -20,11 +20,19 @@ export function Card({ className, padding = "md", ...props }: CardProps) {
   );
 }
 
-export function CardHeader({ title, subtitle }: { title: string; subtitle?: string }) {
+export function CardHeader({
+  title,
+  subtitle,
+  as: Heading = "h3",
+}: {
+  title: string;
+  subtitle?: string;
+  as?: "h2" | "h3";
+}) {
   return (
     <div className="mb-4">
-      <h3 className="text-lg font-semibold tracking-tight">{title}</h3>
-      {subtitle && <p className="text-sm text-[var(--color-muted)]">{subtitle}</p>}
+      <Heading className="text-lg font-semibold tracking-tight text-ink">{title}</Heading>
+      {subtitle && <p className="text-sm text-muted">{subtitle}</p>}
     </div>
   );
 }

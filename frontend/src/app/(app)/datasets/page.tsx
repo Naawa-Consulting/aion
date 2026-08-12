@@ -1304,7 +1304,7 @@ function SchemaTabs({
       </div>
       {tab === "schema" ? (
         schemaRows.length ? (
-          <div className="max-h-[360px] overflow-auto animate-fade">
+          <div className="max-h-[360px] overflow-auto">
             <table className="w-full text-sm">
               <thead className="sticky top-0 bg-[var(--color-bg)]">
                 <tr className="text-xs uppercase tracking-wide text-[var(--color-muted)]">

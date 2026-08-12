@@ -5,22 +5,26 @@ import React from "react";
 
 type ButtonProps = React.ButtonHTMLAttributes<HTMLButtonElement> & {
   variant?: "primary" | "secondary" | "ghost" | "danger";
-  size?: "sm" | "md";
+  size?: "sm" | "md" | "lg";
 };
 
 export const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
   ({ className, variant = "primary", size = "md", ...props }, ref) => {
     const classes = clsx(
-      "rounded-full font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 active:scale-[0.97] transition-transform duration-150",
+      "rounded-lg font-medium transition duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 active:scale-[0.97]",
+      "disabled:opacity-50 disabled:cursor-not-allowed disabled:pointer-events-none disabled:active:scale-100",
       {
-        primary: "bg-[var(--color-accent)] text-white hover:opacity-90",
-        secondary: "bg-[var(--color-accent-soft)] text-[var(--color-accent)]",
-        ghost: "bg-transparent text-[var(--color-foreground)] hover:bg-[var(--color-accent-soft)]",
-        danger: "bg-[var(--color-danger)] text-white hover:opacity-90",
+        // Blanco sobre --accent/--bad falla WCAG AA en modo oscuro (2.42:1 / 3.24:1, verificado) —
+        // en ese modo el texto pasa a --plane (el tono más oscuro disponible), 6.10-8.15:1.
+        primary: "bg-accent text-white dark:text-plane hover:opacity-90",
+        secondary: "bg-accent-bg text-accent hover:opacity-90",
+        ghost: "bg-transparent text-ink hover:bg-accent-bg",
+        danger: "bg-bad text-white dark:text-plane hover:opacity-90",
       }[variant],
       {
-        sm: "text-sm px-3 py-1.5",
-        md: "text-sm px-4 py-2",
+        sm: "h-control-sm text-sm px-3",
+        md: "h-control-md text-sm px-4",
+        lg: "h-control-lg text-base px-5",
       }[size],
       className
     );
@@ -29,4 +33,3 @@ export const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
 );
 
 Button.displayName = "Button";
-

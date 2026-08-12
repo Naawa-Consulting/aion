@@ -9,6 +9,22 @@ import { Button } from "@/components/ui/button";
 import { ErrorText } from "@/components/ui/error-text";
 import { Eyebrow } from "@/components/ui/eyebrow";
 import { getSupabaseBrowserClient } from "@/lib/supabase/client";
+import { apiFetch } from "@/lib/api";
+import type { Role } from "@/lib/store";
+
+type MyMembershipsResponse = { is_platform_admin: boolean; memberships: { role: Role }[] };
+
+// Sin redirectTo explícito (deep-link a una ruta protegida), el destino por defecto depende del
+// rol: un visualizador aterriza en el resumen ejecutivo, el resto en el arranque del pipeline.
+async function defaultLandingPath(): Promise<string> {
+  try {
+    const { memberships } = await apiFetch<MyMembershipsResponse>("/me/memberships", { skipCompanyHeader: true });
+    if (memberships[0]?.role === "visualizador") return "/executive-summary";
+  } catch {
+    // Sin memberships resolubles (p. ej. platform_admin sin compañía todavía) — cae al default.
+  }
+  return "/datasets";
+}
 
 function LoginForm() {
   const router = useRouter();
@@ -29,7 +45,7 @@ function LoginForm() {
       setError(signInError.message);
       return;
     }
-    const redirectTo = searchParams.get("redirectTo") || "/datasets";
+    const redirectTo = searchParams.get("redirectTo") || (await defaultLandingPath());
     router.replace(redirectTo);
     router.refresh();
   }

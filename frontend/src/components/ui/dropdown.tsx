@@ -41,7 +41,7 @@ export function Dropdown({ trigger, children, align = "right" }: DropdownProps) 
         {open && (
           <motion.div
             className={clsx(
-              "absolute mt-2 min-w-[200px] rounded-2xl border border-[var(--color-border)] bg-[var(--color-card)] p-2 shadow-lg z-50",
+              "absolute mt-2 min-w-[200px] rounded-xl border border-line bg-surface p-2 shadow-[var(--shadow-soft)] z-50",
               align === "right" ? "right-0" : "left-0"
             )}
             onClick={() => setOpen(false)}
@@ -57,3 +57,25 @@ export function Dropdown({ trigger, children, align = "right" }: DropdownProps) 
     </div>
   );
 }
+
+type DropdownItemProps = React.ButtonHTMLAttributes<HTMLButtonElement> & {
+  active?: boolean;
+};
+
+// Extraído de las clases que user-menu.tsx y company-switcher.tsx repetían a mano.
+export const DropdownItem = React.forwardRef<HTMLButtonElement, DropdownItemProps>(
+  ({ className, active, ...props }, ref) => (
+    <button
+      ref={ref}
+      type="button"
+      className={clsx(
+        "flex w-full items-center justify-between gap-2 rounded-xl px-3 py-2 text-left text-sm hover:bg-accent-bg",
+        active && "bg-accent-bg",
+        className
+      )}
+      {...props}
+    />
+  )
+);
+
+DropdownItem.displayName = "DropdownItem";

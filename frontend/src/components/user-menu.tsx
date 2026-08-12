@@ -2,7 +2,7 @@
 
 import { useRouter } from "next/navigation";
 import { User } from "lucide-react";
-import { Dropdown } from "@/components/ui/dropdown";
+import { Dropdown, DropdownItem } from "@/components/ui/dropdown";
 import { getSupabaseBrowserClient } from "@/lib/supabase/client";
 import { useGlobalStore } from "@/lib/store";
 
@@ -23,18 +23,15 @@ export function UserMenu() {
   return (
     <Dropdown
       trigger={
-        <span className="p-2 rounded-full border border-[var(--color-border)] hover:bg-[var(--color-accent-soft)] transition-colors">
+        // No es <IconButton> porque Dropdown ya envuelve el trigger en su propio <button> —
+        // anidar botones es inválido. Mismas clases que IconButton, como <span>.
+        <span className="inline-flex h-control-md w-control-md items-center justify-center rounded-full border border-border-control hover:bg-accent-bg transition duration-150">
           <User className="h-4 w-4" />
         </span>
       }
     >
-      <div className="px-3 py-2 text-xs text-[var(--color-muted)] truncate">{userEmail}</div>
-      <button
-        onClick={handleSignOut}
-        className="w-full rounded-xl px-3 py-2 text-left text-sm hover:bg-[var(--color-accent-soft)]"
-      >
-        Cerrar sesión
-      </button>
+      <div className="px-3 py-2 text-xs text-muted truncate">{userEmail}</div>
+      <DropdownItem onClick={handleSignOut}>Cerrar sesión</DropdownItem>
     </Dropdown>
   );
 }

@@ -11,7 +11,7 @@ export function FilterBar({ children, className }: FilterBarProps) {
   return (
     <div
       className={clsx(
-        "mb-4 flex flex-wrap items-start gap-x-4 gap-y-3 border-b border-[var(--color-border)] pb-3",
+        "mb-4 flex flex-wrap items-start gap-x-4 gap-y-3 border-b border-line pb-3",
         className
       )}
     >

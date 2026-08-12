@@ -3,6 +3,9 @@
 @tailwind utilities;
 
 :root {
+  /* --- Tokens heredados (Fase 0/0b) --- */
+  /* Se conservan intactos: ~300 usos en las páginas de módulo todavía sin migrar (Fase 7.4-7.8).
+     Se eliminan cuando la última página migre sus usos directos (ver BITACORA). */
   --color-bg: #f8fafc;
   --color-card: #ffffff;
   --color-muted: #94a3b8;
@@ -17,8 +20,32 @@
   --color-warning: #d97706;
   --color-warning-soft: rgba(217, 119, 6, 0.12);
   --shadow-soft: 0 20px 45px rgba(15, 23, 42, 0.08);
-  --radius-lg: 20px;
-  --space-unit: 8px;
+  /* Un solo consumidor (.glass-card); repurposed a 12px, el radio de panel de la Dirección C. */
+  --radius-lg: 12px;
+
+  /* --- Tokens nuevos (Fase 7.2, Dirección C — "Panel", docs/DIRECCION-VISUAL.md) --- */
+  --plane: #f5f5f7;
+  --plane-translucent: rgba(245, 245, 247, 0.85);
+  --surface: #ffffff;
+  --surface-2: #fafafb;
+  --ink: #17181c;
+  --ink-2: #52555e;
+  --muted: #6d7178;
+  --line: #e5e6ea;
+  --line-2: #d0d2d8;
+  --border-control: #8b8d91;
+  --accent: #4b3fb0;
+  --accent-bg: #eeecfb;
+  --good: #006300;
+  --good-bg: #e4f2e4;
+  --warn: #8a5a00;
+  --warn-bg: #fbf0d9;
+  --bad: #b4291f;
+  /* No está en docs/DIRECCION-VISUAL.md (esa tabla no da un par -bg para --bad) — extensión
+     mínima para el badge de estado "danger", verificada ≥4.5:1 con la misma fórmula WCAG. */
+  --bad-bg: #fbe6e4;
+  --font-ui: "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, sans-serif;
+  --font-num: "Cascadia Mono", Consolas, ui-monospace, monospace;
 }
 
 .dark {
@@ -36,6 +63,25 @@
   --color-warning: #fbbf24;
   --color-warning-soft: rgba(251, 191, 36, 0.16);
   --shadow-soft: 0 20px 45px rgba(2, 6, 23, 0.75);
+
+  --plane: #0b0c0e;
+  --plane-translucent: rgba(11, 12, 14, 0.85);
+  --surface: #16181b;
+  --surface-2: #1b1e22;
+  --ink: #f2f3f5;
+  --ink-2: #aab0b8;
+  --muted: #81858e;
+  --line: #262a2f;
+  --line-2: #343a41;
+  --border-control: #61656b;
+  --accent: #a79bf5;
+  --accent-bg: #221d3d;
+  --good: #0ca30c;
+  --good-bg: #14261a;
+  --warn: #f0b429;
+  --warn-bg: #2c2312;
+  --bad: #e66767;
+  --bad-bg: #2e1613;
 }
 
 * {
@@ -45,9 +91,11 @@
 html,
 body {
   height: 100%;
-  background-color: var(--color-bg);
-  color: var(--color-foreground);
-  font-family: var(--font-sans), system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  /* Fondo de página de la Dirección C: --plane (no el --color-bg heredado) — el shell nuevo
+     (Sidebar/TopBar) ya vive sobre --surface, así que el resto de la página debe ser --plane. */
+  background-color: var(--plane);
+  color: var(--ink);
+  font-family: var(--font-ui);
   transition: background-color 0.3s ease, color 0.3s ease;
 }
 
@@ -56,15 +104,27 @@ body {
 }
 
 ::selection {
-  background: var(--color-accent);
+  background: var(--accent);
   color: #fff;
 }
 
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* Superficie plana + separador, no card flotante con sombra — Dirección C ("Panel").
+   Modal y Dropdown son los únicos overlays reales; esos sí conservan --shadow-soft. */
 .glass-card {
-  background: var(--color-card);
+  background: var(--surface);
   border-radius: var(--radius-lg);
-  border: 1px solid var(--color-border);
-  box-shadow: var(--shadow-soft);
+  border: 1px solid var(--line);
 }
 
 .print-only {
@@ -86,6 +146,17 @@ body {
     --color-muted: #475569;
     --color-border: rgba(15, 23, 42, 0.15);
     --shadow-soft: none;
+
+    --plane: #ffffff;
+    --plane-translucent: #ffffff;
+    --surface: #ffffff;
+    --surface-2: #ffffff;
+    --ink: #0f172a;
+    --ink-2: #334155;
+    --muted: #475569;
+    --line: rgba(15, 23, 42, 0.15);
+    --line-2: rgba(15, 23, 42, 0.25);
+    --border-control: rgba(15, 23, 42, 0.4);
   }
   body {
     background: #ffffff;

@@ -12,14 +12,9 @@ export function roleLabel(role: Role): string {
   }
 }
 
-export function roleBadgeVariant(role: Role): "neutral" | "success" | "warning" {
-  switch (role) {
-    case "admin_compania":
-      return "success";
-    case "modelador":
-      return "neutral";
-    case "visualizador":
-    default:
-      return "warning";
-  }
+// good/warn/bad son estados (calidad de una métrica, resultado de una operación), nunca identidad
+// — un rol no es un estado. Antes `visualizador` mapeaba a "warning", pintando de ámbar un rol
+// perfectamente normal. Los tres roles usan el mismo tono neutro; el texto (roleLabel) los distingue.
+export function roleBadgeVariant(_role: Role): "neutral" {
+  return "neutral";
 }

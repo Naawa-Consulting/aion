@@ -898,7 +898,14 @@ export default function AnalysisPage() {
         </Card>
       )}
 
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+      {/* `loading` tracks fetchSummary, which feeds this grid. Same dimming convention the
+          charts below already use, so a stale KPI is visibly stale while recalculating. */}
+      <div
+        className={`grid gap-4 sm:grid-cols-2 lg:grid-cols-4 transition-opacity duration-300 ${
+          loading ? "opacity-40 pointer-events-none" : "opacity-100"
+        }`}
+        aria-busy={loading}
+      >
         <Card padding="sm">
           <CardHeader title="Total" subtitle={summary?.model?.y_var || "—"} />
           <p className="text-lg font-semibold">
@@ -1306,11 +1313,18 @@ const StackChartTooltip: React.FC<CustomTooltipProps> = ({
   percentMode,
   onSeriesHover,
 }) => {
-  if (!active || !payload || payload.length === 0) {
-    onSeriesHover?.(null);
-    return null;
-  }
-  const total = payload.reduce((sum, entry) => sum + (entry.value ?? 0), 0);
+  const isEmpty = !active || !payload || payload.length === 0;
+
+  // Clearing the parent's highlight is a setState on AnalysisPage; doing it in the render
+  // body triggered React's "Cannot update a component while rendering a different component"
+  // warning. It has to happen after commit.
+  useEffect(() => {
+    if (isEmpty) onSeriesHover?.(null);
+  }, [isEmpty, onSeriesHover]);
+
+  if (isEmpty) return null;
+
+  const total = payload!.reduce((sum, entry) => sum + (entry.value ?? 0), 0);
   const formatValue = (value: number) =>
     Number.isFinite(value)
       ? value.toLocaleString(undefined, {
@@ -1323,7 +1337,7 @@ const StackChartTooltip: React.FC<CustomTooltipProps> = ({
     <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-card)] px-3 py-2 shadow-lg">
       <div className="mb-1 text-xs font-semibold text-[var(--color-foreground)]">{label}</div>
       <div className="space-y-1">
-        {payload.map((entry) => {
+        {payload!.map((entry) => {
           const key = entry.dataKey?.toString() ?? "";
           const value = entry.value ?? 0;
           const pct = total ? (value / total) * 100 : 0;

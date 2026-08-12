@@ -1,0 +1,118 @@
+{
+  "common": {
+    "save": "Guardar",
+    "cancel": "Cancelar",
+    "delete": "Eliminar",
+    "close": "Cerrar",
+    "confirm": "Confirmar",
+    "loading": "Cargando…"
+  },
+  "nav": {
+    "datasets": "Datasets",
+    "transform": "Transform",
+    "modeling": "Modeling",
+    "analysis": "Analysis",
+    "predict": "Predict",
+    "executiveSummary": "Resumen Ejecutivo",
+    "admin": "Admin"
+  },
+  "sidebar": {
+    "collapse": "Colapsar navegación",
+    "expand": "Expandir navegación",
+    "openMenu": "Abrir menú",
+    "closeMenu": "Cerrar menú",
+    "incompleteDatasets": "Falta configurar la variable de tiempo",
+    "incompleteModeling": "Falta un modelo hero"
+  },
+  "context": {
+    "dataset": "Dataset",
+    "model": "Modelo",
+    "none": "Sin selección"
+  },
+  "executiveSummary": {
+    "eyebrow": "Vista ejecutiva",
+    "title": "Resumen Ejecutivo",
+    "print": "Imprimir reporte",
+    "printedAt": "Generado: {value}",
+    "filters": {
+      "dataset": "Dataset",
+      "model": "Modelo",
+      "dateRange": "Periodo",
+      "dateStart": "Fecha de inicio",
+      "dateEnd": "Fecha de fin"
+    },
+    "emptySelection": {
+      "title": "Selecciona un dataset y un modelo",
+      "description": "Elige un dataset y un modelo para ver sus indicadores clave."
+    },
+    "noDatasets": {
+      "title": "Todavía no hay datasets",
+      "description": "Sube un dataset para empezar a ver resúmenes ejecutivos.",
+      "cta": "Ir a Datasets"
+    },
+    "noModel": {
+      "title": "Este dataset todavía no tiene un modelo",
+      "description": "Ve a Modeling para entrenar el primer modelo de este dataset.",
+      "cta": "Ir a Modeling"
+    },
+    "error": {
+      "title": "No se pudieron cargar los indicadores",
+      "retry": "Reintentar"
+    },
+    "economicsNotConfigured": "Configura tasa de conversión y valor promedio en Transform → Conversion settings para calcular ROI/ROAS de este modelo.",
+    "kpis": {
+      "targetFallback": "la variable objetivo",
+      "fit": "Ajuste del modelo",
+      "fitTooltip": "R² mide qué tan bien el modelo explica el comportamiento de {yVar}. Por debajo de 70% conviene revisar el modelo antes de decidir con él.",
+      "fitAdjSuffix": "({value} ajustado)",
+      "reliable": "Confiable",
+      "review": "Revisar",
+      "totalContribution": "Contribución total",
+      "totalContributionTooltip": "Suma de la contribución de todas las variables del modelo sobre {yVar} en el periodo seleccionado.",
+      "roi": "ROI",
+      "roiTooltip": "(ingreso − inversión) / inversión, en el periodo seleccionado.",
+      "roas": "ROAS",
+      "roasTooltip": "ingreso / inversión, en el periodo seleccionado.",
+      "notConfigured": "No configurado",
+      "positive": "Positivo",
+      "negative": "Negativo"
+    },
+    "insight": {
+      "single": "{group} explica el {percent} de {yVar} en el periodo seleccionado.",
+      "double": "{group} explica el {percent} de {yVar}, seguido de {group2} con {percent2}.",
+      "none": "Todavía no hay suficiente contribución por grupo para resumir el periodo."
+    },
+    "groups": {
+      "title": "Contribución por grupo",
+      "subtitle": "Participación de cada grupo sobre {yVar}",
+      "empty": "Sin datos de contribución todavía.",
+      "baselineNote": "Baseline (estacionalidad y tendencia): {percent} de {yVar}.",
+      "tooltipValue": "Contribución",
+      "tooltipPercent": "% del total"
+    },
+    "planner": {
+      "title": "Presupuesto inverso",
+      "subtitle": "Escribe un presupuesto disponible y obtén la asignación sugerida por canal"
+    }
+  },
+  "planner": {
+    "budgetLabel": "Presupuesto total",
+    "optimize": "Optimizar presupuesto",
+    "optimizing": "Optimizando...",
+    "apply": "Aplicar al escenario",
+    "suggestedSpend": "Gasto sugerido",
+    "projectedContribution": "Contribución proyectada: {value}",
+    "projectedRevenue": "Ingreso proyectado: {value}",
+    "excluded": "Sin optimizar: {value}",
+    "selectModelFirst": "Selecciona un modelo primero",
+    "budgetRequired": "Ingresa un presupuesto mayor a 0",
+    "noOptimizableChannels": "Ningún canal configurado es optimizable todavía (revisa Transform → Investment channels).",
+    "optimizeFailed": "No se pudo optimizar el presupuesto",
+    "applied": "Asignación aplicada al escenario — usa 'Preview scenario' para ver el resultado proyectado.",
+    "exclusions": {
+      "notModeled": "sin variable en el modelo actual",
+      "noTransformParams": "sin curva de saturación ajustada",
+      "noDollarRate": "costo no ligado a la variable modelada"
+    }
+  }
+}

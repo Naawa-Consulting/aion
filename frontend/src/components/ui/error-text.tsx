@@ -6,5 +6,5 @@ type ErrorTextProps = {
 };
 
 export function ErrorText({ children, className }: ErrorTextProps) {
-  return <p className={clsx("text-[var(--color-danger)]", className)}>{children}</p>;
+  return <p className={clsx("text-bad", className)}>{children}</p>;
 }

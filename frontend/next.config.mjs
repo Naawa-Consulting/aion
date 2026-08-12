@@ -1,14 +1,10 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   reactStrictMode: true,
-  // `next build` had never run in this repo before (only `npm run dev`, which
-  // doesn't type-check as strictly). It surfaces pre-existing type errors unrelated
-  // to any current work, scattered across several pages — see BITACORA.md pendiente
-  // "limpieza de tipos". Disabled here so production builds (Vercel) aren't blocked;
-  // none of the errors found so far were runtime bugs, only compile-time strictness.
-  typescript: {
-    ignoreBuildErrors: true,
-  },
+  // Type-checking is back on as of Fase 7.0 (the `ignoreBuildErrors` stopgap from Fase 1 is
+  // gone). The remaining errors were all one root cause — an untyped Supabase browser client,
+  // fixed in lib/supabase/client.ts. Keep it on: Fase 7 rewrites every module page, and the
+  // type-checker is the cheapest regression net we have for a refactor that size.
 };
 
 export default nextConfig;

@@ -11,6 +11,9 @@ aportan contexto). Convenciones y arquitectura conceptual completas en `CLAUDE.m
 - `BITACORA.md` — historial de decisiones, pendientes y archivos generados.
 - `CLAUDE.md` — arquitectura técnica y reglas operativas para Claude Code.
 - `docs/README.md` — especificación técnica por módulo (endpoints/contratos).
+- `docs/DIRECCION-VISUAL.md` — especificación de diseño (Fase 7.1): tesis, paleta verificada contra
+  WCAG, escalas de tipografía/espaciado/radio/alturas y reglas de gráfica. Fuente de verdad para la
+  UI a partir de la Fase 7.2.
 
 ## `backend/` (FastAPI)
 

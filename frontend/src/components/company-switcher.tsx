@@ -2,8 +2,7 @@
 
 import { useRouter } from "next/navigation";
 import { ChevronDown } from "lucide-react";
-import clsx from "clsx";
-import { Dropdown } from "@/components/ui/dropdown";
+import { Dropdown, DropdownItem } from "@/components/ui/dropdown";
 import { Badge } from "@/components/ui/badge";
 import { useGlobalStore } from "@/lib/store";
 import { roleBadgeVariant, roleLabel } from "@/lib/roles";
@@ -20,7 +19,7 @@ export function CompanySwitcher() {
   if (memberships.length === 1 && active) {
     return (
       <div className="hidden sm:flex items-center gap-2 text-sm">
-        <span className="text-[var(--color-muted)]">{active.companyName}</span>
+        <span className="text-muted">{active.companyName}</span>
         <Badge variant={roleBadgeVariant(active.role)}>{roleLabel(active.role)}</Badge>
       </div>
     );
@@ -36,20 +35,17 @@ export function CompanySwitcher() {
       }
     >
       {memberships.map((m) => (
-        <button
+        <DropdownItem
           key={m.companyId}
+          active={m.companyId === activeCompanyId}
           onClick={() => {
             setActiveCompanyId(m.companyId);
             router.push("/datasets");
           }}
-          className={clsx(
-            "flex w-full items-center justify-between gap-2 rounded-xl px-3 py-2 text-left text-sm hover:bg-[var(--color-accent-soft)]",
-            m.companyId === activeCompanyId && "bg-[var(--color-accent-soft)]"
-          )}
         >
           {m.companyName}
           <Badge variant={roleBadgeVariant(m.role)}>{roleLabel(m.role)}</Badge>
-        </button>
+        </DropdownItem>
       ))}
     </Dropdown>
   );
