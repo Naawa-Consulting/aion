@@ -7,9 +7,9 @@ import { usePipelineContext } from "@/hooks/usePipelineContext";
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
-  // Resuelto una sola vez aquí y pasado hacia abajo — Sidebar (indicador de paso incompleto) y
-  // TopBar (barra de contexto) lo necesitan, y cada uno llamando al hook por su cuenta duplicaría
-  // el fetch de /datasets + /models-with-roles en cada carga de página.
+  // Resuelto una sola vez aquí y pasado hacia abajo — Sidebar (indicador de paso incompleto) lo
+  // necesita, y llamar al hook por cuenta propia duplicaría el fetch de /datasets +
+  // /models-with-roles en cada carga de página.
   const pipelineContext = usePipelineContext();
 
   return (
@@ -20,7 +20,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         pipelineContext={pipelineContext}
       />
       <div className="flex min-w-0 flex-1 flex-col">
-        <TopBar onMenuClick={() => setMobileNavOpen(true)} pipelineContext={pipelineContext} />
+        <TopBar onMenuClick={() => setMobileNavOpen(true)} />
         <main className="mx-auto w-full max-w-7xl flex-1 space-y-6 px-6 py-6">{children}</main>
       </div>
     </div>

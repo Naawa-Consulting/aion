@@ -1,21 +1,52 @@
 "use client";
 
 import React, { useCallback, useEffect, useMemo, useState } from "react";
-import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, ResponsiveContainer, Legend } from "recharts";
+import Link from "next/link";
+import {
+  Area,
+  ComposedChart,
+  Line,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip as RechartsTooltip,
+  ResponsiveContainer,
+  Legend,
+} from "recharts";
 import { toast } from "sonner";
+import { useTranslations } from "next-intl";
+import { useTheme } from "next-themes";
 
 import { Card, CardHeader } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { ErrorText } from "@/components/ui/error-text";
 import { Select } from "@/components/ui/select";
+import { Input } from "@/components/ui/input";
 import { Eyebrow } from "@/components/ui/eyebrow";
+import { Info } from "lucide-react";
+import { PageHeader } from "@/components/ui/page-header";
+import { FilterBar, FilterField } from "@/components/ui/filter-bar";
+import { EmptyState } from "@/components/ui/empty-state";
+import { Skeleton } from "@/components/ui/skeleton";
+import { Tooltip as InfoPopover } from "@/components/ui/tooltip";
+import { StatCard } from "@/components/ui/stat-card";
+import { ToggleChip } from "@/components/ui/toggle-chip";
+import { Badge } from "@/components/ui/badge";
+import { Table, TableHeader, TableRow, Th, TableCell } from "@/components/ui/table";
+import { Modal } from "@/components/ui/modal";
 import ScenarioSheetGlide, { type MultipliersMap } from "@/components/predict/ScenarioSheetGlide";
+import ScenarioSheetTable from "@/components/predict/ScenarioSheetTable";
 import PlannerView, { type ChannelAllocation } from "@/components/predict/PlannerView";
-import { apiFetch, ApiError } from "@/lib/api";
+import { apiFetch } from "@/lib/api";
+import { translateApiError } from "@/lib/error-messages";
 import { useCanEdit } from "@/hooks/useCanEdit";
-import { formatChartNumber } from "@/lib/chart-format";
+import { useMediaQuery } from "@/hooks/useMediaQuery";
+import { chartColor, useStableCategoricalColor } from "@/lib/chart-colors";
+import { formatChartNumber, formatChartPercent, formatCurrency } from "@/lib/chart-format";
+import { EMPTY_VALUE } from "@/lib/format";
 import { downloadBlob } from "@/lib/download";
 import { useGlobalStore } from "@/lib/store";
+import { useActiveCurrency } from "@/hooks/useActiveCompany";
 
 type Dataset = { id: string; display_name: string; columns: { name: string; dtype: string }[] };
 type Model = {
@@ -88,10 +119,59 @@ type Scenario = {
 };
 
 const DEFAULT_MULTIPLIER = 1;
+const SCENARIO_LIMIT = 5;
+const DESKTOP_QUERY = "(min-width: 1024px)";
+
+function SecondaryLink({ href, children }: { href: string; children: React.ReactNode }) {
+  return (
+    <Link
+      href={href}
+      className="inline-flex h-control-md items-center rounded-lg bg-accent-bg px-4 text-sm font-medium text-accent hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2"
+    >
+      {children}
+    </Link>
+  );
+}
+
+function InfoTooltip({ label, content }: { label: string; content: string }) {
+  return (
+    <InfoPopover content={<span style={{ whiteSpace: "normal", display: "block", maxWidth: 220 }}>{content}</span>}>
+      <button
+        type="button"
+        aria-label={label}
+        className="rounded-full p-0.5 text-muted transition hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+      >
+        <Info className="h-3.5 w-3.5" />
+      </button>
+    </InfoPopover>
+  );
+}
+
+function deltaBadgeVariant(delta: number | null): "success" | "danger" | "neutral" | null {
+  if (delta === null || Number.isNaN(delta)) return null;
+  if (delta > 0) return "success";
+  if (delta < 0) return "danger";
+  return "neutral";
+}
+
+function formatSignedPercent(delta: number, formatter: Intl.NumberFormat) {
+  const sign = delta > 0 ? "+" : "";
+  return `${sign}${formatter.format(delta)}`;
+}
 
 export default function PredictPage() {
+  const t = useTranslations("predict");
+  const tCommon = useTranslations("common");
+  const tErrors = useTranslations("errors");
   const canEdit = useCanEdit();
   const { activeCompanyId } = useGlobalStore();
+  const currency = useActiveCurrency();
+  const { resolvedTheme } = useTheme();
+  const isDarkTheme = resolvedTheme === "dark";
+  const isDesktop = useMediaQuery(DESKTOP_QUERY);
+  const mutedColor = isDarkTheme ? "#81858e" : "#6d7178";
+  const lineColor = isDarkTheme ? "#262a2f" : "#e5e6ea";
+
   const [datasets, setDatasets] = useState<Dataset[]>([]);
   const [selectedDataset, setSelectedDataset] = useState("");
   const [models, setModels] = useState<Model[]>([]);
@@ -116,9 +196,17 @@ export default function PredictPage() {
   const [heroSeries, setHeroSeries] = useState<ScenarioSeriesPoint[]>([]);
   const [heroLoading, setHeroLoading] = useState(false);
   const [showProjectedTable, setShowProjectedTable] = useState(false);
-  const [viewMode, setViewMode] = useState<"advanced" | "planner">("advanced");
+  const [viewMode, setViewMode] = useState<"advanced" | "planner">("planner");
   const [assumptionsExporting, setAssumptionsExporting] = useState(false);
   const [totalsExporting, setTotalsExporting] = useState(false);
+  const [initializing, setInitializing] = useState(true);
+  const [modelsLoading, setModelsLoading] = useState(false);
+  const [variablesError, setVariablesError] = useState(false);
+  const [resetConfirmOpen, setResetConfirmOpen] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState<Scenario | null>(null);
+  const [deleteLoading, setDeleteLoading] = useState(false);
+
+  const colorFor = useStableCategoricalColor(selectedModel);
 
   const percentFormatter = useMemo(
     () => new Intl.NumberFormat(undefined, { minimumFractionDigits: 1, maximumFractionDigits: 1 }),
@@ -127,9 +215,9 @@ export default function PredictPage() {
   const dateFormatter = useMemo(() => new Intl.DateTimeFormat(undefined, { dateStyle: "medium" }), []);
   const formatScenarioDate = useCallback(
     (value: string | null | undefined) => {
-      if (!value) return "-";
+      if (!value) return EMPTY_VALUE;
       const date = new Date(value);
-      if (Number.isNaN(date.getTime())) return "-";
+      if (Number.isNaN(date.getTime())) return EMPTY_VALUE;
       return dateFormatter.format(date);
     },
     [dateFormatter]
@@ -160,11 +248,10 @@ export default function PredictPage() {
     [models, selectedModel]
   );
   const dependentLabel = selectedModelInfo?.y_var ?? "Y";
-  const freqLabel = freq === "day" ? "day" : freq === "week" ? "week" : "month";
+  const freqLabel = t(`freq.${freq}`);
   const editMode: "absolute" = "absolute";
-  const SCENARIO_LIMIT = 5;
   const reachedScenarioLimit = !currentScenarioId && scenarios.length >= SCENARIO_LIMIT;
-  const saveButtonLabel = currentScenarioId ? "Save changes" : "Save scenario";
+  const saveButtonLabel = currentScenarioId ? t("params.saveChanges") : t("params.save");
 
   const fetchDatasets = useCallback(async () => {
     try {
@@ -175,10 +262,13 @@ export default function PredictPage() {
       }
     } catch {
       toast.error("Failed to load datasets");
+    } finally {
+      setInitializing(false);
     }
   }, []);
 
   const fetchModels = useCallback(async (datasetId: string) => {
+    setModelsLoading(true);
     try {
       const data = await apiFetch<any[]>(`/models?dataset_id=${datasetId}`);
       const normalized: Model[] = data.map((m: any) => ({
@@ -194,6 +284,8 @@ export default function PredictPage() {
       if (hero) setSelectedModel(hero.id);
     } catch {
       toast.error("Failed to load models");
+    } finally {
+      setModelsLoading(false);
     }
   }, []);
 
@@ -232,19 +324,25 @@ export default function PredictPage() {
     }
   }, [selectedModel, adjustments, requestScenarioSummary]);
 
-  const fetchBaselineVariables = useCallback(async (modelId: string) => {
-    try {
-      const data = await apiFetch<any>(`/predict/${modelId}/simulate`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ adjustments: [] }),
-      });
-      setVariables(data.variables || []);
-      fetchPreview();
-    } catch {
-      toast.error("Failed to load baseline variables");
-    }
-  }, [fetchPreview]);
+  const fetchBaselineVariables = useCallback(
+    async (modelId: string) => {
+      setVariablesError(false);
+      try {
+        const data = await apiFetch<any>(`/predict/${modelId}/simulate`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ adjustments: [] }),
+        });
+        setVariables(data.variables || []);
+        fetchPreview();
+      } catch {
+        setVariables([]);
+        setVariablesError(true);
+        toast.error("Failed to load baseline variables");
+      }
+    },
+    [fetchPreview]
+  );
 
   const fetchScenarios = useCallback(async (modelId: string) => {
     try {
@@ -329,9 +427,8 @@ export default function PredictPage() {
     },
     [editablePeriods]
   );
-  const handleResetAll = useCallback(() => {
-    if (!window.confirm("Reset to base scenario? This will overwrite all current adjustments.")) return;
-    setAdjustments((prev) => {
+  const performResetAll = useCallback(() => {
+    setAdjustments(() => {
       const next: Record<string, Record<string, PeriodValue>> = {};
       editablePeriods.forEach((period) => {
         const mapping: Record<string, PeriodValue> = {};
@@ -345,6 +442,7 @@ export default function PredictPage() {
     setCurrentScenarioId(null);
     setRenamingScenarioId(null);
     setRenameValue("");
+    setResetConfirmOpen(false);
   }, [editablePeriods, variables]);
 
   const handleSaveScenario = async () => {
@@ -353,7 +451,7 @@ export default function PredictPage() {
       return;
     }
     if (!currentScenarioId && scenarios.length >= SCENARIO_LIMIT) {
-      toast.error(`Maximum ${SCENARIO_LIMIT} saved scenarios. Delete one to save a new scenario.`);
+      toast.error(t("params.limitReached", { limit: SCENARIO_LIMIT }));
       return;
     }
     setSaving(true);
@@ -405,21 +503,25 @@ export default function PredictPage() {
     setPreview(scenario.summary);
   };
 
-  const handleDeleteScenario = async (scenarioId: string) => {
-    if (!window.confirm("Delete this scenario? This cannot be undone.")) return;
+  const confirmDeleteScenario = async () => {
+    if (!deleteTarget) return;
+    setDeleteLoading(true);
     try {
-      await apiFetch<void>(`/predict/scenarios/${scenarioId}`, { method: "DELETE" });
+      await apiFetch<void>(`/predict/scenarios/${deleteTarget.id}`, { method: "DELETE" });
       toast.success("Scenario deleted");
-      if (currentScenarioId === scenarioId) {
+      if (currentScenarioId === deleteTarget.id) {
         setCurrentScenarioId(null);
       }
-      if (renamingScenarioId === scenarioId) {
+      if (renamingScenarioId === deleteTarget.id) {
         setRenamingScenarioId(null);
         setRenameValue("");
       }
-      if (selectedModel) fetchScenarios(selectedModel);
+      if (selectedModel) await fetchScenarios(selectedModel);
+      setDeleteTarget(null);
     } catch (error: any) {
       toast.error(error?.message || "Unable to delete scenario");
+    } finally {
+      setDeleteLoading(false);
     }
   };
 
@@ -510,54 +612,91 @@ export default function PredictPage() {
     },
     [projectedTotal]
   );
-  const formatShareLabel = useCallback(
-    (value: number | null | undefined) => {
-      const share = shareOfTotal(value);
-      return share !== null ? `${percentFormatter.format(share)}% of total` : undefined;
-    },
-    [shareOfTotal, percentFormatter]
+
+  const heroTotal = useMemo(
+    () => heroSeries.reduce((sum, point) => sum + (Number.isFinite(point.y_pred) ? point.y_pred : 0), 0),
+    [heroSeries]
   );
-  const contributionCards = useMemo(() => {
-    const items: { key: string; title: string; value: number | null | undefined; subtitle?: string }[] = [
+  const liveDeltaPct = useMemo(() => {
+    if (!heroSeries.length || projectedTotal === null || !heroTotal) return null;
+    return ((projectedTotal - heroTotal) / heroTotal) * 100;
+  }, [heroSeries.length, projectedTotal, heroTotal]);
+  const liveDeltaVariant = deltaBadgeVariant(liveDeltaPct);
+
+  type KpiItem = {
+    key: string;
+    label: string;
+    value: string;
+    icon?: React.ReactNode;
+    trend?: React.ReactNode;
+  };
+
+  const kpiItems = useMemo<KpiItem[]>(() => {
+    const items: KpiItem[] = [
       {
         key: "projected-total",
-        title: "Projected total",
-        value: preview?.total ?? null,
-        subtitle: `Forecast: ${dependentLabel}`,
+        label: t("kpis.projectedTotal"),
+        value: preview?.total != null ? formatChartNumber(preview.total, 1) : EMPTY_VALUE,
+        icon: (
+          <InfoTooltip
+            label={t("kpis.projectedTotal")}
+            content={t("kpis.projectedTotalTooltip", { yVar: dependentLabel })}
+          />
+        ),
+        trend: liveDeltaVariant ? (
+          <Badge variant={liveDeltaVariant}>
+            {formatSignedPercent(liveDeltaPct as number, percentFormatter)}%
+          </Badge>
+        ) : undefined,
       },
       {
         key: "average-period",
-        title: "Average per period",
-        value: preview?.average_per_period ?? null,
-        subtitle: freqLabel,
+        label: t("kpis.averagePerPeriod"),
+        value: preview?.average_per_period != null ? formatChartNumber(preview.average_per_period, 1) : EMPTY_VALUE,
+        trend: <span className="text-xs text-muted">{freqLabel}</span>,
       },
     ];
     if (baselineEntry) {
       items.push({
         key: "baseline",
-        title: "Baseline",
-        value: baselineContribution,
-        subtitle: formatShareLabel(baselineContribution),
+        label: t("kpis.baseline"),
+        value: baselineContribution != null ? formatChartNumber(baselineContribution, 1) : EMPTY_VALUE,
+        icon: <InfoTooltip label={t("kpis.baseline")} content={t("kpis.baselineTooltip", { yVar: dependentLabel })} />,
+        trend: (() => {
+          const share = shareOfTotal(baselineContribution);
+          return share !== null ? <Badge variant="neutral">{formatChartPercent(share, 1)}</Badge> : undefined;
+        })(),
       });
     }
     dynamicGroupSlices.forEach((slice, index) => {
+      const name = slice.name || "Group";
+      const share = shareOfTotal(slice.value);
       items.push({
-        key: `group-${slice.id ?? slice.name ?? index}`,
-        title: slice.name || "Group",
-        value: slice.value,
-        subtitle: formatShareLabel(slice.value),
+        key: `group-${slice.id ?? name ?? index}`,
+        label: name,
+        value: formatChartNumber(slice.value, 1),
+        icon: (
+          <span
+            className="inline-block h-2.5 w-2.5 rounded-full"
+            style={{ backgroundColor: colorFor(name, isDarkTheme) }}
+            aria-hidden
+          />
+        ),
+        trend: share !== null ? <Badge variant="neutral">{formatChartPercent(share, 1)}</Badge> : undefined,
       });
     });
-    if (otherEntry && otherEntry.value !== undefined && otherEntry.value !== null && Math.abs(otherEntry.value) > 1e-9) {
+    if (otherEntry && otherContribution !== undefined && otherContribution !== null && Math.abs(otherContribution) > 1e-9) {
+      const share = shareOfTotal(otherContribution);
       items.push({
         key: "other",
-        title: otherEntry.name || "Other",
-        value: otherContribution,
-        subtitle: formatShareLabel(otherContribution),
+        label: otherEntry.name || t("kpis.other"),
+        value: formatChartNumber(otherContribution, 1),
+        trend: share !== null ? <Badge variant="neutral">{formatChartPercent(share, 1)}</Badge> : undefined,
       });
     }
     return items;
   }, [
+    t,
     preview,
     dependentLabel,
     freqLabel,
@@ -566,13 +705,50 @@ export default function PredictPage() {
     dynamicGroupSlices,
     otherEntry,
     otherContribution,
-    formatShareLabel,
+    shareOfTotal,
+    colorFor,
+    isDarkTheme,
+    liveDeltaVariant,
+    liveDeltaPct,
+    percentFormatter,
   ]);
+
   const economics = preview?.economics ?? null;
   const roiLabel = (value: number | null | undefined) =>
-    value === null || value === undefined || !Number.isFinite(value) ? "-" : `${(value * 100).toFixed(1)}%`;
+    value === null || value === undefined || !Number.isFinite(value) ? EMPTY_VALUE : `${(value * 100).toFixed(1)}%`;
   const roasLabel = (value: number | null | undefined) =>
-    value === null || value === undefined || !Number.isFinite(value) ? "-" : `${value.toFixed(2)}x`;
+    value === null || value === undefined || !Number.isFinite(value) ? EMPTY_VALUE : `${value.toFixed(2)}x`;
+
+  const economicsKpiItems = useMemo<KpiItem[]>(() => {
+    if (!economics) return [];
+    return [
+      {
+        key: "investment",
+        label: t("kpis.investment"),
+        value: formatCurrency(economics.total_investment, currency, 1),
+        icon: <InfoTooltip label={t("kpis.investment")} content={t("kpis.investmentTooltip")} />,
+      },
+      {
+        key: "revenue",
+        label: t("kpis.revenue"),
+        value: economics.total_revenue !== null ? formatCurrency(economics.total_revenue, currency, 1) : EMPTY_VALUE,
+        icon: <InfoTooltip label={t("kpis.revenue")} content={t("kpis.revenueTooltip")} />,
+      },
+      {
+        key: "roi",
+        label: t("kpis.roi"),
+        value: roiLabel(economics.roi_total),
+        icon: <InfoTooltip label={t("kpis.roi")} content={t("kpis.roiTooltip")} />,
+      },
+      {
+        key: "roas",
+        label: t("kpis.roas"),
+        value: roasLabel(economics.roas_total),
+        icon: <InfoTooltip label={t("kpis.roas")} content={t("kpis.roasTooltip")} />,
+      },
+    ];
+  }, [economics, t, currency]);
+
   const chartData = useMemo(() => {
     const map = new Map<string, { hero?: number | null; scenario?: number | null }>();
     scenarioSeries.forEach((point) => {
@@ -588,10 +764,15 @@ export default function PredictPage() {
     const ordered = displayPeriods.length ? displayPeriods : Array.from(map.keys());
     return ordered.map((period) => {
       const entry = map.get(period) || {};
+      const hero = entry.hero ?? null;
+      const scenario = entry.scenario ?? null;
+      const hasBand = hero !== null && scenario !== null;
       return {
         period,
-        hero: entry.hero ?? null,
-        scenario: entry.scenario ?? null,
+        hero,
+        scenario,
+        deltaBase: hasBand ? Math.min(hero as number, scenario as number) : null,
+        deltaHeight: hasBand ? Math.abs((scenario as number) - (hero as number)) : null,
       };
     });
   }, [scenarioSeries, heroSeries, displayPeriods]);
@@ -599,13 +780,15 @@ export default function PredictPage() {
   const renderTimeseriesTooltip = useCallback(
     ({ active, payload, label }: any) => {
       if (!active || !payload?.length) return null;
+      const visible = payload.filter((item: any) => item.dataKey === "hero" || item.dataKey === "scenario");
+      if (!visible.length) return null;
       return (
-        <div className="rounded-md border border-[var(--color-border)] bg-[var(--color-card)] px-3 py-2 text-xs shadow">
-          <p className="font-semibold">{label}</p>
-          {payload.map((item: any) => (
-            <p key={item.dataKey} className="flex items-center justify-between gap-4 capitalize text-[var(--color-muted)]">
+        <div className="rounded-md border border-line bg-surface px-3 py-2 text-xs shadow-[var(--shadow-soft)]">
+          <p className="font-semibold text-ink">{label}</p>
+          {visible.map((item: any) => (
+            <p key={item.dataKey} className="flex items-center justify-between gap-4 text-muted">
               <span>{item.name}</span>
-              <span className="font-semibold text-[var(--color-foreground)]">
+              <span className="font-semibold tabular-nums text-ink">
                 {formatChartNumber(typeof item.value === "number" ? item.value : Number(item.value), 1)}
               </span>
             </p>
@@ -644,8 +827,7 @@ export default function PredictPage() {
       const filename = buildExportFilename(scenarioName || dependentLabel || "scenario", "assumptions");
       downloadBlob(blob, filename);
     } catch (error) {
-      const message = error instanceof ApiError ? (error.detail?.detail || error.detail?.error) : null;
-      toast.error(message || (error as Error)?.message || "Failed to export assumptions");
+      toast.error(translateApiError(error, tErrors) || "Failed to export assumptions");
     } finally {
       setAssumptionsExporting(false);
     }
@@ -660,6 +842,7 @@ export default function PredictPage() {
     editMode,
     scenarioName,
     dependentLabel,
+    tErrors,
   ]);
   const handleExportTimeseries = useCallback(async () => {
     if (!selectedModel || !chartData.length) {
@@ -686,8 +869,7 @@ export default function PredictPage() {
       const filename = buildExportFilename(scenarioName || dependentLabel || "scenario", "projected");
       downloadBlob(blob, filename);
     } catch (error) {
-      const message = error instanceof ApiError ? (error.detail?.detail || error.detail?.error) : null;
-      toast.error(message || (error as Error)?.message || "Failed to export totals");
+      toast.error(translateApiError(error, tErrors) || "Failed to export totals");
     } finally {
       setTotalsExporting(false);
     }
@@ -700,363 +882,436 @@ export default function PredictPage() {
     adjustments,
     scenarioName,
     dependentLabel,
+    tErrors,
   ]);
+
+  const showEmptyDatasets = !initializing && datasets.length === 0;
+  const showEmptyModels = !initializing && !modelsLoading && datasets.length > 0 && models.length === 0;
+  const scenarioBandColor = chartColor(1, isDarkTheme);
 
   return (
     <section className="space-y-6">
-      <header className="flex flex-wrap items-center justify-between gap-4">
-        <div>
-          <p className="text-sm text-[var(--color-muted)]">Module 5</p>
-          <h1 className="text-2xl font-semibold">Predict & Scenario Simulation</h1>
-        </div>
-        <div className="flex flex-wrap gap-3 items-center">
-          <label className="flex flex-col">
-            <Eyebrow>Dataset</Eyebrow>
-            <Select wrapperClassName="mt-1" value={selectedDataset} onChange={(e) => setSelectedDataset(e.target.value)}>
-              {datasets.map((ds) => (
-                <option key={ds.id} value={ds.id}>
-                  {ds.display_name}
-                </option>
-              ))}
-            </Select>
-          </label>
-          <label className="flex flex-col">
-            <Eyebrow>Model</Eyebrow>
-            <Select wrapperClassName="mt-1" value={selectedModel} onChange={(e) => setSelectedModel(e.target.value)}>
-              {models.map((m) => (
-                <option key={m.id} value={m.id}>
-                  {m.name}
-                </option>
-              ))}
-            </Select>
-          </label>
-        </div>
-      </header>
+      <PageHeader title={t("title")} subtitle={t("eyebrow")} />
 
-      <Card className="space-y-4">
-        <CardHeader title="Scenario parameters" subtitle="Planner horizon and frequency" />
-        <div className="flex flex-wrap gap-4 text-sm">
-          <label className="flex flex-col gap-2">
-            Horizon
-            <input
-              type="number"
-              min={1}
-              className="rounded-lg border border-[var(--color-border)] px-3 py-2 bg-transparent"
-              value={horizon}
-              onChange={(e) => setHorizon(Math.max(1, Number(e.target.value) || 1))}
-            />
-          </label>
-          <label className="flex flex-col gap-2">
-            Start date
-            <input
-              type="date"
-              className="rounded-lg border border-[var(--color-border)] px-3 py-2 bg-transparent"
-              value={startDate}
-              onChange={(e) => setStartDate(e.target.value)}
-            />
-          </label>
-          <label className="flex flex-col gap-2">
-            Frequency
-            <Select wrapperClassName="w-auto" value={freq} onChange={(e) => setFreq(e.target.value as any)}>
-              <option value="day">Daily</option>
-              <option value="week">Weekly</option>
-              <option value="month">Monthly</option>
-            </Select>
-          </label>
-          <label className="flex flex-col gap-2 flex-1 min-w-[200px]">
-            Scenario name
-            <input
-              type="text"
-              className="rounded-lg border border-[var(--color-border)] px-3 py-2 bg-transparent"
-              value={scenarioName}
-              onChange={(e) => setScenarioName(e.target.value)}
-            />
-          </label>
-        </div>
-        <div className="flex gap-3 flex-wrap">
-          <Button onClick={fetchPreview} disabled={previewLoading || !selectedModel}>
-            {previewLoading ? "Recalculating..." : "Preview scenario"}
-          </Button>
-          <Button
-            variant="secondary"
-            onClick={handleSaveScenario}
-            disabled={!canEdit || saving || !selectedModel || reachedScenarioLimit}
-            title={!canEdit ? "Solo lectura: tu rol es Visualizador" : undefined}
-          >
-            {saving ? "Saving..." : saveButtonLabel}
-          </Button>
-        </div>
-        {reachedScenarioLimit && (
-          <ErrorText className="text-xs">
-            Maximum of {SCENARIO_LIMIT} saved scenarios reached. Delete one to save a new scenario.
-          </ErrorText>
-        )}
-      </Card>
-
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-        {contributionCards.map((card) => (
-          <Card key={card.key} padding="sm">
-            <CardHeader title={card.title} subtitle={card.subtitle} />
-            <p className="text-lg font-semibold">
-              {card.value !== null && card.value !== undefined
-                ? formatChartNumber(card.value, 1)
-                : "-"}
-            </p>
-          </Card>
-        ))}
-      </div>
-
-      {economics && (
+      {initializing ? (
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-          <Card padding="sm">
-            <CardHeader title="Investment" subtitle="Projected spend" />
-            <p className="text-lg font-semibold">{formatChartNumber(economics.total_investment, 1)}</p>
-          </Card>
-          <Card padding="sm">
-            <CardHeader title="Revenue" subtitle="Projected revenue" />
-            <p className="text-lg font-semibold">
-              {economics.total_revenue !== null ? formatChartNumber(economics.total_revenue, 1) : "-"}
-            </p>
-          </Card>
-          <Card padding="sm">
-            <CardHeader title="ROI" subtitle="(revenue - investment) / investment" />
-            <p className="text-lg font-semibold">{roiLabel(economics.roi_total)}</p>
-          </Card>
-          <Card padding="sm">
-            <CardHeader title="ROAS" subtitle="revenue / investment" />
-            <p className="text-lg font-semibold">{roasLabel(economics.roas_total)}</p>
-          </Card>
+          {Array.from({ length: 4 }).map((_, i) => (
+            <Skeleton key={i} className="h-[104px]" />
+          ))}
         </div>
-      )}
-
-      <Card className="space-y-4">
-        <CardHeader title="Scenario builder" subtitle="Planner mode or the raw grid" />
-        <div className="flex flex-wrap items-center justify-between gap-3 text-sm">
-          <div className="inline-flex rounded-full border border-[var(--color-border)] p-1">
-            <button
-              type="button"
-              onClick={() => setViewMode("planner")}
-              className={`rounded-full px-3 py-1 text-xs font-medium transition-colors ${
-                viewMode === "planner"
-                  ? "bg-[var(--color-accent-soft)] text-[var(--color-accent)]"
-                  : "text-[var(--color-muted)]"
-              }`}
-            >
-              Planner
-            </button>
-            <button
-              type="button"
-              onClick={() => setViewMode("advanced")}
-              className={`rounded-full px-3 py-1 text-xs font-medium transition-colors ${
-                viewMode === "advanced"
-                  ? "bg-[var(--color-accent-soft)] text-[var(--color-accent)]"
-                  : "text-[var(--color-muted)]"
-              }`}
-            >
-              Vista avanzada
-            </button>
-          </div>
-          {viewMode === "advanced" && (
-            <div className="flex flex-wrap items-center gap-2">
-              <Eyebrow>Mode: Absolute values</Eyebrow>
-              <Button variant="ghost" size="sm" onClick={handleResetAll}>
-                Reset to base scenario
-              </Button>
-              <Button
-                variant="secondary"
-                size="sm"
-                onClick={handleExportAssumptions}
-                disabled={assumptionsExporting || !variables.length}
-              >
-                {assumptionsExporting ? "Exporting..." : "Export Excel"}
-              </Button>
-            </div>
-          )}
-        </div>
-        {!variables.length ? (
-          <p className="text-sm text-[var(--color-muted)]">Select a model to load variables.</p>
-        ) : viewMode === "planner" ? (
-          <PlannerView modelId={selectedModel} onApply={handleApplyAllocations} />
-        ) : (
-          <ScenarioSheetGlide
-            variables={gridVariables}
-            periods={editablePeriods}
-            multipliers={multipliersByVariable}
-            absoluteValues={absoluteValuesByVariable}
-            editMode={editMode}
-            onMultipliersChange={handleGridMultipliersChange}
+      ) : showEmptyDatasets ? (
+        <Card>
+          <EmptyState
+            title={t("noDatasets.title")}
+            description={t("noDatasets.description")}
+            action={<SecondaryLink href="/datasets">{t("noDatasets.cta")}</SecondaryLink>}
           />
-        )}
-      </Card>
+        </Card>
+      ) : (
+        <>
+          <FilterBar>
+            <FilterField label={t("filters.dataset")} className="w-[240px]">
+              <Select value={selectedDataset} onChange={(e) => setSelectedDataset(e.target.value)}>
+                {datasets.map((ds) => (
+                  <option key={ds.id} value={ds.id}>
+                    {ds.display_name}
+                  </option>
+                ))}
+              </Select>
+            </FilterField>
+            <FilterField label={t("filters.model")} className="w-[240px]">
+              <Select value={selectedModel} onChange={(e) => setSelectedModel(e.target.value)} disabled={!models.length}>
+                {models.map((m) => (
+                  <option key={m.id} value={m.id}>
+                    {m.name}
+                  </option>
+                ))}
+              </Select>
+            </FilterField>
+          </FilterBar>
 
-      <Card className="space-y-4">
-        <CardHeader title="Projected totals" subtitle="Base Scenario vs Scenario" />
-        {hasChartData ? (
-          <>
-            <div className="h-80 w-full">
-              <ResponsiveContainer width="100%" height="100%">
-                <LineChart data={chartData} margin={{ top: 10, right: 20, bottom: 10, left: 0 }}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" />
-                  <XAxis dataKey="period" tick={{ fontSize: 12 }} />
-                  <YAxis tick={{ fontSize: 12 }} tickFormatter={(value) => formatChartNumber(Number(value), 1)} />
-                  <RechartsTooltip content={renderTimeseriesTooltip} />
-                  <Legend />
-                  <Line
-                    type="monotone"
-                    dataKey="hero"
-                    name="Base Scenario"
-                    stroke="var(--color-muted)"
-                    strokeWidth={2}
-                    dot={false}
-                    connectNulls
-                  />
-                  <Line
-                    type="monotone"
-                    dataKey="scenario"
-                    name="Scenario"
-                    stroke="var(--color-accent)"
-                    strokeWidth={2}
-                    dot={false}
-                    connectNulls
-                  />
-                </LineChart>
-              </ResponsiveContainer>
-            </div>
-            <div className="flex flex-wrap items-center justify-between gap-3 text-sm">
-              <label className="inline-flex items-center gap-2 text-xs text-[var(--color-muted)]">
-                <input
-                  type="checkbox"
-                  className="rounded border border-[var(--color-border)]"
-                  checked={showProjectedTable}
-                  onChange={(event) => setShowProjectedTable(event.target.checked)}
-                />
-                Show table
-              </label>
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={handleExportTimeseries}
-                disabled={!chartData.length || totalsExporting}
-              >
-                {totalsExporting ? "Exporting..." : "Export Excel"}
-              </Button>
-            </div>
-            {showProjectedTable && (
-              <div className="overflow-auto">
-                <table className="min-w-full text-sm">
-                  <thead className="bg-[var(--color-bg)]/60">
-                    <tr>
-                      <th className="px-3 py-2 text-left">Period</th>
-                      <th className="px-3 py-2 text-left">Base Scenario</th>
-                      <th className="px-3 py-2 text-left">Scenario</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {chartData.map((row) => (
-                      <tr key={row.period} className="odd:bg-transparent even:bg-[var(--color-border)]/20">
-                        <td className="px-3 py-2">{row.period}</td>
-                        <td className="px-3 py-2">{row.hero !== null ? formatChartNumber(row.hero, 1) : "-"}</td>
-                        <td className="px-3 py-2">{row.scenario !== null ? formatChartNumber(row.scenario, 1) : "-"}</td>
-                      </tr>
+          {showEmptyModels ? (
+            <Card>
+              <EmptyState
+                title={t("noModels.title")}
+                description={t("noModels.description")}
+                action={<SecondaryLink href="/modeling">{t("noModels.cta")}</SecondaryLink>}
+              />
+            </Card>
+          ) : (
+            <>
+              {economics && !economics.economics_configured && (
+                <div className="rounded-xl bg-warn-bg px-4 py-3 text-sm text-warn no-print">
+                  {t("economicsNotConfigured")}
+                </div>
+              )}
+
+              <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4" aria-busy={previewLoading}>
+                {modelsLoading || (previewLoading && !preview) ? (
+                  Array.from({ length: 4 }).map((_, i) => <Skeleton key={i} className="h-[104px]" />)
+                ) : (
+                  <>
+                    {kpiItems.map((item) => (
+                      <StatCard key={item.key} label={item.label} value={item.value} icon={item.icon} trend={item.trend} />
                     ))}
-                  </tbody>
-                </table>
+                    {economicsKpiItems.map((item) => (
+                      <StatCard key={item.key} label={item.label} value={item.value} icon={item.icon} trend={item.trend} />
+                    ))}
+                  </>
+                )}
               </div>
-            )}
-          </>
-        ) : (
-          <p className="text-sm text-[var(--color-muted)]">
-            {previewLoading || heroLoading ? "Loading projections..." : "Preview the scenario to see projections."}
-          </p>
-        )}
-      </Card>
 
-      <Card className="space-y-4">
-        <CardHeader title="Saved scenarios" subtitle="Load, rename or delete (max 5)" />
-        {scenarios.length ? (
-          <div className="grid gap-4 md:grid-cols-3">
-            {scenarios.map((scenario) => {
-              const isActive = currentScenarioId === scenario.id;
-              const isRenaming = renamingScenarioId === scenario.id;
-              const freqLabelCard = scenario.freq === "day" ? "day" : scenario.freq === "week" ? "week" : "month";
-              const delta = typeof scenario.delta_pct_vs_base === "number" ? scenario.delta_pct_vs_base : null;
-              const deltaLabel =
-                delta !== null ? `${delta > 0 ? "+" : delta < 0 ? "" : ""}${delta.toFixed(1)}% vs Base scenario` : null;
-              const deltaClass =
-                delta === null
-                  ? ""
-                  : delta > 0
-                  ? "text-[var(--color-success)]"
-                  : delta < 0
-                  ? "text-[var(--color-danger)]"
-                  : "text-[var(--color-muted)]";
-              return (
-                <Card
-                  key={scenario.id}
-                  className={`space-y-3 border transition ${isActive ? "border-[var(--color-accent)] bg-[var(--color-accent)]/5" : ""}`}
-                >
-                  <div className="space-y-2 px-4 pt-4">
-                    {isRenaming ? (
-                      <input
-                        type="text"
-                        autoFocus
-                        value={renameValue}
-                        onChange={(event) => setRenameValue(event.target.value)}
-                        onBlur={() => handleRenameBlur(scenario)}
-                        onKeyDown={(event) => handleRenameKeyDown(event, scenario)}
-                        className="w-full rounded-lg border border-[var(--color-border)] bg-transparent px-2 py-1 text-sm"
-                      />
-                    ) : (
-                      <div className="flex items-start justify-between gap-2">
-                        <p className="font-semibold text-sm text-[var(--color-foreground)]">{scenario.name}</p>
-                        <button
-                          type="button"
-                          className="text-xs text-[var(--color-muted)] hover:text-[var(--color-foreground)]"
-                          onClick={() => handleStartRename(scenario)}
-                        >
-                          Rename
-                        </button>
-                      </div>
-                    )}
-                    <div className="space-y-0.5">
-                      <Eyebrow>Projected total</Eyebrow>
-                      <p className="text-[1.35rem] font-semibold leading-tight text-[var(--color-foreground)] sm:text-[1.45rem]">
-                        {formatChartNumber(scenario.summary.total, 1)}
-                      </p>
-                      {deltaLabel && (
-                        <p className={`text-xs font-medium ${deltaClass}`}>
-                          {deltaLabel}
-                        </p>
-                      )}
-                    </div>
-                    <p className="text-xs text-[var(--color-muted)]">
-                      {scenario.horizon} periods - {freqLabelCard}
-                    </p>
-                    <p className="text-xs text-[var(--color-muted)]">
-                      Last edited: {formatScenarioDate(scenario.last_edited_at)}
-                    </p>
+              <Card className="space-y-4">
+                <CardHeader title={t("params.title")} subtitle={t("params.subtitle")} />
+                <div className="flex flex-wrap gap-4">
+                  <div className="w-28 space-y-2">
+                    <Eyebrow htmlFor="predict-horizon">{t("params.horizon")}</Eyebrow>
+                    <Input
+                      id="predict-horizon"
+                      type="number"
+                      min={1}
+                      value={horizon}
+                      onChange={(e) => setHorizon(Math.max(1, Number(e.target.value) || 1))}
+                    />
                   </div>
-                  <div className="flex gap-2 px-4 pb-4">
-                    <Button variant="secondary" onClick={() => handleLoadScenario(scenario)}>
-                      Load
+                  <div className="w-44 space-y-2">
+                    <Eyebrow htmlFor="predict-start-date">{t("params.startDate")}</Eyebrow>
+                    <Input
+                      id="predict-start-date"
+                      type="date"
+                      value={startDate}
+                      onChange={(e) => setStartDate(e.target.value)}
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Eyebrow htmlFor="predict-freq">{t("params.frequency")}</Eyebrow>
+                    <Select
+                      id="predict-freq"
+                      wrapperClassName="w-auto"
+                      value={freq}
+                      onChange={(e) => setFreq(e.target.value as any)}
+                    >
+                      <option value="day">{t("freq.day")}</option>
+                      <option value="week">{t("freq.week")}</option>
+                      <option value="month">{t("freq.month")}</option>
+                    </Select>
+                  </div>
+                  <div className="min-w-[200px] flex-1 space-y-2">
+                    <Eyebrow htmlFor="predict-scenario-name">{t("params.scenarioName")}</Eyebrow>
+                    <Input
+                      id="predict-scenario-name"
+                      type="text"
+                      placeholder={t("params.scenarioNamePlaceholder")}
+                      value={scenarioName}
+                      onChange={(e) => setScenarioName(e.target.value)}
+                    />
+                  </div>
+                </div>
+                <div className="flex flex-wrap gap-3">
+                  <Button onClick={fetchPreview} disabled={previewLoading || !selectedModel}>
+                    {previewLoading ? t("params.previewing") : t("params.preview")}
+                  </Button>
+                  <Button
+                    variant="secondary"
+                    onClick={handleSaveScenario}
+                    disabled={!canEdit || saving || !selectedModel || reachedScenarioLimit}
+                    title={!canEdit ? tCommon("readOnlyTooltip") : undefined}
+                  >
+                    {saving ? t("params.saving") : saveButtonLabel}
+                  </Button>
+                </div>
+                {reachedScenarioLimit && (
+                  <ErrorText className="text-xs">{t("params.limitReached", { limit: SCENARIO_LIMIT })}</ErrorText>
+                )}
+              </Card>
+
+              <Card className="space-y-4">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <CardHeader title={t("builder.title")} subtitle={t("builder.subtitle")} />
+                  <div className="inline-flex gap-1">
+                    <ToggleChip active={viewMode === "planner"} onClick={() => setViewMode("planner")}>
+                      {t("builder.modePlanner")}
+                    </ToggleChip>
+                    <ToggleChip active={viewMode === "advanced"} onClick={() => setViewMode("advanced")}>
+                      {t("builder.modeAdvanced")}
+                    </ToggleChip>
+                  </div>
+                </div>
+                {viewMode === "advanced" && (
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Eyebrow>{t("builder.modeAbsolute")}</Eyebrow>
+                    <Button variant="ghost" size="sm" onClick={() => setResetConfirmOpen(true)}>
+                      {t("builder.reset")}
                     </Button>
                     <Button
-                      variant="ghost"
-                      onClick={() => handleDeleteScenario(scenario.id)}
-                      disabled={!canEdit}
-                      title={!canEdit ? "Solo lectura: tu rol es Visualizador" : undefined}
+                      variant="secondary"
+                      size="sm"
+                      onClick={handleExportAssumptions}
+                      disabled={assumptionsExporting || !variables.length}
                     >
-                      Delete
+                      {assumptionsExporting ? t("builder.exporting") : t("builder.export")}
                     </Button>
                   </div>
-                </Card>
-              );
-            })}
-          </div>
-        ) : (
-          <p className="text-sm text-[var(--color-muted)]">No saved scenarios yet.</p>
-        )}
-      </Card>
+                )}
+                {variablesError ? (
+                  <EmptyState
+                    title={t("variablesError.title")}
+                    action={
+                      <Button variant="secondary" onClick={() => fetchBaselineVariables(selectedModel)}>
+                        {t("variablesError.retry")}
+                      </Button>
+                    }
+                  />
+                ) : !variables.length ? (
+                  <p className="text-sm text-muted">{t("builder.empty")}</p>
+                ) : viewMode === "planner" ? (
+                  <PlannerView modelId={selectedModel} onApply={handleApplyAllocations} />
+                ) : isDesktop ? (
+                  <ScenarioSheetGlide
+                    variables={gridVariables}
+                    periods={editablePeriods}
+                    multipliers={multipliersByVariable}
+                    absoluteValues={absoluteValuesByVariable}
+                    editMode={editMode}
+                    onMultipliersChange={handleGridMultipliersChange}
+                    groupColumnLabel={t("builder.colGroup")}
+                    variableColumnLabel={t("builder.colVariable")}
+                  />
+                ) : (
+                  <ScenarioSheetTable
+                    variables={gridVariables}
+                    periods={editablePeriods}
+                    multipliers={multipliersByVariable}
+                    absoluteValues={absoluteValuesByVariable}
+                    onMultipliersChange={handleGridMultipliersChange}
+                    groupColumnLabel={t("builder.colGroup")}
+                    variableColumnLabel={t("builder.colVariable")}
+                  />
+                )}
+              </Card>
+
+              <Card className="space-y-4">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <CardHeader as="h2" title={t("totals.title")} subtitle={t("totals.subtitle")} />
+                  {liveDeltaVariant && (
+                    <Badge variant={liveDeltaVariant}>
+                      {t("totals.deltaLabel", { value: formatSignedPercent(liveDeltaPct as number, percentFormatter) })}
+                    </Badge>
+                  )}
+                </div>
+                {hasChartData ? (
+                  <>
+                    <div className="h-chart-lg w-full">
+                      <ResponsiveContainer width="100%" height="100%">
+                        <ComposedChart data={chartData} margin={{ top: 10, right: 20, bottom: 10, left: 0 }}>
+                          <CartesianGrid strokeDasharray="3 3" stroke={lineColor} />
+                          <XAxis dataKey="period" tick={{ fill: mutedColor, fontSize: 11 }} axisLine={{ stroke: lineColor }} />
+                          <YAxis
+                            tick={{ fill: mutedColor, fontSize: 11 }}
+                            axisLine={{ stroke: lineColor }}
+                            tickFormatter={(value) => formatChartNumber(Number(value), 1)}
+                          />
+                          <RechartsTooltip content={renderTimeseriesTooltip} />
+                          <Legend wrapperStyle={{ fontSize: 12, color: mutedColor }} />
+                          <Area
+                            dataKey="deltaBase"
+                            stackId="delta"
+                            stroke="none"
+                            fill="transparent"
+                            legendType="none"
+                            isAnimationActive={false}
+                            connectNulls
+                          />
+                          <Area
+                            dataKey="deltaHeight"
+                            stackId="delta"
+                            name={t("totals.seriesScenario")}
+                            stroke="none"
+                            fill={scenarioBandColor}
+                            fillOpacity={0.15}
+                            legendType="none"
+                            isAnimationActive={false}
+                            connectNulls
+                          />
+                          <Line
+                            type="monotone"
+                            dataKey="hero"
+                            name={t("totals.seriesBase")}
+                            stroke={chartColor(0, isDarkTheme)}
+                            strokeWidth={2}
+                            dot={false}
+                            connectNulls
+                          />
+                          <Line
+                            type="monotone"
+                            dataKey="scenario"
+                            name={t("totals.seriesScenario")}
+                            stroke={chartColor(1, isDarkTheme)}
+                            strokeWidth={2}
+                            dot={false}
+                            connectNulls
+                          />
+                        </ComposedChart>
+                      </ResponsiveContainer>
+                    </div>
+                    <p className="text-2xs text-muted">{t("totals.deltaCaption")}</p>
+                    <div className="flex flex-wrap items-center justify-between gap-3 text-sm">
+                      <label className="inline-flex items-center gap-2 text-xs text-muted">
+                        <input
+                          type="checkbox"
+                          className="h-4 w-4 accent-accent"
+                          checked={showProjectedTable}
+                          onChange={(event) => setShowProjectedTable(event.target.checked)}
+                        />
+                        {t("totals.showTable")}
+                      </label>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={handleExportTimeseries}
+                        disabled={!chartData.length || totalsExporting}
+                      >
+                        {totalsExporting ? t("totals.exporting") : t("totals.export")}
+                      </Button>
+                    </div>
+                    {showProjectedTable && (
+                      <Table wrapperClassName="max-h-[420px] overflow-auto">
+                        <TableHeader className="sticky top-0 z-10">
+                          <TableRow>
+                            <Th>{t("totals.colPeriod")}</Th>
+                            <Th className="text-right">{t("totals.colBase")}</Th>
+                            <Th className="text-right">{t("totals.colScenario")}</Th>
+                          </TableRow>
+                        </TableHeader>
+                        <tbody>
+                          {chartData.map((row) => (
+                            <TableRow key={row.period} className="hover:bg-surface-2">
+                              <TableCell>{row.period}</TableCell>
+                              <TableCell className="text-right tabular-nums">
+                                {row.hero !== null ? formatChartNumber(row.hero, 1) : EMPTY_VALUE}
+                              </TableCell>
+                              <TableCell className="text-right tabular-nums">
+                                {row.scenario !== null ? formatChartNumber(row.scenario, 1) : EMPTY_VALUE}
+                              </TableCell>
+                            </TableRow>
+                          ))}
+                        </tbody>
+                      </Table>
+                    )}
+                  </>
+                ) : (
+                  <EmptyState title={previewLoading || heroLoading ? t("totals.loading") : t("totals.empty")} />
+                )}
+              </Card>
+
+              <Card className="space-y-4">
+                <CardHeader title={t("scenarios.title")} subtitle={t("scenarios.subtitle", { limit: SCENARIO_LIMIT })} />
+                {scenarios.length ? (
+                  <div className="grid gap-4 md:grid-cols-3">
+                    {scenarios.map((scenario) => {
+                      const isActive = currentScenarioId === scenario.id;
+                      const isRenaming = renamingScenarioId === scenario.id;
+                      const delta = typeof scenario.delta_pct_vs_base === "number" ? scenario.delta_pct_vs_base : null;
+                      const variant = deltaBadgeVariant(delta);
+                      return (
+                        <Card
+                          key={scenario.id}
+                          padding="sm"
+                          className={isActive ? "space-y-3 border border-accent bg-accent-bg" : "space-y-3 border border-line"}
+                        >
+                          <div className="space-y-2">
+                            {isRenaming ? (
+                              <Input
+                                autoFocus
+                                value={renameValue}
+                                onChange={(event) => setRenameValue(event.target.value)}
+                                onBlur={() => handleRenameBlur(scenario)}
+                                onKeyDown={(event) => handleRenameKeyDown(event, scenario)}
+                              />
+                            ) : (
+                              <div className="flex items-start justify-between gap-2">
+                                <p className="truncate text-sm font-semibold text-ink">{scenario.name}</p>
+                                <div className="flex items-center gap-2">
+                                  {isActive && <Badge variant="accent">{t("scenarios.active")}</Badge>}
+                                  <button
+                                    type="button"
+                                    className="text-xs text-muted hover:text-ink"
+                                    onClick={() => handleStartRename(scenario)}
+                                  >
+                                    {t("scenarios.rename")}
+                                  </button>
+                                </div>
+                              </div>
+                            )}
+                            <div className="space-y-0.5">
+                              <Eyebrow>{t("scenarios.projectedTotal")}</Eyebrow>
+                              <p className="text-3xl font-semibold tabular-nums leading-tight text-ink">
+                                {formatChartNumber(scenario.summary.total, 1)}
+                              </p>
+                              {variant && (
+                                <Badge variant={variant}>
+                                  {t("totals.deltaLabel", { value: formatSignedPercent(delta as number, percentFormatter) })}
+                                </Badge>
+                              )}
+                            </div>
+                            <p className="text-xs text-muted">
+                              {t("scenarios.periods", { count: scenario.horizon, freq: t(`freq.${scenario.freq}`) })}
+                            </p>
+                            <p className="text-xs text-muted">
+                              {t("scenarios.lastEdited", { date: formatScenarioDate(scenario.last_edited_at) })}
+                            </p>
+                          </div>
+                          <div className="flex gap-2">
+                            <Button variant="secondary" size="sm" onClick={() => handleLoadScenario(scenario)}>
+                              {t("scenarios.load")}
+                            </Button>
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              onClick={() => setDeleteTarget(scenario)}
+                              disabled={!canEdit}
+                              title={!canEdit ? tCommon("readOnlyTooltip") : undefined}
+                              className="!text-bad hover:!bg-bad-bg"
+                            >
+                              {t("scenarios.delete")}
+                            </Button>
+                          </div>
+                        </Card>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <EmptyState title={t("scenarios.empty")} />
+                )}
+              </Card>
+            </>
+          )}
+        </>
+      )}
+
+      <Modal open={resetConfirmOpen} onClose={() => setResetConfirmOpen(false)} title={t("builder.resetConfirmTitle")}>
+        <p className="text-sm text-ink">{t("builder.resetConfirmBody")}</p>
+        <div className="mt-5 flex justify-end gap-2">
+          <Button variant="ghost" onClick={() => setResetConfirmOpen(false)}>
+            {tCommon("cancel")}
+          </Button>
+          <Button variant="danger" onClick={performResetAll}>
+            {t("builder.resetConfirmAction")}
+          </Button>
+        </div>
+      </Modal>
+
+      <Modal open={Boolean(deleteTarget)} onClose={() => setDeleteTarget(null)} title={t("scenarios.deleteConfirmTitle")}>
+        <p className="text-sm text-ink">{t("scenarios.deleteConfirmBody", { name: deleteTarget?.name || "" })}</p>
+        <div className="mt-5 flex justify-end gap-2">
+          <Button variant="ghost" onClick={() => setDeleteTarget(null)} disabled={deleteLoading}>
+            {tCommon("cancel")}
+          </Button>
+          <Button variant="danger" onClick={confirmDeleteScenario} disabled={deleteLoading}>
+            {t("scenarios.deleteConfirmAction")}
+          </Button>
+        </div>
+      </Modal>
     </section>
   );
 }
@@ -1274,7 +1529,3 @@ function buildBaselineAdjustments(periods: string[], variables: VariableRow[]) {
   });
   return result;
 }
-
-
-
-

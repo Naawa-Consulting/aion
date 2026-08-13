@@ -16,6 +16,7 @@ from sqlmodel import Session, select
 
 from ..auth import CurrentMembership, get_current_membership, require_write_access
 from ..db import get_session
+from ..errors import api_error
 from ..models import Scenario, Model, utcnow
 from ..routers.analysis import _fit_from_model, _group_maps
 from ..routers.economics import _load_channels, _load_conversion_settings
@@ -711,7 +712,7 @@ def _ensure_scenario_capacity(session: Session, model_id: str, company_id: str, 
         select(Scenario.id).where(Scenario.model_id == model_id, Scenario.company_id == company_id)
     ).all()
     if len(existing) >= limit:
-        raise HTTPException(status_code=400, detail=f"Maximum {limit} scenarios per model")
+        raise api_error(400, "SCENARIO_LIMIT_REACHED", f"Maximum {limit} scenarios per model", limit=limit)
 
 
 @router.post("/{model_id}/simulate")
@@ -972,12 +973,12 @@ async def import_scenario_plan(
     try:
         df = pd.read_csv(io.BytesIO(content))
     except Exception as exc:
-        raise HTTPException(status_code=400, detail=f"Unable to parse CSV: {exc}") from exc
+        raise api_error(400, "CSV_PARSE_ERROR", f"Unable to parse CSV: {exc}") from exc
     df.columns = [str(col).strip().lower() for col in df.columns]
     required_cols = {"period", "variable", "mode", "value"}
     missing = required_cols - set(df.columns)
     if missing:
-        raise HTTPException(status_code=400, detail=f"Missing columns: {', '.join(missing)}")
+        raise api_error(400, "CSV_MISSING_COLUMNS", f"Missing columns: {', '.join(missing)}", missing=sorted(missing))
 
     definition = _load_definition(record)
     adjustments = {period: dict(vars_) for period, vars_ in definition.adjustments.items()}

@@ -32,17 +32,25 @@ Resumen por módulo (detalle técnico completo — endpoints y contratos — en 
    (ver abajo); paleta de color pendiente.
 8. **Perfil** (password) — cubierto por Supabase Auth (`/reset-password`).
 
-**Auth + multi-company** — implementado en código, pendiente de desplegar: login con Supabase
-Auth, compañías con membresía por usuario (rol `modelador`/`visualizador`/`admin_compania`),
-aislamiento de datos por compañía en los 5 módulos. Corre validado en local; falta aprovisionar
-el proyecto Supabase real y desplegar en Render/Vercel para que quede en vivo.
+**Auth + multi-company** — desplegado y en uso: login con Supabase Auth, compañías con membresía
+por usuario (rol `modelador`/`visualizador`/`admin_compania`), aislamiento de datos por compañía en
+los 5 módulos + Resumen Ejecutivo + Admin. `platform_admin` (allowlist de email) puede crear
+compañías nuevas sin ver los datos de ninguna.
 
 Decisiones recientes y pendientes abiertos: ver `BITACORA.md`.
 
 ## UI
 
-Header sticky con highlight de ruta, toggle de tema (claro/oscuro), design tokens compartidos
-(fuente Inter, escala de espaciado, cards, badges), toasts vía `sonner`.
+Rediseño visual completo (Fase 7, cerrada 2026-08-12 — 11 sub-fases, detalle en `BITACORA.md` bajo
+"Rediseño UI/UX"): shell con `Sidebar` colapsable (pipeline numerado 1-5 + Resumen
+Ejecutivo/Admin separados, drawer en móvil) y `TopBar` (compañía activa, idioma `ES`/`EN`, tema
+claro/oscuro, menú de usuario) según la especificación de `docs/DIRECCION-VISUAL.md` (Dirección C
+— "Panel"). i18n real español/inglés (`next-intl`, preferencia en `localStorage`, sin prefijo de
+ruta) en las 5 páginas de producto + Resumen Ejecutivo + Admin + Login. Primitivas compartidas en
+`components/ui/` (button, card, select, modal, tabs, disclosure, skeleton, empty-state, table,
+tooltip, etc.), tokens de color/tipografía/radio/altura de la Dirección C, paleta de gráficas
+compartida y estable (`lib/chart-colors.ts`), `prefers-reduced-motion` respetado, responsive
+verificado a 1440/1024/390.
 
 ## Estructura del repo
 

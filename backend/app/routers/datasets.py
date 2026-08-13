@@ -16,6 +16,7 @@ from sqlmodel import Session, select, delete
 
 from ..auth import CurrentMembership, get_current_membership, require_write_access
 from ..db import get_session
+from ..errors import api_error
 from ..models import ConversionSettings, Dataset, Variable, Model, ModelMetrics, Scenario, InvestmentChannel
 from ..services.analysis import invalidate_cache_for_dataset
 from ..tenancy import get_scoped
@@ -112,7 +113,7 @@ def _read_uploaded_file(filename: str | None, content: bytes) -> pd.DataFrame:
         else:
             raise ValueError("Unsupported file type. Use .csv, .xlsx, or .parquet")
     except Exception as exc:
-        raise HTTPException(status_code=400, detail=f"Failed to parse {filename}: {exc}")
+        raise api_error(400, "FILE_PARSE_ERROR", f"Failed to parse {filename}: {exc}")
     df.columns = [_normalize_column(str(c)) for c in df.columns]
     return df
 
@@ -194,7 +195,7 @@ async def upload_datasets(
     session: Session = Depends(get_session),
 ):
     if not files:
-        raise HTTPException(status_code=400, detail="No files uploaded")
+        raise api_error(400, "NO_FILES_UPLOADED", "No files uploaded")
 
     saved: list[DatasetOut] = []
 
@@ -213,13 +214,12 @@ async def upload_datasets(
             )
         ).first()
         if duplicate and not force:
-            raise HTTPException(
-                status_code=409,
-                detail={
-                    "message": "Dataset already uploaded",
-                    "dataset_id": duplicate.id,
-                    "display_name": getattr(duplicate, "display_name", duplicate.name),
-                },
+            raise api_error(
+                409,
+                "DUPLICATE_DATASET_UPLOAD",
+                "Dataset already uploaded",
+                dataset_id=duplicate.id,
+                display_name=getattr(duplicate, "display_name", duplicate.name),
             )
 
         storage_key = _version_key(membership.company_id, ds_id, 1)
@@ -337,7 +337,7 @@ def rename_dataset(
     ds = get_scoped(session, Dataset, dataset_id, membership.company_id)
     new_name = body.display_name.strip()
     if not new_name:
-        raise HTTPException(status_code=400, detail="Display name cannot be empty")
+        raise api_error(400, "DISPLAY_NAME_EMPTY", "Display name cannot be empty")
     ds.display_name = new_name
     session.add(ds)
     session.commit()
@@ -357,12 +357,12 @@ def update_sample_size(
     target = body.sample_size
     if target is not None:
         if target <= 0:
-            raise HTTPException(status_code=400, detail="sample_size must be positive")
+            raise api_error(400, "SAMPLE_SIZE_NOT_POSITIVE", "sample_size must be positive")
         if target > ds.n_rows:
-            raise HTTPException(status_code=400, detail="sample_size cannot exceed total rows")
+            raise api_error(400, "SAMPLE_SIZE_EXCEEDS_ROWS", "sample_size cannot exceed total rows")
         min_allowed = min(10, ds.n_rows)
         if ds.n_rows >= min_allowed and target < min_allowed:
-            raise HTTPException(status_code=400, detail=f"sample_size must be at least {min_allowed}")
+            raise api_error(400, "SAMPLE_SIZE_TOO_SMALL", f"sample_size must be at least {min_allowed}", min_allowed=min_allowed)
 
     ds.sample_size = target
     ds.last_used_at = datetime.now(timezone.utc)
@@ -422,7 +422,7 @@ def update_time_variable(
         raise HTTPException(status_code=500, detail=f"Failed to read dataset: {exc}")
 
     if column not in df.columns:
-        raise HTTPException(status_code=400, detail="Column not found")
+        raise api_error(400, "COLUMN_NOT_FOUND", "Column not found")
 
     series = df[column]
     requires_parse = body.coerce or body.time_format or not is_datetime64_any_dtype(series)
@@ -453,7 +453,7 @@ def update_dependent_variable(
     if column:
         column_names = {c["name"] for c in json.loads(ds.columns_json)}
         if column not in column_names:
-            raise HTTPException(status_code=400, detail="Column not found")
+            raise api_error(400, "COLUMN_NOT_FOUND", "Column not found")
 
     ds.dependent_variable = column
     ds.last_used_at = datetime.now(timezone.utc)
@@ -475,7 +475,7 @@ async def update_dataset_file(
     ds = get_scoped(session, Dataset, dataset_id, membership.company_id)
     content = await file.read()
     if not content:
-        raise HTTPException(status_code=400, detail="Empty file")
+        raise api_error(400, "EMPTY_FILE", "Empty file")
     df_new = _read_uploaded_file(file.filename, content)
     new_cols = _infer_columns(df_new)
     old_cols = json.loads(ds.columns_json)
@@ -483,10 +483,7 @@ async def update_dataset_file(
     if replace_strategy == "strict" and (
         differences["added"] or differences["removed"] or differences["dtype_mismatch"]
     ):
-        raise HTTPException(
-            status_code=400,
-            detail={"error": "Schema mismatch", "differences": differences},
-        )
+        raise api_error(400, "SCHEMA_MISMATCH", "Schema mismatch", differences=differences)
 
     old_version = ds.version or 1
     new_version = old_version + 1
@@ -676,7 +673,7 @@ def delete_dataset(
     deps = _dependency_counts(session, ds.id, ds.company_id)
     has_deps = any([deps.variables, deps.models, deps.scenarios])
     if has_deps and not cascade:
-        raise HTTPException(status_code=400, detail={"message": "Dataset has dependencies", "dependencies": deps.dict()})
+        raise api_error(400, "DATASET_HAS_DEPENDENCIES", "Dataset has dependencies", dependencies=deps.dict())
 
     if cascade:
         session.exec(delete(Variable).where(Variable.dataset_id == ds.id, Variable.company_id == ds.company_id))
@@ -755,10 +752,7 @@ def _validate_time_parse(series: pd.Series, fmt: Optional[str], timezone: Option
     if valid_ratio >= 0.9:
         return
     samples = [{"index": int(idx), "value": str(value)} for idx, value in invalid.head(5).items()]
-    raise HTTPException(
-        status_code=400,
-        detail={"error": "Unparseable time values", "samples": samples},
-    )
+    raise api_error(400, "UNPARSEABLE_TIME_VALUES", "Unparseable time values", samples=samples)
 
 
 def _schema_differences(old_cols: list[dict], new_cols: list[dict]) -> dict:

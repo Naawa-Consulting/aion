@@ -18,3 +18,18 @@ export function formatChartPercent(value: number | string | null | undefined, de
   if (!Number.isFinite(num)) return "0%";
   return `${num.toFixed(decimals)}%`;
 }
+
+export function formatCurrency(
+  value: number | string | null | undefined,
+  currencyCode: string,
+  decimals = 0
+): string {
+  const num = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(num)) return EMPTY_VALUE;
+  return new Intl.NumberFormat(undefined, {
+    style: "currency",
+    currency: currencyCode,
+    minimumFractionDigits: decimals,
+    maximumFractionDigits: decimals,
+  }).format(num);
+}

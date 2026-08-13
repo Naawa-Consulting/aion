@@ -3,22 +3,7 @@
 @tailwind utilities;
 
 :root {
-  /* --- Tokens heredados (Fase 0/0b) --- */
-  /* Se conservan intactos: ~300 usos en las páginas de módulo todavía sin migrar (Fase 7.4-7.8).
-     Se eliminan cuando la última página migre sus usos directos (ver BITACORA). */
-  --color-bg: #f8fafc;
-  --color-card: #ffffff;
-  --color-muted: #94a3b8;
-  --color-border: rgba(15, 23, 42, 0.08);
-  --color-foreground: #0f172a;
-  --color-accent: #2563eb;
-  --color-accent-soft: rgba(37, 99, 235, 0.12);
-  --color-danger: #dc2626;
-  --color-danger-soft: rgba(220, 38, 38, 0.12);
-  --color-success: #059669;
-  --color-success-soft: rgba(5, 150, 105, 0.12);
-  --color-warning: #d97706;
-  --color-warning-soft: rgba(217, 119, 6, 0.12);
+  /* --shadow-soft: único overlay real (Modal/Dropdown/Tooltip, drawer móvil del Sidebar). */
   --shadow-soft: 0 20px 45px rgba(15, 23, 42, 0.08);
   /* Un solo consumidor (.glass-card); repurposed a 12px, el radio de panel de la Dirección C. */
   --radius-lg: 12px;
@@ -49,19 +34,6 @@
 }
 
 .dark {
-  --color-bg: #020617;
-  --color-card: #0f172a;
-  --color-muted: #94a3b8;
-  --color-border: rgba(148, 163, 184, 0.24);
-  --color-foreground: #f8fafc;
-  --color-accent: #60a5fa;
-  --color-accent-soft: rgba(96, 165, 250, 0.16);
-  --color-danger: #f87171;
-  --color-danger-soft: rgba(248, 113, 113, 0.16);
-  --color-success: #34d399;
-  --color-success-soft: rgba(52, 211, 153, 0.16);
-  --color-warning: #fbbf24;
-  --color-warning-soft: rgba(251, 191, 36, 0.16);
   --shadow-soft: 0 20px 45px rgba(2, 6, 23, 0.75);
 
   --plane: #0b0c0e;
@@ -140,11 +112,6 @@ body {
   }
   :root,
   .dark {
-    --color-bg: #ffffff;
-    --color-card: #ffffff;
-    --color-foreground: #0f172a;
-    --color-muted: #475569;
-    --color-border: rgba(15, 23, 42, 0.15);
     --shadow-soft: none;
 
     --plane: #ffffff;

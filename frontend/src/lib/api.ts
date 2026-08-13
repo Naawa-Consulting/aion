@@ -6,10 +6,12 @@ export const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000
 export class ApiError extends Error {
   status: number;
   detail: any;
-  constructor(status: number, detail: any, message?: string) {
+  code?: string;
+  constructor(status: number, detail: any, message?: string, code?: string) {
     super(message || `Request failed with status ${status}`);
     this.status = status;
     this.detail = detail;
+    this.code = code;
   }
 }
 
@@ -21,9 +23,14 @@ function safeParseJSON(raw: string): any {
   }
 }
 
+function extractCode(detail: any): string | undefined {
+  return detail && typeof detail.code === "string" ? detail.code : undefined;
+}
+
 function extractMessage(detail: any): string | undefined {
   if (!detail) return undefined;
   if (typeof detail === "string") return detail;
+  if (typeof detail.message === "string") return detail.message;
   if (typeof detail.detail === "string") return detail.detail;
   if (typeof detail.error === "string") return detail.error;
   return undefined;
@@ -62,7 +69,7 @@ export async function apiFetch<T = unknown>(path: string, options: ApiFetchOptio
   if (!res.ok) {
     const raw = await res.text();
     const detail = safeParseJSON(raw);
-    throw new ApiError(res.status, detail, extractMessage(detail));
+    throw new ApiError(res.status, detail, extractMessage(detail), extractCode(detail));
   }
   if (options.responseType === "blob") {
     return (await res.blob()) as unknown as T;

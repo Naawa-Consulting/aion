@@ -2,15 +2,17 @@
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
+import { useTranslations } from "next-intl";
+import { useTheme } from "next-themes";
 import clsx from "clsx";
-import { Pencil, Trash2 } from "lucide-react";
+import { Pencil, Trash2, GripVertical } from "lucide-react";
 import {
   ResponsiveContainer,
   LineChart,
   CartesianGrid,
   XAxis,
   YAxis,
-  Tooltip,
+  Tooltip as RechartsTooltip,
   Legend,
   Line,
 } from "recharts";
@@ -22,10 +24,18 @@ import { Badge } from "@/components/ui/badge";
 import { ErrorText } from "@/components/ui/error-text";
 import { Select } from "@/components/ui/select";
 import { Eyebrow } from "@/components/ui/eyebrow";
+import { PageHeader } from "@/components/ui/page-header";
+import { EmptyState } from "@/components/ui/empty-state";
+import { Skeleton } from "@/components/ui/skeleton";
+import { Modal } from "@/components/ui/modal";
+import { RowActions } from "@/components/ui/row-actions";
+import { IconButton } from "@/components/ui/icon-button";
 import { useGlobalStore } from "@/lib/store";
 import { useKeyboardShortcut } from "@/hooks/useKeyboardShortcut";
-import { apiFetch, ApiError } from "@/lib/api";
+import { apiFetch } from "@/lib/api";
+import { translateApiError } from "@/lib/error-messages";
 import { useCanEdit } from "@/hooks/useCanEdit";
+import { chartColor } from "@/lib/chart-colors";
 import { InvestmentChannels } from "@/components/transform/investment-channels";
 import { ConversionSettingsCard } from "@/components/transform/conversion-settings";
 
@@ -60,16 +70,21 @@ type PreviewPayload = {
   limit: number;
 };
 
-
 type HistoryItem = { id: string; op: string; params: Record<string, any>; created_at: string };
 
 export default function TransformPage() {
+  const t = useTranslations("transform");
+  const tCommon = useTranslations("common");
+  const tErrors = useTranslations("errors");
+  const readOnlyTitle = tCommon("readOnlyTooltip");
   const { datasetId, setDatasetId, activeCompanyId } = useGlobalStore();
   const canEdit = useCanEdit();
   const [datasets, setDatasets] = useState<Dataset[]>([]);
   const [variables, setVariables] = useState<Variable[]>([]);
+  const [variablesLoading, setVariablesLoading] = useState(false);
   const [filteredVariables, setFilteredVariables] = useState<Variable[]>([]);
   const [groups, setGroups] = useState<Group[]>([]);
+  const [groupsLoading, setGroupsLoading] = useState(false);
   const [selectedDataset, setSelectedDataset] = useState<string | null>(null);
   const [op, setOp] = useState<TransformOp>("lag");
   const [column, setColumn] = useState("");
@@ -83,7 +98,7 @@ export default function TransformPage() {
   const [newName, setNewName] = useState("");
   const [search, setSearch] = useState("");
   const [dtypeFilter, setDtypeFilter] = useState("");
-const [showDerivedOnly, setShowDerivedOnly] = useState(false);
+  const [showDerivedOnly, setShowDerivedOnly] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [bulkGroupId, setBulkGroupId] = useState("");
   const [bulkSubgroupId, setBulkSubgroupId] = useState("");
@@ -98,8 +113,8 @@ const [showDerivedOnly, setShowDerivedOnly] = useState(false);
   const [draggingVar, setDraggingVar] = useState<Variable | null>(null);
   const [newGroupName, setNewGroupName] = useState("");
   const [newSubgroupName, setNewSubgroupName] = useState("");
-const [newSubgroupParent, setNewSubgroupParent] = useState("");
-const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
+  const [newSubgroupParent, setNewSubgroupParent] = useState("");
+  const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
   const [groupDraft, setGroupDraft] = useState("");
   const [groupError, setGroupError] = useState("");
   const [renamingGroupId, setRenamingGroupId] = useState<string | null>(null);
@@ -177,13 +192,13 @@ const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
         if (error?.name === "AbortError") {
           return;
         }
-        setPreviewError((error as Error)?.message || "Unable to load preview");
+        setPreviewError((error as Error)?.message || t("builder.previewError"));
         setPreviewData(null);
       } finally {
         setPreviewLoading(false);
       }
     },
-    []
+    [t]
   );
   const retryPreview = useCallback(() => {
     if (!showPreview || !previewPayload) return;
@@ -246,22 +261,6 @@ const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
   }, [previewPayload, runPreview, showPreview]);
 
   useEffect(() => {
-    const handler = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        if (groupToDelete) {
-          event.preventDefault();
-          setGroupToDelete(null);
-        } else if (subgroupToDelete) {
-          event.preventDefault();
-          setSubgroupToDelete(null);
-        }
-      }
-    };
-    window.addEventListener("keydown", handler);
-    return () => window.removeEventListener("keydown", handler);
-  }, [groupToDelete, subgroupToDelete]);
-
-  useEffect(() => {
     const next = variables.filter((v) => {
       if (showDerivedOnly && !v.is_derived) return false;
       if (search && !v.name.toLowerCase().includes(search.toLowerCase())) return false;
@@ -282,44 +281,50 @@ const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
     { ctrl: true }
   );
 
-    const fetchDatasets = useCallback(async () => {
-      try {
-        const data = await apiFetch<Dataset[]>("/datasets");
-        setDatasets(data);
-        if (!datasetId && data.length) {
-          setDatasetId(data[0].id);
-        }
-      } catch {
-        toast.error("Failed to load datasets");
+  const fetchDatasets = useCallback(async () => {
+    try {
+      const data = await apiFetch<Dataset[]>("/datasets");
+      setDatasets(data);
+      if (!datasetId && data.length) {
+        setDatasetId(data[0].id);
       }
-    }, [datasetId, setDatasetId]);
+    } catch {
+      toast.error(t("toasts.loadDatasetsFailed"));
+    }
+  }, [datasetId, setDatasetId, t]);
 
-    const fetchVariables = async (dataset: string) => {
-      try {
-        const data = await apiFetch<Variable[]>(`/variables?dataset_id=${dataset}`);
-        setVariables(data);
-      } catch {
-        toast.error("Failed to load variables");
-      }
-    };
+  const fetchVariables = async (dataset: string) => {
+    setVariablesLoading(true);
+    try {
+      const data = await apiFetch<Variable[]>(`/variables?dataset_id=${dataset}`);
+      setVariables(data);
+    } catch {
+      toast.error(t("toasts.loadVariablesFailed"));
+    } finally {
+      setVariablesLoading(false);
+    }
+  };
 
-    const fetchGroups = useCallback(async () => {
-      try {
-        const data = await apiFetch<Group[]>("/groups");
-        setGroups(data);
-      } catch {
-        toast.error("Failed to load groups");
-      }
-    }, []);
+  const fetchGroups = useCallback(async () => {
+    setGroupsLoading(true);
+    try {
+      const data = await apiFetch<Group[]>("/groups");
+      setGroups(data);
+    } catch {
+      toast.error(t("toasts.loadGroupsFailed"));
+    } finally {
+      setGroupsLoading(false);
+    }
+  }, [t]);
 
-    useEffect(() => {
-      // activeCompanyId hydrates asynchronously (AuthBootstrap fetches /me/memberships and
-      // auto-selects the first company) — fetching before it's set sends no X-Company-Id
-      // header and the backend 422s ("Failed to load datasets"/"Failed to load groups").
-      if (!activeCompanyId) return;
-      fetchDatasets();
-      fetchGroups();
-    }, [fetchDatasets, fetchGroups, activeCompanyId]);
+  useEffect(() => {
+    // activeCompanyId hydrates asynchronously (AuthBootstrap fetches /me/memberships and
+    // auto-selects the first company) — fetching before it's set sends no X-Company-Id
+    // header and the backend 422s ("Failed to load datasets"/"Failed to load groups").
+    if (!activeCompanyId) return;
+    fetchDatasets();
+    fetchGroups();
+  }, [fetchDatasets, fetchGroups, activeCompanyId]);
 
   const startGroupRename = (group: Group) => {
     setEditingGroupId(group.id);
@@ -337,7 +342,7 @@ const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
     if (!editingGroupId) return;
     const trimmed = groupDraft.trim();
     if (!trimmed) {
-      setGroupError("Name cannot be empty");
+      setGroupError(t("groups.nameRequired"));
       return;
     }
     const original = groups.find((g) => g.id === editingGroupId)?.name;
@@ -355,11 +360,10 @@ const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
       setGroups((prev) =>
         prev.map((g) => (g.id === editingGroupId ? { ...g, name: trimmed } : g))
       );
-      toast.success(`Group renamed to "${trimmed}"`);
+      toast.success(t("toasts.groupRenamed", { name: trimmed }));
       cancelGroupRename();
     } catch (error: any) {
-      const detail = error instanceof ApiError ? error.detail : null;
-      setGroupError(detail?.error || detail?.detail || error?.message || "Failed to rename group");
+      setGroupError(translateApiError(error, tErrors) || t("toasts.groupRenameFailed"));
     } finally {
       setRenamingGroupId(null);
     }
@@ -383,7 +387,7 @@ const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
     if (!editingSubgroupId || !editingSubgroupGroupId) return;
     const trimmed = subgroupDraft.trim();
     if (!trimmed) {
-      setSubgroupError("Name cannot be empty");
+      setSubgroupError(t("groups.nameRequired"));
       return;
     }
     const parent = groups.find((g) => g.id === editingSubgroupGroupId);
@@ -411,11 +415,10 @@ const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
             : g
         )
       );
-      toast.success(`Subgroup renamed to "${trimmed}"`);
+      toast.success(t("toasts.subgroupRenamed", { name: trimmed }));
       cancelSubgroupRename();
     } catch (error: any) {
-      const detail = error instanceof ApiError ? error.detail : null;
-      setSubgroupError(detail?.error || detail?.detail || error?.message || "Failed to rename subgroup");
+      setSubgroupError(translateApiError(error, tErrors) || t("toasts.subgroupRenameFailed"));
     } finally {
       setRenamingSubgroupId(null);
     }
@@ -430,10 +433,10 @@ const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ apply_media_transform: next }),
       });
-      toast.success(next ? `"${group.name}" now applies adstock + saturation` : `"${group.name}" no longer applies adstock + saturation`);
+      toast.success(next ? t("toasts.mediaOn", { name: group.name }) : t("toasts.mediaOff", { name: group.name }));
     } catch (error: any) {
       setGroups((prev) => prev.map((g) => (g.id === group.id ? { ...g, apply_media_transform: !next } : g)));
-      toast.error((error as Error)?.message || "Failed to update group");
+      toast.error((error as Error)?.message || t("toasts.groupUpdateFailed"));
     }
   };
 
@@ -450,10 +453,10 @@ const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ is_baseline: next }),
       });
-      toast.success(next ? `"${group.name}" is now the baseline group` : `"${group.name}" is no longer the baseline group`);
+      toast.success(next ? t("toasts.baselineOn", { name: group.name }) : t("toasts.baselineOff", { name: group.name }));
     } catch (error: any) {
       setGroups(previous);
-      toast.error((error as Error)?.message || "Failed to update group");
+      toast.error((error as Error)?.message || t("toasts.groupUpdateFailed"));
     }
   };
 
@@ -472,7 +475,7 @@ const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ apply_media_transform: next }),
       });
-      toast.success(next ? `"${subgroup.name}" now applies adstock + saturation` : `"${subgroup.name}" no longer applies adstock + saturation`);
+      toast.success(next ? t("toasts.mediaOn", { name: subgroup.name }) : t("toasts.mediaOff", { name: subgroup.name }));
     } catch (error: any) {
       setGroups((prev) =>
         prev.map((g) =>
@@ -481,7 +484,7 @@ const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
             : g
         )
       );
-      toast.error((error as Error)?.message || "Failed to update subgroup");
+      toast.error((error as Error)?.message || t("toasts.subgroupUpdateFailed"));
     }
   };
 
@@ -508,14 +511,14 @@ const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
         )
       );
       toast.success(
-        `Group "${groupToDelete.name}" deleted. ${
-          summary?.reassigned_variables ?? groupVariableCount
-        } variables moved to Uncategorized.`
+        t("toasts.groupDeleted", {
+          name: groupToDelete.name,
+          count: summary?.reassigned_variables ?? groupVariableCount,
+        })
       );
       closeGroupDeleteModal();
     } catch (error: any) {
-      const detail = error instanceof ApiError ? error.detail : null;
-      setGroupDeleteError(detail?.error || detail?.detail || error?.message || "Failed to delete group");
+      setGroupDeleteError(translateApiError(error, tErrors) || t("toasts.groupDeleteFailed"));
     } finally {
       setGroupDeleteLoading(false);
     }
@@ -554,14 +557,14 @@ const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
         )
       );
       toast.success(
-        `Subgroup "${subgroupToDelete.subgroup.name}" deleted. ${
-          summary?.cleared_subgroup_assignments ?? subgroupVariableCount
-        } variables now have no subgroup.`
+        t("toasts.subgroupDeleted", {
+          name: subgroupToDelete.subgroup.name,
+          count: summary?.cleared_subgroup_assignments ?? subgroupVariableCount,
+        })
       );
       closeSubgroupDeleteModal();
     } catch (error: any) {
-      const detail = error instanceof ApiError ? error.detail : null;
-      setSubgroupDeleteError(detail?.error || detail?.detail || error?.message || "Failed to delete subgroup");
+      setSubgroupDeleteError(translateApiError(error, tErrors) || t("toasts.subgroupDeleteFailed"));
     } finally {
       setSubgroupDeleteLoading(false);
     }
@@ -598,9 +601,9 @@ const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
       });
       await fetchVariables(activeDatasetId);
       setNewName("");
-      toast.success("Variable created");
+      toast.success(t("toasts.variableCreated"));
     } catch (err: any) {
-      toast.error((err as Error)?.message || "Transformation failed");
+      toast.error((err as Error)?.message || t("toasts.transformFailed"));
     } finally {
       setLoading(false);
     }
@@ -615,9 +618,9 @@ const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
       });
       setVariables((prev) => prev.map((v) => (v.id === updated.id ? updated : v)));
       fetchGroups();
-      toast.success("Categorization updated");
+      toast.success(t("toasts.categorized"));
     } catch (err: any) {
-      toast.error((err as Error)?.message || "Failed to categorize");
+      toast.error((err as Error)?.message || t("toasts.categorizeFailed"));
     }
   };
 
@@ -654,12 +657,12 @@ const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
       const byId = new Map(updated.map((v) => [v.id, v]));
       setVariables((prev) => prev.map((v) => byId.get(v.id) ?? v));
       fetchGroups();
-      toast.success(`Categorized ${updated.length} variable${updated.length === 1 ? "" : "s"}`);
+      toast.success(t("toasts.bulkCategorized", { count: updated.length }));
       setSelectedIds(new Set());
       setBulkGroupId("");
       setBulkSubgroupId("");
     } catch (err: any) {
-      toast.error((err as Error)?.message || "Failed to categorize selection");
+      toast.error((err as Error)?.message || t("toasts.bulkCategorizeFailed"));
     } finally {
       setBulkApplying(false);
     }
@@ -676,10 +679,10 @@ const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
       });
       const byId = new Map(updated.map((v) => [v.id, v]));
       setVariables((prev) => prev.map((v) => byId.get(v.id) ?? v));
-      toast.success(exclude ? `Hid ${updated.length} variable(s)` : `Unhid ${updated.length} variable(s)`);
+      toast.success(exclude ? t("toasts.bulkHidden", { count: updated.length }) : t("toasts.bulkUnhidden", { count: updated.length }));
       setSelectedIds(new Set());
     } catch (err: any) {
-      toast.error((err as Error)?.message || "Failed to update selection");
+      toast.error((err as Error)?.message || t("toasts.bulkUpdateFailed"));
     } finally {
       setBulkApplying(false);
     }
@@ -691,7 +694,7 @@ const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
       setHistory(data);
       setHistoryVar(variable);
     } catch (err: any) {
-      toast.error(err?.message || "Failed to load history");
+      toast.error(err?.message || t("toasts.historyFailed"));
     }
   };
 
@@ -703,15 +706,15 @@ const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
     });
     const latest = derived[0];
     if (!latest) {
-      toast.info("No derived variables to undo");
+      toast.info(t("toasts.noUndo"));
       return;
     }
     try {
       await apiFetch(`/variables/${latest.id}/undo`, { method: "POST" });
       if (activeDatasetId) fetchVariables(activeDatasetId);
-      toast.success(`Removed ${latest.name}`);
+      toast.success(t("toasts.undone", { name: latest.name }));
     } catch (err: any) {
-      toast.error((err as Error)?.message || "Failed to undo");
+      toast.error((err as Error)?.message || t("toasts.undoFailed"));
     }
   };
 
@@ -725,297 +728,339 @@ const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
     return ds ? ds.columns : [];
   }, [datasets, activeDatasetId]);
 
-  return (
-    <section className="space-y-6">
-      <header className="flex flex-wrap items-center justify-between gap-4">
-        <div>
-          <p className="text-sm text-[var(--color-muted)]">Module 2</p>
-          <h1 className="text-2xl font-semibold tracking-tight">Transform &amp; Categorize</h1>
-        </div>
-        <div className="flex items-center gap-3">
-          <Select
-            wrapperClassName="w-auto"
-            value={activeDatasetId ?? ""}
-            onChange={(e) => {
-              setSelectedDataset(e.target.value);
-              setDatasetId(e.target.value);
-            }}
-          >
-            {datasets.map((d) => (
-              <option key={d.id} value={d.id}>
-                {d.display_name}
-              </option>
-            ))}
-          </Select>
-          <Button
-            variant="secondary"
-            size="sm"
-            onClick={handleUndo}
-            disabled={!canEdit}
-            title={!canEdit ? "Solo lectura: tu rol es Visualizador" : undefined}
-          >
-            Undo last
-          </Button>
-        </div>
-      </header>
+  const requiresColumn = op === "lag" || op === "decay" || op === "log" || op === "hill" || op === "adstock";
+  const requiresLeftRight = op === "add" || op === "sub" || op === "mul" || op === "div";
 
-      <div className="grid gap-6 xl:grid-cols-[320px,1fr]">
-        <Card className="space-y-4">
-          <CardHeader title="Variables" subtitle="Search & drag to categorize" />
-          <Input placeholder="Search variables" value={search} onChange={(e) => setSearch(e.target.value)} />
-          <div className="flex gap-2 text-sm">
-            <Select value={dtypeFilter} onChange={(e) => setDtypeFilter(e.target.value)}>
-              <option value="">All dtypes</option>
-              {dtypeOptions.map((opt) => (
-                <option key={opt} value={opt}>
-                  {opt}
+  return (
+    <section>
+      <PageHeader
+        title={t("title")}
+        subtitle={t("eyebrow")}
+        actions={
+          <div className="flex items-center gap-3">
+            <Select
+              wrapperClassName="w-auto"
+              aria-label={t("datasetSelectAria")}
+              value={activeDatasetId ?? ""}
+              onChange={(e) => {
+                setSelectedDataset(e.target.value);
+                setDatasetId(e.target.value);
+              }}
+            >
+              {datasets.map((d) => (
+                <option key={d.id} value={d.id}>
+                  {d.display_name}
                 </option>
               ))}
             </Select>
-            <label className="flex items-center gap-2 text-xs text-[var(--color-muted)]">
-              <input type="checkbox" checked={showDerivedOnly} onChange={(e) => setShowDerivedOnly(e.target.checked)} />
-              Derived only
-            </label>
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={handleUndo}
+              disabled={!canEdit}
+              title={!canEdit ? readOnlyTitle : undefined}
+            >
+              {t("undo")}
+            </Button>
           </div>
-          <label className="flex items-center gap-2 text-xs text-[var(--color-muted)]">
-            <input
-              type="checkbox"
-              checked={filteredVariables.length > 0 && filteredVariables.every((v) => selectedIds.has(v.id))}
-              onChange={toggleSelectAllFiltered}
-            />
-            Select all filtered ({filteredVariables.length})
-          </label>
-          {selectedIds.size > 0 && (
-            <div className="rounded-xl border border-dashed border-[var(--color-border)] p-3 space-y-2 text-xs">
-              <p className="font-medium text-sm">{selectedIds.size} selected</p>
-              <div className="flex flex-wrap gap-2 items-center">
-                <Select
-                  wrapperClassName="w-auto"
-                  value={bulkGroupId}
-                  onChange={(e) => {
-                    setBulkGroupId(e.target.value);
-                    setBulkSubgroupId("");
-                  }}
-                >
-                  <option value="">No group</option>
-                  {activeGroups.map((g) => (
-                    <option key={g.id} value={g.id}>
-                      {g.name}
-                    </option>
-                  ))}
-                </Select>
-                <Select wrapperClassName="w-auto" value={bulkSubgroupId} onChange={(e) => setBulkSubgroupId(e.target.value)}>
-                  <option value="">No subgroup</option>
-                  {(activeGroups.find((g) => g.id === bulkGroupId)?.subgroups || []).map((sg) => (
-                    <option key={sg.id} value={sg.id}>
-                      {sg.name}
-                    </option>
-                  ))}
-                </Select>
-                <Button size="sm" onClick={handleBulkAssign} disabled={!canEdit || bulkApplying}>
-                  Assign
-                </Button>
-                <Button size="sm" variant="secondary" onClick={() => handleBulkToggleExcluded(true)} disabled={!canEdit || bulkApplying}>
-                  Hide
-                </Button>
-                <Button size="sm" variant="secondary" onClick={() => handleBulkToggleExcluded(false)} disabled={!canEdit || bulkApplying}>
-                  Unhide
-                </Button>
-                <Button size="sm" variant="ghost" onClick={() => setSelectedIds(new Set())}>
-                  Clear
-                </Button>
-              </div>
-            </div>
-          )}
-          <div className="max-h-[500px] space-y-2 overflow-y-auto pr-2">
-            {filteredVariables.map((variable) => (
-              <VariableRow
-                key={variable.id}
-                variable={variable}
-                selected={selectedIds.has(variable.id)}
-                onToggleSelect={() => toggleSelected(variable.id)}
-                onDragStart={(event) => {
-                  event.dataTransfer?.setData("text/plain", variable.id);
-                  setDraggingVar(variable);
-                }}
-                onDragEnd={() => setDraggingVar(null)}
-                onHistory={() => openHistory(variable)}
-              />
-            ))}
-          </div>
-        </Card>
+        }
+      />
 
-        <div className="space-y-6">
-          <Card className="space-y-4">
-            <CardHeader title="Create transformation" subtitle="Lag, decay, arithmetic & more" />
-            <div className="grid gap-3 md:grid-cols-2">
+      <div className="space-y-6">
+        <Card className="space-y-4">
+          <CardHeader as="h2" title={t("builder.title")} subtitle={t("builder.subtitle")} />
+          <div className="grid gap-3 md:grid-cols-2">
+            <div className="space-y-2">
+              <Eyebrow htmlFor="transform-op">{t("builder.operation")}</Eyebrow>
+              <Select id="transform-op" value={op} onChange={(e) => setOp(e.target.value as any)}>
+                <option value="lag">{t("builder.ops.lag")}</option>
+                <option value="decay">{t("builder.ops.decay")}</option>
+                <option value="log">{t("builder.ops.log")}</option>
+                <option value="add">{t("builder.ops.add")}</option>
+                <option value="sub">{t("builder.ops.sub")}</option>
+                <option value="mul">{t("builder.ops.mul")}</option>
+                <option value="div">{t("builder.ops.div")}</option>
+                <option value="hill">{t("builder.ops.hill")}</option>
+                <option value="adstock">{t("builder.ops.adstock")}</option>
+              </Select>
+            </div>
+            <div className="space-y-2">
+              <Eyebrow htmlFor="transform-new-name">{t("builder.newNameRequired")}</Eyebrow>
+              <Input
+                id="transform-new-name"
+                value={newName}
+                onChange={(e) => setNewName(e.target.value)}
+                placeholder={t("builder.newNamePlaceholder")}
+                required
+              />
+            </div>
+            {requiresColumn && (
               <div className="space-y-2">
-                <Eyebrow>Operation</Eyebrow>
-                <Select value={op} onChange={(e) => setOp(e.target.value as any)}>
-                  <option value="lag">Lag</option>
-                  <option value="decay">Decay</option>
-                  <option value="log">Log</option>
-                  <option value="add">Add</option>
-                  <option value="sub">Subtract</option>
-                  <option value="mul">Multiply</option>
-                  <option value="div">Divide</option>
-                  <option value="hill">Hill (saturation)</option>
-                  <option value="adstock">Adstock (carryover)</option>
-                </Select>
+                <Eyebrow htmlFor="transform-column">{t("builder.columnRequired")}</Eyebrow>
+                <div>
+                  <Input
+                    id="transform-column"
+                    list="column-options"
+                    value={column}
+                    onChange={(e) => setColumn(e.target.value)}
+                    placeholder={t("builder.columnPlaceholder")}
+                    required
+                  />
+                  <datalist id="column-options">
+                    {datasetColumns.map((col) => (
+                      <option key={col.name} value={col.name} />
+                    ))}
+                  </datalist>
+                </div>
               </div>
+            )}
+            {op === "lag" && (
               <div className="space-y-2">
-                <Eyebrow>New name</Eyebrow>
-                <Input value={newName} onChange={(e) => setNewName(e.target.value)} placeholder="transformed_variable" />
+                <Eyebrow htmlFor="transform-periods">{t("builder.periodsOptional")}</Eyebrow>
+                <Input id="transform-periods" type="number" value={n} onChange={(e) => setN(parseInt(e.target.value) || 1)} />
               </div>
-              {(op === "lag" || op === "decay" || op === "log" || op === "hill" || op === "adstock") && (
+            )}
+            {op === "decay" && (
+              <div className="space-y-2">
+                <Eyebrow htmlFor="transform-alpha">{t("builder.alphaOptional")}</Eyebrow>
+                <Input id="transform-alpha" type="number" step="0.05" value={alpha} onChange={(e) => setAlpha(parseFloat(e.target.value) || 0.5)} />
+              </div>
+            )}
+            {op === "hill" && (
+              <>
                 <div className="space-y-2">
-                  <Eyebrow>Column</Eyebrow>
+                  <Eyebrow htmlFor="transform-hill-k">{t("builder.hillKOptional")}</Eyebrow>
+                  <Input id="transform-hill-k" type="number" step="0.1" value={hillK} onChange={(e) => setHillK(parseFloat(e.target.value) || 0)} />
+                </div>
+                <div className="space-y-2">
+                  <Eyebrow htmlFor="transform-hill-s">{t("builder.hillSOptional")}</Eyebrow>
+                  <Input id="transform-hill-s" type="number" step="0.1" value={hillS} onChange={(e) => setHillS(parseFloat(e.target.value) || 0)} />
+                </div>
+              </>
+            )}
+            {op === "adstock" && (
+              <div className="space-y-2">
+                <Eyebrow htmlFor="transform-adstock-decay">{t("builder.decayOptional")}</Eyebrow>
+                <Input
+                  id="transform-adstock-decay"
+                  type="number"
+                  step="0.05"
+                  value={adstockDecay}
+                  onChange={(e) => setAdstockDecay(parseFloat(e.target.value) || 0)}
+                />
+              </div>
+            )}
+            {requiresLeftRight && (
+              <>
+                <div className="space-y-2">
+                  <Eyebrow htmlFor="transform-left">{t("builder.leftRequired")}</Eyebrow>
                   <div>
                     <Input
-                      list="column-options"
-                      value={column}
-                      onChange={(e) => setColumn(e.target.value)}
-                      placeholder="Type to search column"
+                      id="transform-left"
+                      list="left-options"
+                      value={left}
+                      onChange={(e) => setLeft(e.target.value)}
+                      placeholder={t("builder.variablePlaceholder")}
+                      required
                     />
-                    <datalist id="column-options">
+                    <datalist id="left-options">
                       {datasetColumns.map((col) => (
                         <option key={col.name} value={col.name} />
                       ))}
                     </datalist>
                   </div>
                 </div>
-              )}
-              {op === "lag" && (
                 <div className="space-y-2">
-                  <Eyebrow>Periods</Eyebrow>
-                  <Input type="number" value={n} onChange={(e) => setN(parseInt(e.target.value) || 1)} />
+                  <Eyebrow htmlFor="transform-right">{t("builder.rightRequired")}</Eyebrow>
+                  <div>
+                    <Input
+                      id="transform-right"
+                      list="right-options"
+                      value={right}
+                      onChange={(e) => setRight(e.target.value)}
+                      placeholder={t("builder.variablePlaceholder")}
+                      required
+                    />
+                    <datalist id="right-options">
+                      {datasetColumns.map((col) => (
+                        <option key={col.name} value={col.name} />
+                      ))}
+                    </datalist>
+                  </div>
                 </div>
-              )}
-              {op === "decay" && (
-                <div className="space-y-2">
-                  <Eyebrow>Alpha (0-1)</Eyebrow>
-                  <Input type="number" step="0.05" value={alpha} onChange={(e) => setAlpha(parseFloat(e.target.value) || 0.5)} />
-                </div>
-              )}
-              {op === "hill" && (
+              </>
+            )}
+          </div>
+          <p className="text-2xs text-muted">{t("builder.requiredLegend")}</p>
+          <div className="flex justify-end">
+            <Button onClick={handleTransform} disabled={!canEdit || loading || !newName} title={!canEdit ? readOnlyTitle : undefined}>
+              {loading ? t("builder.creating") : t("builder.create")}
+            </Button>
+          </div>
+          <div className="rounded-xl border border-line p-4 space-y-3">
+            <label className="flex items-center gap-2 text-sm text-muted">
+              <input type="checkbox" checked={showPreview} onChange={() => setShowPreview((prev) => !prev)} />
+              {t("builder.showPreview")}
+            </label>
+            {showPreview ? (
+              previewLoading ? (
+                <Skeleton className="h-chart-sm w-full" />
+              ) : previewError ? (
+                <ErrorText className="text-sm">
+                  {previewError}{" "}
+                  <button className="underline" onClick={retryPreview}>
+                    {t("builder.retry")}
+                  </button>
+                </ErrorText>
+              ) : previewData ? (
                 <>
-                  <div className="space-y-2">
-                    <Eyebrow>K (half-saturation)</Eyebrow>
-                    <Input type="number" step="0.1" value={hillK} onChange={(e) => setHillK(parseFloat(e.target.value) || 0)} />
-                  </div>
-                  <div className="space-y-2">
-                    <Eyebrow>S (shape)</Eyebrow>
-                    <Input type="number" step="0.1" value={hillS} onChange={(e) => setHillS(parseFloat(e.target.value) || 0)} />
-                  </div>
-                </>
-              )}
-              {op === "adstock" && (
-                <div className="space-y-2">
-                  <Eyebrow>Decay (0-1)</Eyebrow>
-                  <Input
-                    type="number"
-                    step="0.05"
-                    value={adstockDecay}
-                    onChange={(e) => setAdstockDecay(parseFloat(e.target.value) || 0)}
-                  />
-                </div>
-              )}
-              {["add", "sub", "mul", "div"].includes(op) && (
-                <>
-                  <div className="space-y-2">
-                    <Eyebrow>Left</Eyebrow>
-                    <div>
-                      <Input
-                        list="left-options"
-                        value={left}
-                        onChange={(e) => setLeft(e.target.value)}
-                        placeholder="Type variable"
-                      />
-                      <datalist id="left-options">
-                        {datasetColumns.map((col) => (
-                          <option key={col.name} value={col.name} />
-                        ))}
-                      </datalist>
+                  <PreviewChart data={previewData} originalLabel={t("builder.seriesOriginal")} transformedLabel={t("builder.seriesTransformed")} />
+                  {previewData.stats && (
+                    <div className="text-xs text-muted flex flex-wrap gap-4 tabular-nums">
+                      <span>{t("builder.statMeanOriginal", { value: previewData.stats.mean_original?.toFixed(2) ?? "—" })}</span>
+                      <span>{t("builder.statMeanTransformed", { value: previewData.stats.mean_transformed?.toFixed(2) ?? "—" })}</span>
+                      <span>{t("builder.statCorrelation", { value: previewData.stats.correlation?.toFixed(2) ?? "—" })}</span>
                     </div>
-                  </div>
-                  <div className="space-y-2">
-                    <Eyebrow>Right</Eyebrow>
-                    <div>
-                      <Input
-                        list="right-options"
-                        value={right}
-                        onChange={(e) => setRight(e.target.value)}
-                        placeholder="Type variable"
-                      />
-                      <datalist id="right-options">
-                        {datasetColumns.map((col) => (
-                          <option key={col.name} value={col.name} />
-                        ))}
-                      </datalist>
-                    </div>
-                  </div>
+                  )}
                 </>
-              )}
-            </div>
-            <div className="flex justify-end">
-              <Button
-                onClick={handleTransform}
-                disabled={!canEdit || loading || !newName}
-                title={!canEdit ? "Solo lectura: tu rol es Visualizador" : undefined}
-              >
-                {loading ? "Creating..." : "Create variable"}
-              </Button>
-            </div>
-            <div className="rounded-2xl border border-[var(--color-border)] p-4 space-y-3">
-              <label className="flex items-center gap-2 text-sm text-[var(--color-muted)]">
-                <input
-                  type="checkbox"
-                  checked={showPreview}
-                  onChange={() => setShowPreview((prev) => !prev)}
-                />
-                Show preview
-              </label>
-              {showPreview ? (
-                previewLoading ? (
-                  <p className="text-sm text-[var(--color-muted)]">Loading preview…</p>
-                ) : previewError ? (
-                  <ErrorText className="text-sm">
-                    {previewError}{" "}
-                    <button className="underline" onClick={retryPreview}>
-                      Retry
-                    </button>
-                  </ErrorText>
-                ) : previewData ? (
-                  <>
-                    <PreviewChart data={previewData} />
-                    {previewData.stats && (
-                      <div className="text-xs text-[var(--color-muted)] flex flex-wrap gap-4">
-                        <span>Mean original: {previewData.stats.mean_original?.toFixed(2)}</span>
-                        <span>Mean transformed: {previewData.stats.mean_transformed?.toFixed(2)}</span>
-                        <span>Correlation: {previewData.stats.correlation?.toFixed(2)}</span>
-                      </div>
-                    )}
-                  </>
-                ) : (
-                  <p className="text-sm text-[var(--color-muted)]">Adjust parameters to see preview.</p>
-                )
               ) : (
-                <p className="text-sm text-[var(--color-muted)]">Preview disabled.</p>
-              )}
+                <p className="text-sm text-muted">{t("builder.previewHint")}</p>
+              )
+            ) : (
+              <p className="text-sm text-muted">{t("builder.previewDisabled")}</p>
+            )}
+          </div>
+        </Card>
+
+        <div className="grid gap-6 xl:grid-cols-[320px,1fr]">
+          <Card className="space-y-4">
+            <CardHeader as="h2" title={t("variablesCard.title")} subtitle={t("variablesCard.subtitle")} />
+          <Input
+            placeholder={t("variablesCard.searchPlaceholder")}
+            aria-label={t("variablesCard.searchPlaceholder")}
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+          />
+          <div className="flex flex-wrap items-center gap-2 text-sm">
+            <Select
+              wrapperClassName="flex-1 min-w-[140px]"
+              aria-label={t("variablesCard.dtypeFilterAria")}
+              value={dtypeFilter}
+              onChange={(e) => setDtypeFilter(e.target.value)}
+            >
+              <option value="">{t("variablesCard.allDtypes")}</option>
+              {dtypeOptions.map((opt) => (
+                <option key={opt} value={opt}>
+                  {opt}
+                </option>
+              ))}
+            </Select>
+            <label className="flex items-center gap-2 text-xs text-muted whitespace-nowrap">
+              <input type="checkbox" checked={showDerivedOnly} onChange={(e) => setShowDerivedOnly(e.target.checked)} />
+              {t("variablesCard.derivedOnly")}
+            </label>
+          </div>
+          <label className="flex items-center gap-2 text-xs text-muted">
+            <input
+              type="checkbox"
+              checked={filteredVariables.length > 0 && filteredVariables.every((v) => selectedIds.has(v.id))}
+              onChange={toggleSelectAllFiltered}
+            />
+            {t("variablesCard.selectAllFiltered", { count: filteredVariables.length })}
+          </label>
+          {selectedIds.size > 0 && (
+            <div className="rounded-xl border border-dashed border-line-2 p-3 space-y-2 text-xs">
+              <p className="font-medium text-sm text-ink">{t("variablesCard.selectedCount", { count: selectedIds.size })}</p>
+              <RowActions className="flex-wrap gap-2">
+                <Select
+                  wrapperClassName="w-auto"
+                  aria-label={t("variablesCard.bulkGroupAria")}
+                  value={bulkGroupId}
+                  onChange={(e) => {
+                    setBulkGroupId(e.target.value);
+                    setBulkSubgroupId("");
+                  }}
+                >
+                  <option value="">{t("variablesCard.noGroup")}</option>
+                  {activeGroups.map((g) => (
+                    <option key={g.id} value={g.id}>
+                      {g.name}
+                    </option>
+                  ))}
+                </Select>
+                <Select
+                  wrapperClassName="w-auto"
+                  aria-label={t("variablesCard.bulkSubgroupAria")}
+                  value={bulkSubgroupId}
+                  onChange={(e) => setBulkSubgroupId(e.target.value)}
+                >
+                  <option value="">{t("variablesCard.noSubgroup")}</option>
+                  {(activeGroups.find((g) => g.id === bulkGroupId)?.subgroups || []).map((sg) => (
+                    <option key={sg.id} value={sg.id}>
+                      {sg.name}
+                    </option>
+                  ))}
+                </Select>
+                <Button size="sm" onClick={handleBulkAssign} disabled={!canEdit || bulkApplying} title={!canEdit ? readOnlyTitle : undefined}>
+                  {t("variablesCard.assign")}
+                </Button>
+                <Button size="sm" variant="secondary" onClick={() => handleBulkToggleExcluded(true)} disabled={!canEdit || bulkApplying} title={!canEdit ? readOnlyTitle : undefined}>
+                  {t("variablesCard.hide")}
+                </Button>
+                <Button size="sm" variant="secondary" onClick={() => handleBulkToggleExcluded(false)} disabled={!canEdit || bulkApplying} title={!canEdit ? readOnlyTitle : undefined}>
+                  {t("variablesCard.unhide")}
+                </Button>
+                <Button size="sm" variant="ghost" onClick={() => setSelectedIds(new Set())}>
+                  {tCommon("cancel")}
+                </Button>
+              </RowActions>
             </div>
-          </Card>
+          )}
+          <div className="max-h-[500px] space-y-2 overflow-y-auto pr-2">
+            {variablesLoading ? (
+              <>
+                <Skeleton className="h-16 w-full" />
+                <Skeleton className="h-16 w-full" />
+                <Skeleton className="h-16 w-full" />
+              </>
+            ) : filteredVariables.length === 0 ? (
+              <EmptyState title={t("variablesCard.emptyTitle")} description={t("variablesCard.emptyDescription")} />
+            ) : (
+              filteredVariables.map((variable) => (
+                <VariableRow
+                  key={variable.id}
+                  variable={variable}
+                  selected={selectedIds.has(variable.id)}
+                  onToggleSelect={() => toggleSelected(variable.id)}
+                  onDragStart={(event) => {
+                    event.dataTransfer?.setData("text/plain", variable.id);
+                    setDraggingVar(variable);
+                  }}
+                  onDragEnd={() => setDraggingVar(null)}
+                  onHistory={() => openHistory(variable)}
+                  historyLabel={t("variablesCard.history")}
+                />
+              ))
+            )}
+          </div>
+        </Card>
 
           <Card className="space-y-4">
-            <CardHeader title="Groups & Subgroups" subtitle="Create targets and drag variables onto them" />
+            <CardHeader as="h2" title={t("groups.title")} subtitle={t("groups.subtitle")} />
             <div className="grid gap-3 md:grid-cols-2">
               <div className="space-y-2">
-                <Eyebrow>New group</Eyebrow>
+                <Eyebrow htmlFor="new-group-name">{t("groups.newGroup")}</Eyebrow>
                 <div className="flex gap-2">
-                  <Input value={newGroupName} onChange={(e) => setNewGroupName(e.target.value)} placeholder="Group name" />
+                  <Input
+                    id="new-group-name"
+                    value={newGroupName}
+                    onChange={(e) => setNewGroupName(e.target.value)}
+                    placeholder={t("groups.groupNamePlaceholder")}
+                  />
                   <Button
                     size="sm"
                     disabled={!canEdit}
-                    title={!canEdit ? "Solo lectura: tu rol es Visualizador" : undefined}
+                    title={!canEdit ? readOnlyTitle : undefined}
                     onClick={async () => {
                       if (!newGroupName.trim()) return;
                       try {
@@ -1026,32 +1071,43 @@ const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
                         });
                         setNewGroupName("");
                         fetchGroups();
-                        toast.success("Group created");
+                        toast.success(t("toasts.groupCreated"));
                       } catch (err: any) {
-                        toast.error((err as Error)?.message || "Failed to create group");
+                        toast.error((err as Error)?.message || t("toasts.groupCreateFailed"));
                       }
                     }}
                   >
-                    Add
+                    {t("groups.add")}
                   </Button>
                 </div>
               </div>
               <div className="space-y-2">
-                <Eyebrow>New subgroup</Eyebrow>
-                <div className="flex gap-2">
-                  <Select value={newSubgroupParent} onChange={(e) => setNewSubgroupParent(e.target.value)}>
-                    <option value="">Select group</option>
+                <Eyebrow htmlFor="new-subgroup-parent">{t("groups.newSubgroup")}</Eyebrow>
+                <div className="flex flex-wrap gap-2">
+                  <Select
+                    id="new-subgroup-parent"
+                    wrapperClassName="flex-1 min-w-[140px]"
+                    value={newSubgroupParent}
+                    onChange={(e) => setNewSubgroupParent(e.target.value)}
+                  >
+                    <option value="">{t("groups.selectGroup")}</option>
                     {groups.map((g) => (
                       <option key={g.id} value={g.id}>
                         {g.name}
                       </option>
                     ))}
                   </Select>
-                  <Input value={newSubgroupName} onChange={(e) => setNewSubgroupName(e.target.value)} placeholder="Subgroup" />
+                  <Input
+                    className="flex-1 min-w-[120px]"
+                    value={newSubgroupName}
+                    onChange={(e) => setNewSubgroupName(e.target.value)}
+                    placeholder={t("groups.subgroupNamePlaceholder")}
+                  />
                   <Button
                     size="sm"
+                    className="shrink-0"
                     disabled={!canEdit}
-                    title={!canEdit ? "Solo lectura: tu rol es Visualizador" : undefined}
+                    title={!canEdit ? readOnlyTitle : undefined}
                     onClick={async () => {
                       if (!newSubgroupParent || !newSubgroupName.trim()) return;
                       try {
@@ -1062,21 +1118,21 @@ const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
                         });
                         setNewSubgroupName("");
                         fetchGroups();
-                        toast.success("Subgroup created");
+                        toast.success(t("toasts.subgroupCreated"));
                       } catch (err: any) {
-                        toast.error((err as Error)?.message || "Failed to create subgroup");
+                        toast.error((err as Error)?.message || t("toasts.subgroupCreateFailed"));
                       }
                     }}
                   >
-                    Add
+                    {t("groups.add")}
                   </Button>
                 </div>
               </div>
             </div>
             <div
               className={clsx(
-                "rounded-2xl border border-dashed p-4 text-sm text-[var(--color-muted)]",
-                draggingVar ? "border-[var(--color-accent)]" : "border-[var(--color-border)]"
+                "rounded-xl border border-dashed p-4 text-sm text-muted",
+                draggingVar ? "border-accent" : "border-line-2"
               )}
               onDragOver={(e) => e.preventDefault()}
               onDrop={(e) => {
@@ -1086,306 +1142,268 @@ const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
                 if (targetId) handleCategorize(targetId, null, null);
               }}
             >
-              Drop here to clear categorization
+              {t("groups.dropToClear")}
             </div>
-            <div className="grid gap-4 md:grid-cols-2">
-              {activeGroups.length === 0 && (
-                <p className="text-sm text-[var(--color-muted)]">Create a group to start assigning variables.</p>
-              )}
-              {activeGroups.map((group) => (
-                <div
-                  key={group.id}
-                  className={clsx(
-                    "rounded-2xl border p-4 space-y-3 transition",
-                    draggingVar ? "border-dashed border-[var(--color-accent)]" : "border-[var(--color-border)]"
-                  )}
-                  onDragOver={(e) => e.preventDefault()}
-                  onDrop={(e) => {
-                    e.preventDefault();
-                    const variableId = e.dataTransfer.getData("text/plain");
-                    const targetId = variableId || draggingVar?.id;
-                    if (targetId) handleCategorize(targetId, group.id, null);
-                  }}
-                >
-                  <div className="flex items-center justify-between gap-2">
-                    <div className="flex items-center gap-2 flex-1">
-                      {editingGroupId === group.id ? (
-                        <div className="flex flex-col gap-1">
-                          <input
-                            className="rounded-full border border-[var(--color-border)] bg-transparent px-3 py-1 text-sm focus:border-[var(--color-accent)] focus:outline-none"
-                            value={groupDraft}
-                            onChange={(e) => setGroupDraft(e.target.value.slice(0, 40))}
-                            onKeyDown={(event) => {
-                              if (event.key === "Enter") {
-                                event.preventDefault();
-                                submitGroupRename();
-                              } else if (event.key === "Escape") {
-                                event.preventDefault();
-                                cancelGroupRename();
-                              }
-                            }}
-                            onBlur={() => {
-                              if (!renamingGroupId) submitGroupRename();
-                            }}
-                            disabled={renamingGroupId === group.id}
-                            autoFocus
-                          />
-                          {groupError && <ErrorText className="text-xs">{groupError}</ErrorText>}
-                        </div>
-                      ) : (
-                        <div className="flex items-center gap-2">
-                          <button
-                            type="button"
-                            className="flex items-center gap-2 group cursor-pointer text-left disabled:cursor-not-allowed disabled:opacity-60"
-                            onClick={() => startGroupRename(group)}
-                            disabled={!canEdit}
-                            title={!canEdit ? "Solo lectura: tu rol es Visualizador" : undefined}
-                          >
-                            <span className="font-medium truncate max-w-[220px]">{group.name}</span>
-                            <Pencil
-                              size={14}
-                              className="text-[var(--color-muted)] opacity-0 group-hover:opacity-100 transition"
-                            />
-                          </button>
-                          <button
-                            type="button"
-                            className="rounded-full p-1 text-[var(--color-muted)] hover:text-[var(--color-danger)] transition disabled:cursor-not-allowed disabled:opacity-60"
-                            onClick={() => {
-                              setGroupToDelete(group);
-                              setGroupDeleteError("");
-                            }}
-                            disabled={!canEdit}
-                            title={!canEdit ? "Solo lectura: tu rol es Visualizador" : undefined}
-                          >
-                            <Trash2 size={16} />
-                          </button>
-                        </div>
-                      )}
-                    </div>
-                    <Badge>{group.subgroups.length} subgroups</Badge>
-                    {group.is_baseline && <Badge variant="neutral">Baseline</Badge>}
-                  </div>
-                  <label
-                    className="flex items-center gap-2 text-xs text-[var(--color-muted)]"
-                    title="Variables in this group get adstock (carryover) + Hill saturation applied automatically when used as model predictors"
+            {groupsLoading ? (
+              <div className="grid gap-4 md:grid-cols-2">
+                <Skeleton className="h-32 w-full" />
+                <Skeleton className="h-32 w-full" />
+              </div>
+            ) : activeGroups.length === 0 ? (
+              <EmptyState title={t("groups.emptyTitle")} description={t("groups.emptyDescription")} />
+            ) : (
+              <div className="grid gap-4 md:grid-cols-2">
+                {activeGroups.map((group) => (
+                  <div
+                    key={group.id}
+                    className={clsx(
+                      "rounded-xl border p-4 space-y-3 transition",
+                      draggingVar ? "border-dashed border-accent" : "border-line"
+                    )}
+                    onDragOver={(e) => e.preventDefault()}
+                    onDrop={(e) => {
+                      e.preventDefault();
+                      const variableId = e.dataTransfer.getData("text/plain");
+                      const targetId = variableId || draggingVar?.id;
+                      if (targetId) handleCategorize(targetId, group.id, null);
+                    }}
                   >
-                    <input
-                      type="checkbox"
-                      checked={group.apply_media_transform}
-                      disabled={!canEdit}
-                      onChange={() => toggleGroupMediaTransform(group)}
-                    />
-                    Aplica adstock + saturación (medios)
-                  </label>
-                  <label
-                    className="flex items-center gap-2 text-xs text-[var(--color-muted)]"
-                    title="Solo un grupo puede ser el baseline por compañía. Sus variables se suman al intercepto en Analysis en vez de mostrarse como línea propia."
-                  >
-                    <input
-                      type="checkbox"
-                      checked={group.is_baseline}
-                      disabled={!canEdit}
-                      onChange={() => toggleGroupBaseline(group)}
-                    />
-                    Es el grupo Baseline
-                  </label>
-                  <div className="space-y-2">
-                    {group.subgroups.map((sub) => (
-                      <div
-                        key={sub.id}
-                        className="rounded-xl border border-dashed border-[var(--color-border)] px-3 py-2 text-sm"
-                        onDragOver={(e) => {
-                          e.preventDefault();
-                          e.stopPropagation();
-                        }}
-                        onDrop={(e) => {
-                          e.preventDefault();
-                          e.stopPropagation();
-                          const variableId = e.dataTransfer.getData("text/plain");
-                          const targetId = variableId || draggingVar?.id;
-                          if (targetId) handleCategorize(targetId, group.id, sub.id);
-                        }}
-                      >
-                        {editingSubgroupId === sub.id ? (
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="flex items-center gap-2 flex-1">
+                        {editingGroupId === group.id ? (
                           <div className="flex flex-col gap-1">
                             <input
-                              className="rounded-full border border-[var(--color-border)] bg-transparent px-3 py-1 text-sm focus:border-[var(--color-accent)] focus:outline-none"
-                              value={subgroupDraft}
-                              onChange={(e) => setSubgroupDraft(e.target.value.slice(0, 40))}
+                              className="rounded-full border border-border-control bg-transparent px-3 py-1 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+                              value={groupDraft}
+                              onChange={(e) => setGroupDraft(e.target.value.slice(0, 40))}
+                              aria-label={t("groups.renameAria", { name: group.name })}
                               onKeyDown={(event) => {
                                 if (event.key === "Enter") {
                                   event.preventDefault();
-                                  submitSubgroupRename();
+                                  submitGroupRename();
                                 } else if (event.key === "Escape") {
                                   event.preventDefault();
-                                  cancelSubgroupRename();
+                                  cancelGroupRename();
                                 }
                               }}
                               onBlur={() => {
-                                if (!renamingSubgroupId) submitSubgroupRename();
+                                if (!renamingGroupId) submitGroupRename();
                               }}
-                              disabled={renamingSubgroupId === sub.id}
+                              disabled={renamingGroupId === group.id}
                               autoFocus
                             />
-                            {subgroupError && editingSubgroupId === sub.id && (
-                              <ErrorText className="text-xs">{subgroupError}</ErrorText>
-                            )}
+                            {groupError && <ErrorText className="text-xs">{groupError}</ErrorText>}
                           </div>
                         ) : (
-                          <div className="flex items-center justify-between gap-2">
+                          <div className="flex items-center gap-2">
                             <button
                               type="button"
-                              className="flex-1 flex items-center gap-2 group text-left disabled:cursor-not-allowed disabled:opacity-60"
-                              onClick={() => startSubgroupRename(group.id, sub)}
+                              className="flex items-center gap-2 group cursor-pointer text-left disabled:cursor-not-allowed disabled:opacity-60"
+                              onClick={() => startGroupRename(group)}
                               disabled={!canEdit}
-                              title={!canEdit ? "Solo lectura: tu rol es Visualizador" : undefined}
+                              title={!canEdit ? readOnlyTitle : undefined}
                             >
-                              <span className="truncate">{sub.name}</span>
-                              <Pencil
-                                size={14}
-                                className="text-[var(--color-muted)] opacity-0 group-hover:opacity-100 transition"
-                              />
+                              <span className="font-medium text-ink truncate max-w-[220px]">{group.name}</span>
+                              <Pencil size={14} className="text-muted opacity-0 group-hover:opacity-100 transition" />
                             </button>
-                            <label
-                              className="flex items-center gap-1 text-3xs uppercase text-[var(--color-muted)] shrink-0"
-                              title="Aplica adstock + saturación (medios) a las variables de este subgrupo"
-                            >
-                              <input
-                                type="checkbox"
-                                checked={sub.apply_media_transform}
-                                disabled={!canEdit}
-                                onChange={() => toggleSubgroupMediaTransform(group, sub)}
-                              />
-                              Medios
-                            </label>
-                            <button
-                              type="button"
-                              className="rounded-full p-1 text-[var(--color-muted)] hover:text-[var(--color-danger)] transition disabled:cursor-not-allowed disabled:opacity-60"
+                            <IconButton
+                              size="sm"
+                              className="!text-bad hover:!bg-bad-bg"
+                              aria-label={t("groups.deleteAria", { name: group.name })}
                               onClick={() => {
-                                setSubgroupToDelete({ group, subgroup: sub });
-                                setSubgroupDeleteError("");
+                                setGroupToDelete(group);
+                                setGroupDeleteError("");
                               }}
                               disabled={!canEdit}
-                              title={!canEdit ? "Solo lectura: tu rol es Visualizador" : undefined}
+                              title={!canEdit ? readOnlyTitle : undefined}
                             >
                               <Trash2 size={14} />
-                            </button>
+                            </IconButton>
                           </div>
                         )}
                       </div>
-                    ))}
+                      <Badge>{t("groups.subgroupCount", { count: group.subgroups.length })}</Badge>
+                      {group.is_baseline && <Badge variant="accent">{t("groups.baseline")}</Badge>}
+                    </div>
+                    <label className="flex items-center gap-2 text-xs text-muted" title={t("groups.mediaTooltip")}>
+                      <input
+                        type="checkbox"
+                        checked={group.apply_media_transform}
+                        disabled={!canEdit}
+                        onChange={() => toggleGroupMediaTransform(group)}
+                      />
+                      {t("groups.mediaLabel")}
+                    </label>
+                    <label className="flex items-center gap-2 text-xs text-muted" title={t("groups.baselineTooltip")}>
+                      <input
+                        type="checkbox"
+                        checked={group.is_baseline}
+                        disabled={!canEdit}
+                        onChange={() => toggleGroupBaseline(group)}
+                      />
+                      {t("groups.baselineLabel")}
+                    </label>
+                    <div className="space-y-2">
+                      {group.subgroups.map((sub) => (
+                        <div
+                          key={sub.id}
+                          className="rounded-lg border border-dashed border-line-2 px-3 py-2 text-sm"
+                          onDragOver={(e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                          }}
+                          onDrop={(e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            const variableId = e.dataTransfer.getData("text/plain");
+                            const targetId = variableId || draggingVar?.id;
+                            if (targetId) handleCategorize(targetId, group.id, sub.id);
+                          }}
+                        >
+                          {editingSubgroupId === sub.id ? (
+                            <div className="flex flex-col gap-1">
+                              <input
+                                className="rounded-full border border-border-control bg-transparent px-3 py-1 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+                                value={subgroupDraft}
+                                onChange={(e) => setSubgroupDraft(e.target.value.slice(0, 40))}
+                                aria-label={t("groups.renameAria", { name: sub.name })}
+                                onKeyDown={(event) => {
+                                  if (event.key === "Enter") {
+                                    event.preventDefault();
+                                    submitSubgroupRename();
+                                  } else if (event.key === "Escape") {
+                                    event.preventDefault();
+                                    cancelSubgroupRename();
+                                  }
+                                }}
+                                onBlur={() => {
+                                  if (!renamingSubgroupId) submitSubgroupRename();
+                                }}
+                                disabled={renamingSubgroupId === sub.id}
+                                autoFocus
+                              />
+                              {subgroupError && editingSubgroupId === sub.id && (
+                                <ErrorText className="text-xs">{subgroupError}</ErrorText>
+                              )}
+                            </div>
+                          ) : (
+                            <div className="flex items-center justify-between gap-2">
+                              <button
+                                type="button"
+                                className="flex-1 flex items-center gap-2 group text-left disabled:cursor-not-allowed disabled:opacity-60"
+                                onClick={() => startSubgroupRename(group.id, sub)}
+                                disabled={!canEdit}
+                                title={!canEdit ? readOnlyTitle : undefined}
+                              >
+                                <span className="truncate text-ink">{sub.name}</span>
+                                <Pencil size={14} className="text-muted opacity-0 group-hover:opacity-100 transition" />
+                              </button>
+                              <label
+                                className="flex items-center gap-1 text-3xs uppercase text-muted shrink-0"
+                                title={t("groups.mediaTooltip")}
+                              >
+                                <input
+                                  type="checkbox"
+                                  checked={sub.apply_media_transform}
+                                  disabled={!canEdit}
+                                  onChange={() => toggleSubgroupMediaTransform(group, sub)}
+                                />
+                                {t("groups.mediaShort")}
+                              </label>
+                              <IconButton
+                                size="sm"
+                                className="!text-bad hover:!bg-bad-bg"
+                                aria-label={t("groups.deleteAria", { name: sub.name })}
+                                onClick={() => {
+                                  setSubgroupToDelete({ group, subgroup: sub });
+                                  setSubgroupDeleteError("");
+                                }}
+                                disabled={!canEdit}
+                                title={!canEdit ? readOnlyTitle : undefined}
+                              >
+                                <Trash2 size={14} />
+                              </IconButton>
+                            </div>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                    <GroupAssignments variables={variables} groupId={group.id} subgroupIds={group.subgroups.map((s) => s.id)} label={t("groups.assigned")} />
                   </div>
-                  <GroupAssignments variables={variables} groupId={group.id} subgroupIds={group.subgroups.map((s) => s.id)} />
-                </div>
-              ))}
-            </div>
+                ))}
+              </div>
+            )}
           </Card>
-
-          <InvestmentChannels
-            datasetId={activeDatasetId}
-            variableNames={variables.map((v) => v.name)}
-            datasetColumns={datasetColumns}
-            canEdit={canEdit}
-          />
-
-          <ConversionSettingsCard datasetId={activeDatasetId} datasetColumns={datasetColumns} canEdit={canEdit} />
         </div>
+
+        <InvestmentChannels
+          datasetId={activeDatasetId}
+          variableNames={variables.map((v) => v.name)}
+          datasetColumns={datasetColumns}
+          canEdit={canEdit}
+        />
+
+        <ConversionSettingsCard datasetId={activeDatasetId} datasetColumns={datasetColumns} canEdit={canEdit} />
       </div>
 
-      {historyVar && (
-        <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center px-4">
-          <div className="w-full max-w-lg rounded-2xl bg-[var(--color-card)] p-6 shadow-lg space-y-4">
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="text-xs text-[var(--color-muted)]">History</p>
-                <h3 className="text-lg font-semibold">{historyVar.name}</h3>
+      <Modal open={!!historyVar} onClose={() => setHistoryVar(null)} title={t("history.title", { name: historyVar?.name ?? "" })}>
+        <div className="max-h-[360px] overflow-y-auto space-y-3">
+          {history.length === 0 && <p className="text-sm text-muted">{t("history.empty")}</p>}
+          {history.map((item) => (
+            <div key={item.id} className="rounded-lg border border-line p-3 text-sm space-y-1">
+              <div className="flex items-center justify-between">
+                <span className="font-medium uppercase text-xs text-muted">{item.op}</span>
+                <span className="text-xs text-muted">{new Date(item.created_at).toLocaleString()}</span>
               </div>
-              <Button variant="ghost" onClick={() => setHistoryVar(null)}>
-                Close
-              </Button>
+              <pre className="text-xs text-muted overflow-x-auto">{JSON.stringify(item.params, null, 2)}</pre>
             </div>
-            <div className="max-h-[360px] overflow-y-auto space-y-3">
-              {history.length === 0 && <p className="text-sm text-[var(--color-muted)]">No history yet.</p>}
-              {history.map((item) => (
-                <div key={item.id} className="rounded-xl border border-[var(--color-border)] p-3 text-sm space-y-1">
-                  <div className="flex items-center justify-between">
-                    <span className="font-medium uppercase text-xs text-[var(--color-muted)]">{item.op}</span>
-                    <span className="text-xs text-[var(--color-muted)]">
-                      {new Date(item.created_at).toLocaleString()}
-                    </span>
-                  </div>
-                  <pre className="text-xs text-[var(--color-muted)]">{JSON.stringify(item.params, null, 2)}</pre>
-                </div>
-              ))}
-            </div>
-          </div>
+          ))}
         </div>
-      )}
+        <div className="mt-4 flex justify-end">
+          <Button variant="ghost" onClick={() => setHistoryVar(null)}>
+            {tCommon("close")}
+          </Button>
+        </div>
+      </Modal>
 
-      {groupToDelete && (
-        <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center px-4">
-          <div className="w-full max-w-md rounded-2xl bg-[var(--color-card)] p-6 shadow-lg space-y-4">
-            <div className="flex items-center justify-between">
-              <h3 className="text-lg font-semibold">Delete group &quot;{groupToDelete.name}&quot;?</h3>
-              <Button variant="ghost" size="sm" onClick={closeGroupDeleteModal}>
-                Close
-              </Button>
-            </div>
-            {groupDeleteError && <ErrorText className="text-sm">{groupDeleteError}</ErrorText>}
-            <p className="text-sm text-[var(--color-muted)]">
-              This group has {groupVariableCount} variables assigned. Deleting it will move them to &quot;Uncategorized&quot;.
-            </p>
-            <ErrorText className="text-xs">This action cannot be undone.</ErrorText>
-            <div className="flex justify-end gap-2">
-              <Button variant="ghost" onClick={closeGroupDeleteModal} disabled={groupDeleteLoading}>
-                Cancel
-              </Button>
-              <Button
-                variant="danger"
-                onClick={confirmDeleteGroup}
-                disabled={!canEdit || groupDeleteLoading}
-                title={!canEdit ? "Solo lectura: tu rol es Visualizador" : undefined}
-              >
-                {groupDeleteLoading ? "Deleting..." : "Delete group"}
-              </Button>
-            </div>
-          </div>
+      <Modal open={!!groupToDelete} onClose={closeGroupDeleteModal} title={t("groups.deleteTitle", { name: groupToDelete?.name ?? "" })}>
+        {groupDeleteError && <ErrorText className="text-sm">{groupDeleteError}</ErrorText>}
+        <p className="text-sm text-ink">{t("groups.deleteBody", { count: groupVariableCount })}</p>
+        <ErrorText className="text-xs">{t("groups.cannotUndo")}</ErrorText>
+        <div className="mt-4 flex justify-end gap-2">
+          <Button variant="ghost" onClick={closeGroupDeleteModal} disabled={groupDeleteLoading}>
+            {tCommon("cancel")}
+          </Button>
+          <Button variant="danger" onClick={confirmDeleteGroup} disabled={!canEdit || groupDeleteLoading} title={!canEdit ? readOnlyTitle : undefined}>
+            {groupDeleteLoading ? t("groups.deleting") : t("groups.deleteConfirm")}
+          </Button>
         </div>
-      )}
+      </Modal>
 
-      {subgroupToDelete && (
-        <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center px-4">
-          <div className="w-full max-w-md rounded-2xl bg-[var(--color-card)] p-6 shadow-lg space-y-4">
-            <div className="flex items-center justify-between">
-              <h3 className="text-lg font-semibold">
-                Delete subgroup &quot;{subgroupToDelete.subgroup.name}&quot;?
-              </h3>
-              <Button variant="ghost" size="sm" onClick={closeSubgroupDeleteModal}>
-                Close
-              </Button>
-            </div>
-            {subgroupDeleteError && <ErrorText className="text-sm">{subgroupDeleteError}</ErrorText>}
-            <p className="text-sm text-[var(--color-muted)]">
-              This subgroup has {subgroupVariableCount} variables assigned. They will remain in &quot;
-              {subgroupToDelete.group.name}&quot; but without subgroup.
-            </p>
-            <ErrorText className="text-xs">This action cannot be undone.</ErrorText>
-            <div className="flex justify-end gap-2">
-              <Button variant="ghost" onClick={closeSubgroupDeleteModal} disabled={subgroupDeleteLoading}>
-                Cancel
-              </Button>
-              <Button
-                variant="danger"
-                onClick={confirmDeleteSubgroup}
-                disabled={!canEdit || subgroupDeleteLoading}
-                title={!canEdit ? "Solo lectura: tu rol es Visualizador" : undefined}
-              >
-                {subgroupDeleteLoading ? "Deleting..." : "Delete subgroup"}
-              </Button>
-            </div>
-          </div>
+      <Modal
+        open={!!subgroupToDelete}
+        onClose={closeSubgroupDeleteModal}
+        title={t("groups.deleteSubgroupTitle", { name: subgroupToDelete?.subgroup.name ?? "" })}
+      >
+        {subgroupDeleteError && <ErrorText className="text-sm">{subgroupDeleteError}</ErrorText>}
+        <p className="text-sm text-ink">
+          {t("groups.deleteSubgroupBody", { count: subgroupVariableCount, group: subgroupToDelete?.group.name ?? "" })}
+        </p>
+        <ErrorText className="text-xs">{t("groups.cannotUndo")}</ErrorText>
+        <div className="mt-4 flex justify-end gap-2">
+          <Button variant="ghost" onClick={closeSubgroupDeleteModal} disabled={subgroupDeleteLoading}>
+            {tCommon("cancel")}
+          </Button>
+          <Button
+            variant="danger"
+            onClick={confirmDeleteSubgroup}
+            disabled={!canEdit || subgroupDeleteLoading}
+            title={!canEdit ? readOnlyTitle : undefined}
+          >
+            {subgroupDeleteLoading ? t("groups.deleting") : t("groups.deleteSubgroupConfirm")}
+          </Button>
         </div>
-      )}
+      </Modal>
     </section>
   );
 }
@@ -1397,6 +1415,7 @@ function VariableRow({
   onDragStart,
   onDragEnd,
   onHistory,
+  historyLabel,
 }: {
   variable: Variable;
   selected: boolean;
@@ -1404,35 +1423,38 @@ function VariableRow({
   onDragStart: (event: React.DragEvent) => void;
   onDragEnd: () => void;
   onHistory: () => void;
+  historyLabel: string;
 }) {
   return (
     <div
-      className="rounded-2xl border border-[var(--color-border)] p-3 text-sm bg-[var(--color-card)] cursor-grab active:cursor-grabbing"
+      className="rounded-xl border border-line p-3 text-sm bg-surface cursor-grab active:cursor-grabbing"
       draggable
       onDragStart={onDragStart}
       onDragEnd={onDragEnd}
     >
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
+          <GripVertical className="h-4 w-4 shrink-0 text-muted" aria-hidden />
           <input
             type="checkbox"
             checked={selected}
             onClick={(e) => e.stopPropagation()}
             onChange={onToggleSelect}
+            aria-label={variable.name}
           />
           <div>
-            <p className="font-medium">{variable.name}</p>
-            <p className="text-xs text-[var(--color-muted)]">{variable.dtype}</p>
+            <p className="font-medium text-ink">{variable.name}</p>
+            <p className="text-xs text-muted">{variable.dtype}</p>
           </div>
         </div>
-        <div className="flex gap-1">
+        <div className="flex items-center gap-1">
           {variable.is_derived && <Badge variant="neutral">fx</Badge>}
           {(variable.group_name || variable.subgroup_name) && (
             <Badge variant="neutral">{variable.subgroup_name || variable.group_name}</Badge>
           )}
           {variable.is_derived && (
-            <button className="text-xs text-[var(--color-accent)] underline" onClick={onHistory}>
-              history
+            <button className="text-xs text-accent underline" onClick={onHistory}>
+              {historyLabel}
             </button>
           )}
         </div>
@@ -1445,16 +1467,18 @@ function GroupAssignments({
   variables,
   groupId,
   subgroupIds,
+  label,
 }: {
   variables: Variable[];
   groupId: string;
   subgroupIds: string[];
+  label: string;
 }) {
   const members = variables.filter((v) => v.group_id === groupId || subgroupIds.includes(v.subgroup_id || ""));
   if (!members.length) return null;
   return (
-    <div className="text-xs text-[var(--color-muted)]">
-      Assigned:{" "}
+    <div className="text-xs text-muted">
+      {label}:{" "}
       {members.map((m, idx) => (
         <span key={m.id}>{idx > 0 && ", "}{m.name}</span>
       ))}
@@ -1464,9 +1488,15 @@ function GroupAssignments({
 
 function PreviewChart({
   data,
+  originalLabel,
+  transformedLabel,
 }: {
   data: { time: (string | number)[]; original: (number | null)[]; transformed: (number | null)[] };
+  originalLabel: string;
+  transformedLabel: string;
 }) {
+  const { resolvedTheme } = useTheme();
+  const isDark = resolvedTheme === "dark";
   const chartData = data.time.map((time, index) => ({
     time,
     original: data.original[index],
@@ -1475,15 +1505,15 @@ function PreviewChart({
 
   return (
     <div className="w-full">
-      <ResponsiveContainer width="100%" height={220}>
+      <ResponsiveContainer width="100%" height={240}>
         <LineChart data={chartData}>
           <CartesianGrid strokeDasharray="3 3" />
           <XAxis dataKey="time" tick={{ fontSize: 10 }} minTickGap={20} />
           <YAxis tick={{ fontSize: 10 }} />
-          <Tooltip />
+          <RechartsTooltip />
           <Legend />
-          <Line type="monotone" dataKey="original" name="Original" stroke="var(--color-muted)" dot={false} />
-          <Line type="monotone" dataKey="transformed" name="Transformed" stroke="var(--color-accent)" dot={false} />
+          <Line type="monotone" dataKey="original" name={originalLabel} stroke={chartColor(0, isDark)} dot={false} />
+          <Line type="monotone" dataKey="transformed" name={transformedLabel} stroke={chartColor(1, isDark)} dot={false} />
         </LineChart>
       </ResponsiveContainer>
     </div>

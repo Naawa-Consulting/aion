@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends
 from sqlmodel import Session, func, select
 
 from ..auth import (
@@ -13,6 +13,7 @@ from ..auth import (
     require_platform_admin,
 )
 from ..db import get_session
+from ..errors import api_error
 from ..models import Company, Dataset, Membership
 from ..schemas import (
     AddMembershipRequest,
@@ -45,7 +46,7 @@ def lookup_user_by_email(
 ):
     found = find_user_by_email(email)
     if not found:
-        raise HTTPException(status_code=404, detail="No user found with that email")
+        raise api_error(404, "USER_NOT_FOUND", "No user found with that email")
     return UserLookupOut(user_id=found["id"], email=found.get("email", email))
 
 
@@ -55,7 +56,11 @@ def create_company(
     user: CurrentUser = Depends(require_platform_admin),
     session: Session = Depends(get_session),
 ):
-    company = Company(id=str(uuid.uuid4()), name=body.name.strip())
+    company = Company(
+        id=str(uuid.uuid4()),
+        name=body.name.strip(),
+        currency_code=body.currency_code.strip().upper(),
+    )
     session.add(company)
     membership = Membership(
         id=str(uuid.uuid4()),
@@ -65,7 +70,9 @@ def create_company(
     )
     session.add(membership)
     session.commit()
-    return CompanyOut(id=company.id, name=company.name, created_at=company.created_at)
+    return CompanyOut(
+        id=company.id, name=company.name, currency_code=company.currency_code, created_at=company.created_at
+    )
 
 
 @router.get("/companies", response_model=list[CompanyOut])
@@ -74,11 +81,14 @@ def list_companies(
     session: Session = Depends(get_session),
 ):
     companies = session.exec(select(Company).order_by(Company.created_at.desc())).all()
-    return [CompanyOut(id=c.id, name=c.name, created_at=c.created_at) for c in companies]
+    return [
+        CompanyOut(id=c.id, name=c.name, currency_code=c.currency_code, created_at=c.created_at)
+        for c in companies
+    ]
 
 
 @router.patch("/companies/{company_id}", response_model=CompanyOut)
-def rename_company(
+def update_company(
     company_id: str,
     body: UpdateCompanyRequest,
     user: CurrentUser = Depends(require_platform_admin),
@@ -86,11 +96,15 @@ def rename_company(
 ):
     company = session.get(Company, company_id)
     if not company:
-        raise HTTPException(status_code=404, detail="Company not found")
+        raise api_error(404, "COMPANY_NOT_FOUND", "Company not found")
     company.name = body.name.strip()
+    if body.currency_code:
+        company.currency_code = body.currency_code.strip().upper()
     session.add(company)
     session.commit()
-    return CompanyOut(id=company.id, name=company.name, created_at=company.created_at)
+    return CompanyOut(
+        id=company.id, name=company.name, currency_code=company.currency_code, created_at=company.created_at
+    )
 
 
 @router.delete("/companies/{company_id}")
@@ -101,7 +115,7 @@ def delete_company(
 ):
     company = session.get(Company, company_id)
     if not company:
-        raise HTTPException(status_code=404, detail="Company not found")
+        raise api_error(404, "COMPANY_NOT_FOUND", "Company not found")
     member_count = session.exec(
         select(func.count()).select_from(Membership).where(Membership.company_id == company_id)
     ).one()
@@ -109,12 +123,15 @@ def delete_company(
         select(func.count()).select_from(Dataset).where(Dataset.company_id == company_id)
     ).one()
     if member_count or dataset_count:
-        raise HTTPException(
-            status_code=400,
-            detail=(
+        raise api_error(
+            400,
+            "COMPANY_HAS_DEPENDENTS",
+            (
                 f"Cannot delete a company with existing data ({member_count} members, "
                 f"{dataset_count} datasets) — remove members and datasets first."
             ),
+            member_count=member_count,
+            dataset_count=dataset_count,
         )
     session.delete(company)
     session.commit()
@@ -151,7 +168,7 @@ def add_member(
         select(Membership).where(Membership.company_id == company_id, Membership.user_id == body.user_id)
     ).first()
     if existing:
-        raise HTTPException(status_code=409, detail="User is already a member of this company")
+        raise api_error(409, "MEMBERSHIP_ALREADY_EXISTS", "User is already a member of this company")
     new_member = Membership(
         id=str(uuid.uuid4()), user_id=body.user_id, company_id=company_id, role=body.role
     )
@@ -178,7 +195,7 @@ def update_member_role(
         select(Membership).where(Membership.company_id == company_id, Membership.user_id == user_id)
     ).first()
     if not target:
-        raise HTTPException(status_code=404, detail="Membership not found")
+        raise api_error(404, "MEMBERSHIP_NOT_FOUND", "Membership not found")
     target.role = body.role
     session.add(target)
     session.commit()
@@ -202,7 +219,7 @@ def remove_member(
         select(Membership).where(Membership.company_id == company_id, Membership.user_id == user_id)
     ).first()
     if not target:
-        raise HTTPException(status_code=404, detail="Membership not found")
+        raise api_error(404, "MEMBERSHIP_NOT_FOUND", "Membership not found")
     session.delete(target)
     session.commit()
     return {"status": "ok"}

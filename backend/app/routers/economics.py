@@ -11,6 +11,7 @@ from sqlmodel import Session, select
 
 from ..auth import CurrentMembership, get_current_membership, require_write_access
 from ..db import get_session
+from ..errors import api_error
 from ..models import ConversionSettings, Dataset, InvestmentChannel, Variable
 from ..routers.analysis import (
     _apply_date_filter,
@@ -71,22 +72,24 @@ def _validate_channel_config(
     columns = _dataset_column_names(ds)
     if source_mode == "dataset_column":
         if not config.cost_column:
-            raise HTTPException(status_code=400, detail="cost_column is required for dataset_column mode")
+            raise api_error(400, "CHANNEL_COST_COLUMN_REQUIRED", "cost_column is required for dataset_column mode")
         if config.cost_column not in columns:
-            raise HTTPException(status_code=400, detail=f"Column not found in dataset: {config.cost_column}")
+            raise api_error(400, "COLUMN_NOT_FOUND", f"Column not found in dataset: {config.cost_column}")
     elif source_mode == "rate_metric":
         if config.rate_value is None or not config.metric_column:
-            raise HTTPException(status_code=400, detail="rate_value and metric_column are required for rate_metric mode")
+            raise api_error(
+                400, "CHANNEL_RATE_METRIC_FIELDS_REQUIRED", "rate_value and metric_column are required for rate_metric mode"
+            )
         if config.metric_column not in columns:
-            raise HTTPException(status_code=400, detail=f"Column not found in dataset: {config.metric_column}")
+            raise api_error(400, "COLUMN_NOT_FOUND", f"Column not found in dataset: {config.metric_column}")
     elif source_mode == "manual":
         if not config.entries:
-            raise HTTPException(status_code=400, detail="At least one entry is required for manual mode")
+            raise api_error(400, "CHANNEL_MANUAL_ENTRIES_REQUIRED", "At least one entry is required for manual mode")
         for entry in config.entries:
             if entry.end_date < entry.start_date:
-                raise HTTPException(status_code=400, detail="Manual entry end_date must not be before start_date")
+                raise api_error(400, "INVALID_DATE_RANGE", "Manual entry end_date must not be before start_date")
     else:
-        raise HTTPException(status_code=400, detail=f"Invalid source_mode: {source_mode}")
+        raise api_error(400, "INVALID_SOURCE_MODE", f"Invalid source_mode: {source_mode}")
 
 
 def _validate_proxy_variable(session: Session, ds: Dataset, company_id: str, proxy_variable: Optional[str]) -> None:
@@ -100,7 +103,7 @@ def _validate_proxy_variable(session: Session, ds: Dataset, company_id: str, pro
         )
     ).first()
     if not exists:
-        raise HTTPException(status_code=400, detail=f"Variable not found in dataset: {proxy_variable}")
+        raise api_error(400, "PROXY_VARIABLE_NOT_FOUND", f"Variable not found in dataset: {proxy_variable}")
 
 
 def _channel_out(channel: InvestmentChannel) -> InvestmentChannelOut:
@@ -143,7 +146,7 @@ def create_channel(
 
     name = body.name.strip()
     if not name:
-        raise HTTPException(status_code=400, detail="Name cannot be empty")
+        raise api_error(400, "CHANNEL_NAME_EMPTY", "Name cannot be empty")
     conflict = session.exec(
         select(InvestmentChannel).where(
             InvestmentChannel.company_id == membership.company_id,
@@ -152,7 +155,7 @@ def create_channel(
         )
     ).first()
     if conflict:
-        raise HTTPException(status_code=400, detail="A channel with this name already exists")
+        raise api_error(400, "DUPLICATE_CHANNEL_NAME", "A channel with this name already exists")
 
     channel = InvestmentChannel(
         id=str(uuid.uuid4()),
@@ -182,7 +185,7 @@ def update_channel(
     if body.name is not None:
         name = body.name.strip()
         if not name:
-            raise HTTPException(status_code=400, detail="Name cannot be empty")
+            raise api_error(400, "CHANNEL_NAME_EMPTY", "Name cannot be empty")
         conflict = session.exec(
             select(InvestmentChannel).where(
                 InvestmentChannel.company_id == membership.company_id,
@@ -192,7 +195,7 @@ def update_channel(
             )
         ).first()
         if conflict:
-            raise HTTPException(status_code=400, detail="A channel with this name already exists")
+            raise api_error(400, "DUPLICATE_CHANNEL_NAME", "A channel with this name already exists")
         channel.name = name
 
     new_mode = body.source_mode if body.source_mode is not None else channel.source_mode
@@ -203,7 +206,7 @@ def update_channel(
     elif body.source_mode is not None:
         # switching mode without a new config is meaningless — the existing config almost
         # certainly won't match the new mode's required fields
-        raise HTTPException(status_code=400, detail="config is required when changing source_mode")
+        raise api_error(400, "CHANNEL_CONFIG_REQUIRED_FOR_MODE_CHANGE", "config is required when changing source_mode")
 
     if body.unset_proxy_variable:
         channel.proxy_variable = None
@@ -272,22 +275,26 @@ def _validate_conversion_metric_config(ds: Dataset, metric: ConversionMetricInpu
     config = metric.config
     if mode == "manual":
         if config.value is None:
-            raise HTTPException(status_code=400, detail=f"value is required for {label} in manual mode")
+            raise api_error(400, "CONVERSION_VALUE_REQUIRED", f"value is required for {label} in manual mode", field=label)
     elif mode == "dataset_column":
         if not config.column:
-            raise HTTPException(status_code=400, detail=f"column is required for {label} in dataset_column mode")
+            raise api_error(
+                400, "CONVERSION_COLUMN_REQUIRED", f"column is required for {label} in dataset_column mode", field=label
+            )
         if config.column not in columns:
-            raise HTTPException(status_code=400, detail=f"Column not found in dataset: {config.column}")
+            raise api_error(400, "COLUMN_NOT_FOUND", f"Column not found in dataset: {config.column}")
     elif mode == "rate_metric":
         if config.rate_value is None or not config.metric_column:
-            raise HTTPException(
-                status_code=400,
-                detail=f"rate_value and metric_column are required for {label} in rate_metric mode",
+            raise api_error(
+                400,
+                "CONVERSION_RATE_METRIC_FIELDS_REQUIRED",
+                f"rate_value and metric_column are required for {label} in rate_metric mode",
+                field=label,
             )
         if config.metric_column not in columns:
-            raise HTTPException(status_code=400, detail=f"Column not found in dataset: {config.metric_column}")
+            raise api_error(400, "COLUMN_NOT_FOUND", f"Column not found in dataset: {config.metric_column}")
     else:
-        raise HTTPException(status_code=400, detail=f"Invalid source_mode for {label}: {mode}")
+        raise api_error(400, "INVALID_SOURCE_MODE", f"Invalid source_mode for {label}: {mode}", field=label)
 
 
 @router.get("/conversion-settings", response_model=Optional[ConversionSettingsOut])
@@ -358,12 +365,13 @@ def _fit_with_fallback(session: Session, model_id: str, company_id: str, time_co
             session, model_id, company_id, time_col, start_ts, end_ts
         )
     except HTTPException as exc:
-        if exc.detail != "Insufficient rows after cleaning for analysis" or (start_ts is None and end_ts is None):
+        is_insufficient_rows = isinstance(exc.detail, dict) and exc.detail.get("code") == "INSUFFICIENT_ROWS"
+        if not is_insufficient_rows or (start_ts is None and end_ts is None):
             raise
         m, ds, work, X, Xc, y, params, full_df = _fit_from_model(session, model_id, company_id)
         filtered_df = _apply_date_filter(full_df.copy(), getattr(ds, "time_variable", None) or time_col, start_ts, end_ts)
         if filtered_df.empty:
-            raise HTTPException(status_code=400, detail="No rows available for the selected date range")
+            raise api_error(400, "NO_ROWS_IN_RANGE", "No rows available for the selected date range")
     if filtered_df is None:
         filtered_df = work
     return m, ds, work, X, Xc, y, params, filtered_df

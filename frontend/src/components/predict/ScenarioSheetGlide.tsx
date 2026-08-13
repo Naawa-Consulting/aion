@@ -9,10 +9,58 @@ import DataEditor, {
   type Item,
   type DataEditorRef,
   type GridSelection,
+  type Theme as GlideTheme,
   CompactSelection,
 } from "@glideapps/glide-data-grid";
+import { useTheme } from "next-themes";
 
 import "@glideapps/glide-data-grid/dist/index.css";
+
+const LIGHT_GRID_THEME: Partial<GlideTheme> = {
+  accentColor: "#4b3fb0",
+  accentFg: "#ffffff",
+  accentLight: "#eeecfb",
+  textDark: "#17181c",
+  textMedium: "#52555e",
+  textLight: "#6d7178",
+  textBubble: "#17181c",
+  textHeader: "#52555e",
+  textHeaderSelected: "#17181c",
+  bgIconHeader: "#52555e",
+  fgIconHeader: "#fafafb",
+  bgCell: "#ffffff",
+  bgCellMedium: "#fafafb",
+  bgHeader: "#fafafb",
+  bgHeaderHasFocus: "#eeecfb",
+  bgHeaderHovered: "#fafafb",
+  bgBubble: "#fafafb",
+  borderColor: "#e5e6ea",
+  horizontalBorderColor: "#e5e6ea",
+  fontFamily: "var(--font-ui)",
+};
+
+const DARK_GRID_THEME: Partial<GlideTheme> = {
+  ...LIGHT_GRID_THEME,
+  accentColor: "#a79bf5",
+  accentFg: "#0b0c0e",
+  accentLight: "#221d3d",
+  textDark: "#f2f3f5",
+  textMedium: "#aab0b8",
+  textLight: "#81858e",
+  textBubble: "#f2f3f5",
+  textHeader: "#aab0b8",
+  textHeaderSelected: "#f2f3f5",
+  bgIconHeader: "#aab0b8",
+  fgIconHeader: "#1b1e22",
+  bgCell: "#16181b",
+  bgCellMedium: "#1b1e22",
+  bgHeader: "#1b1e22",
+  bgHeaderHasFocus: "#221d3d",
+  bgHeaderHovered: "#1b1e22",
+  bgBubble: "#1b1e22",
+  borderColor: "#262a2f",
+  horizontalBorderColor: "#262a2f",
+};
 
 type ScenarioVariable = {
   name: string;
@@ -33,6 +81,8 @@ export type ScenarioSheetGlideProps = {
     next: MultipliersMap,
     nextAbsolute?: AbsoluteValuesMap
   ) => void;
+  groupColumnLabel?: string;
+  variableColumnLabel?: string;
 };
 
 const DEFAULT_ROWS = 20;
@@ -75,7 +125,12 @@ const ScenarioSheetGlide: React.FC<ScenarioSheetGlideProps> = ({
   absoluteValues,
   editMode = "multipliers",
   onMultipliersChange,
+  groupColumnLabel = "Group",
+  variableColumnLabel = "Variable",
 }) => {
+  const { resolvedTheme } = useTheme();
+  const gridTheme = resolvedTheme === "dark" ? DARK_GRID_THEME : LIGHT_GRID_THEME;
+
   const [sortState, setSortState] = useState<{
     column: "group" | "variable" | null;
     direction: "asc" | "desc";
@@ -94,11 +149,11 @@ const ScenarioSheetGlide: React.FC<ScenarioSheetGlideProps> = ({
 
   const columns: GridColumn[] = useMemo(
     () => [
-      { id: "group", title: "Group", width: 160 },
-      { id: "variable", title: "Variable", width: 220 },
+      { id: "group", title: groupColumnLabel, width: 160 },
+      { id: "variable", title: variableColumnLabel, width: 220 },
       ...periodLabels.map((label) => ({ id: label, title: label, grow: 1 })),
     ],
-    [periodLabels]
+    [periodLabels, groupColumnLabel, variableColumnLabel]
   );
 
   const totalColumns = 2 + periodCount;
@@ -465,8 +520,8 @@ const ScenarioSheetGlide: React.FC<ScenarioSheetGlideProps> = ({
       style={{
         width: "100%",
         height: 420,
-        borderRadius: 16,
-        border: "1px solid var(--color-border, #e5e7eb)",
+        borderRadius: 12,
+        border: "1px solid var(--line)",
         overflow: "hidden",
         position: "relative",
       }}
@@ -476,6 +531,7 @@ const ScenarioSheetGlide: React.FC<ScenarioSheetGlideProps> = ({
     >
       <DataEditor
         ref={editorRef}
+        theme={gridTheme}
         columns={columns}
         rows={gridData.length}
         getCellContent={getCellContent}
@@ -525,13 +581,13 @@ const ScenarioSheetGlide: React.FC<ScenarioSheetGlideProps> = ({
             top: activeEdit.rect.y,
             width: activeEdit.rect.width,
             height: activeEdit.rect.height,
-            border: "2px solid var(--color-accent)",
+            border: "2px solid var(--accent)",
             borderRadius: 4,
             padding: "0 8px",
             fontSize: 14,
             zIndex: 5,
-            background: "var(--color-card)",
-            color: "var(--color-foreground)",
+            background: "var(--surface)",
+            color: "var(--ink)",
           }}
           value={activeEdit.value}
           onChange={(event) =>

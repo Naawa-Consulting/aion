@@ -13,6 +13,7 @@ def utcnow() -> datetime:
 class Company(SQLModel, table=True):
     id: str = Field(primary_key=True)  # uuid string
     name: str
+    currency_code: str = Field(default="MXN", nullable=False)  # ISO 4217, e.g. "MXN", "USD"
     created_at: datetime = Field(default_factory=utcnow, nullable=False)
 
 

@@ -35,6 +35,9 @@ aportan contexto). Convenciones y arquitectura conceptual completas en `CLAUDE.m
   económica; `InvestmentChannel` es un catálogo por-dataset (gasto real en $, desacoplado de qué
   variable entró al modelo — ver `app/services/economics.py`).
 - `app/schemas.py` — modelos Pydantic de request/response usados por los routers.
+- `app/errors.py` — `api_error()` (Fase 7.9): construye `HTTPException`s con `detail={code,
+  message, ...extra}` en vez de texto plano, para los ~35 errores 4xx visibles al usuario final
+  (habilita `lib/error-messages.ts::translateApiError()` en el frontend).
 - `app/routers/datasets.py` — Módulo 1: upload, versionado, sample size, variable temporal.
 - `app/routers/variables.py` — Módulo 2: filtros, transformaciones, categorización,
   historial/undo.
@@ -81,53 +84,83 @@ aportan contexto). Convenciones y arquitectura conceptual completas en `CLAUDE.m
 ## `frontend/` (Next.js 14, App Router)
 
 - `middleware.ts` (raíz) — gate de sesión: redirige a `/login` si no hay usuario autenticado.
-- `src/app/(app)/` — route group con los 5 módulos de producto + `layout.tsx` propio (Header +
-  `AuthBootstrap`); el paréntesis no afecta las URLs (`/datasets` sigue siendo `/datasets`).
+- `src/app/(app)/` — route group con los 5 módulos de producto + `layout.tsx` propio (monta
+  `AuthBootstrap` + `components/AppShell.tsx`); el paréntesis no afecta las URLs (`/datasets`
+  sigue siendo `/datasets`).
   - `datasets/page.tsx` — UI Módulo 1. `transform/page.tsx` — Módulo 2. `modeling/page.tsx` —
     Módulo 3. `analysis/page.tsx` — Módulo 4. `predict/page.tsx` — Módulo 5.
   - `executive-summary/page.tsx` — "Resumen Ejecutivo" (Fase 6): vista de nivel superior
     autocontenida (selectores propios, no el store global), reusa las llamadas de `/analysis` +
     el optimizador de presupuesto compartido con el modo Planner de Predict.
+  - `admin/page.tsx` — panel "Compañías" (platform admin) + panel "Miembros" (`admin_compania`
+    de la compañía activa).
   - `upload/page.tsx` — pantalla legacy de upload, reemplazada por `/datasets` (candidata a
     limpieza).
 - `src/app/login/page.tsx`, `src/app/auth/callback/route.ts`, `src/app/reset-password/page.tsx`
-  — fuera del route group `(app)`, para que no hereden el header/nav de producto.
-- `src/app/layout.tsx` — layout raíz: solo `ThemeProvider` + `Toaster` (sin Header, eso vive en
-  `(app)/layout.tsx`).
+  — fuera del route group `(app)`, para que no hereden el shell de producto.
+- `src/app/layout.tsx` — layout raíz: `ThemeProvider` + `LocaleProvider` + `Toaster` (sin shell,
+  eso vive en `(app)/layout.tsx`).
+- `src/components/AppShell.tsx` — chrome de producto (Fase 7.3, Dirección C "Panel" —
+  `docs/DIRECCION-VISUAL.md`): resuelve `usePipelineContext()` una sola vez y lo pasa a
+  `Sidebar.tsx` (colapsable, pipeline numerado 1-5 + indicadores de paso incompleto, separador +
+  Resumen Ejecutivo/Admin, drawer en móvil) y a `TopBar.tsx` (hamburguesa en móvil,
+  `CompanySwitcher`, toggle de idioma `ES`/`EN`, toggle de tema, `UserMenu`).
+- `src/hooks/usePipelineContext.ts` — resuelve `hasDataset`/`hasTimeVariable`/`hasHeroModel` a
+  partir de `GET /datasets` + `GET /datasets/{id}/models-with-roles`, para los indicadores de
+  paso incompleto del Sidebar (una sola resolución en `AppShell`, no una por página).
 - `src/lib/supabase/{client,server,middleware}.ts` — clientes de Supabase Auth (browser/server/
   helper de middleware).
 - `src/lib/api.ts` — `apiFetch`/`ApiError`/`getAuthHeaders`: cliente HTTP compartido hacia el
   backend, agrega `Authorization`+`X-Company-Id` a cada request. Todas las páginas de producto
   pasan por aquí — no volver a declarar `fetch` directo a `${API_URL}`.
 - `src/lib/store.ts` — store Zustand: selección global (`datasetId`, `modelId`) + sesión
-  (`userId`/`userEmail`/`memberships`/`activeCompanyId`, persistido).
+  (`userId`/`userEmail`/`memberships`/`isPlatformAdmin`/`membershipsLoading`/`activeCompanyId`;
+  solo `activeCompanyId` se persiste — el resto se re-resuelve en cada carga vía
+  `AuthBootstrap`/`/me/memberships`, `membershipsLoading` evita que páginas gateadas por rol
+  (`/admin`) decidan "sin permisos" antes de que esa resolución termine).
 - `src/lib/roles.ts` — labels/badge-variant por rol.
-- `src/hooks/useCanEdit.ts` — `useCanEdit()`/`useActiveRole()`: gating de UI por rol de la
-  compañía activa.
+- `src/lib/error-messages.ts` — `translateApiError()`: traduce `ApiError.code` (Fase 7.9) al
+  namespace i18n `errors`, con fallback al `message` crudo del backend.
+- `src/hooks/useCanEdit.ts` — `useCanEdit()`/`useActiveRole()`/`useIsPlatformAdmin()`/
+  `useCanManageUsers()`: gating de UI por rol de la compañía activa / platform admin.
+- `src/hooks/useActiveCompany.ts` — `useActiveCurrency()`: moneda (`Company.currency_code`,
+  Fase 7.9) de la compañía activa, para formateo de montos.
+- `src/hooks/useMediaQuery.ts` — breakpoint helper (Fase 7.7), decide el fallback accesible de
+  Predict (`ScenarioSheetTable` bajo `lg`, `ScenarioSheetGlide` en `lg`+).
 - `src/components/company-switcher.tsx`, `src/components/user-menu.tsx` — selector de compañía y
-  menú de usuario en el header (usan `src/components/ui/dropdown.tsx`, primitivo nuevo).
+  menú de usuario en el header (usan `src/components/ui/dropdown.tsx`).
 - `src/components/providers/auth-bootstrap.tsx` — hidrata sesión + memberships al montar
   `(app)/layout.tsx`.
-- `src/components/ui/` — primitivos compartidos: `button`, `card`, `badge`, `modal`, `input`,
-  `filter-bar`, `progress`, `dropdown`. Preferir reusar estos antes de crear uno nuevo.
+- `src/components/providers/locale-provider.tsx` — `LocaleProvider`/`useLocaleToggle()`: locale
+  `es`/`en` en `localStorage` (`aion-locale`, sin prefijo de ruta), envuelve `NextIntlClientProvider`
+  — mismo patrón que `next-themes`.
+- `src/components/ui/` — primitivos compartidos (Dirección C, Fase 7.2+): `button`, `card`,
+  `badge`, `modal`, `input`, `select`, `filter-bar`, `progress`, `dropdown`, `toggle-chip`,
+  `error-text`, `eyebrow`, `icon-button`, `skeleton`, `empty-state`, `page-header`, `stat-card`,
+  `table`, `row-actions`, `tooltip`, `tabs` (Fase 7.5), `disclosure` (Fase 7.5, Resumen/Detalle).
+  Preferir reusar estos antes de crear uno nuevo.
 - `src/components/modeling/SelectedPredictorsQuickView.tsx` — resumen de predictores
   seleccionados en Modeling.
 - `src/components/transform/investment-channels.tsx` — tarjeta CRUD de canales de inversión
   (capa económica), renderizada dentro de `/transform`.
-- `src/components/analysis/economics-section.tsx` — vista de Economía/ROI (cards, tabla por
-  canal, serie de tiempo), renderizada dentro de `/analysis` vía el toggle
-  Contribución/Economía.
-- `src/components/predict/ScenarioGrid.tsx` y `ScenarioSheetGlide.tsx` — dos implementaciones de
-  la grilla editable de escenarios (`react-data-grid` vs. `@glideapps/glide-data-grid`) —
-  revisar cuál usa cada vista antes de asumir que aplica a ambas.
+- `src/components/predict/ScenarioSheetGlide.tsx` — grilla editable de escenarios sobre
+  `@glideapps/glide-data-grid` (canvas), única librería de grid en el proyecto desde Fase 0
+  (`ScenarioGrid.tsx`/`react-data-grid` ya no existen). Usada solo en "Vista avanzada" y solo
+  en pantallas `lg`+ (≥1024px) — un canvas es invisible para lectores de pantalla y poco usable
+  al tacto (Fase 7.7). `hooks/useMediaQuery.ts` decide el corte de breakpoint en `predict/page.tsx`.
+- `src/components/predict/ScenarioSheetTable.tsx` (Fase 7.7) — equivalente accesible en DOM real
+  (tabla + `<input>` por celda) de la grilla anterior, renderizado por debajo de `lg`. Mismo
+  contrato `onMultipliersChange` que `ScenarioSheetGlide`, intercambiables desde `predict/page.tsx`.
 - `src/components/predict/PlannerView.tsx` (Fase 6) — input de presupuesto + optimizador +
-  asignación editable por canal; renderizado dentro de `/predict` (modo Planner, con
-  `onApply` para escribir la asignación en el escenario) y dentro de `/executive-summary`
-  (sin `onApply`, solo lectura de la asignación sugerida).
+  asignación editable por canal; modo por defecto en `/predict` desde Fase 7.7 (antes era
+  "Vista avanzada" la que abría por defecto — ver `BITACORA.md`).
 - `src/lib/format.ts` — formateo de números/fechas.
-- `src/lib/i18n.ts` — diccionario de traducción (incipiente, solo unas pocas claves hoy).
-- `next.config.mjs` — `typescript.ignoreBuildErrors: true` (tapón temporal, ver pendiente de
-  limpieza de tipos en `BITACORA.md`).
+- `src/lib/i18n/messages/{en,es}.json` — diccionarios `next-intl` (Fase 7.2+), una clave de
+  namespace por página/módulo (`modeling`, `analysis`, `predict`, `planner`, ...); preferencia de
+  idioma en `localStorage` (`aion-locale`), sin prefijo de ruta.
+- `next.config.mjs` — type-check activo (`ignoreBuildErrors` eliminado en la Fase 7.0; ver
+  "Descubierto durante la implementación de fase 1" en `BITACORA.md` para la causa raíz de los
+  errores preexistentes que bloqueaban reactivarlo).
 - `package.json` — scripts y dependencias (recharts, zustand, sonner, react-dropzone, data grids,
   `@supabase/supabase-js`, `@supabase/ssr`).
 

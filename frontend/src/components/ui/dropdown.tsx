@@ -8,11 +8,12 @@ type DropdownProps = {
   trigger: React.ReactNode;
   children: React.ReactNode;
   align?: "left" | "right";
+  triggerAriaLabel?: string;
 };
 
 // Minimal dropdown — no positioning engine (Popper/Floating UI) since both current
 // uses just need a simple absolute panel under the trigger.
-export function Dropdown({ trigger, children, align = "right" }: DropdownProps) {
+export function Dropdown({ trigger, children, align = "right", triggerAriaLabel }: DropdownProps) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
 
@@ -34,7 +35,13 @@ export function Dropdown({ trigger, children, align = "right" }: DropdownProps) 
 
   return (
     <div ref={ref} className="relative">
-      <button type="button" onClick={() => setOpen((o) => !o)}>
+      <button
+        type="button"
+        aria-label={triggerAriaLabel}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        onClick={() => setOpen((o) => !o)}
+      >
         {trigger}
       </button>
       <AnimatePresence>

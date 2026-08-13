@@ -92,7 +92,7 @@ export default function ResetPasswordPage() {
                   autoComplete="email"
                 />
                 {error && <ErrorText className="text-sm">{error}</ErrorText>}
-                {message && <p className="text-sm text-[var(--color-accent)]">{message}</p>}
+                {message && <p className="text-sm text-accent">{message}</p>}
                 <Button type="submit" disabled={loading} className="w-full">
                   {loading ? "Enviando..." : "Enviar enlace"}
                 </Button>

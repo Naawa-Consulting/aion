@@ -12,6 +12,7 @@ from sqlmodel import Session, select, delete
 
 from ..auth import CurrentMembership, get_current_membership, require_write_access
 from ..db import get_session
+from ..errors import api_error
 from ..models import Dataset, Variable, VariableHistory, Subgroup, Group
 from ..services.media_transform import adstock_geometric, hill_saturation
 from ..tenancy import get_scoped
@@ -36,7 +37,7 @@ def _read_df(ds: Dataset) -> pd.DataFrame:
     try:
         return load_dataset_frame(ds)
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+        raise api_error(400, "DATASET_LOAD_ERROR", str(exc))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed reading dataset: {e}")
 
@@ -190,26 +191,26 @@ def create_transformation(
 
     new_name = body.new_name.strip()
     if not new_name:
-        raise HTTPException(status_code=400, detail="New variable name cannot be empty")
+        raise api_error(400, "VARIABLE_NAME_EMPTY", "New variable name cannot be empty")
     if new_name in df.columns:
-        raise HTTPException(status_code=400, detail="New variable name already exists")
+        raise api_error(400, "VARIABLE_NAME_CONFLICT", "New variable name already exists")
 
     op = body.op
     series = None
 
     if op == "lag":
         if not body.column or body.n is None:
-            raise HTTPException(status_code=400, detail="column and n required for lag")
+            raise api_error(400, "TRANSFORM_PARAM_REQUIRED", "column and n required for lag")
         if body.column not in df.columns:
-            raise HTTPException(status_code=400, detail="column not found")
+            raise api_error(400, "COLUMN_NOT_FOUND", "column not found")
         series = df[body.column].shift(int(body.n))
     elif op == "decay":
         if not body.column or body.alpha is None:
-            raise HTTPException(status_code=400, detail="column and alpha required for decay")
+            raise api_error(400, "TRANSFORM_PARAM_REQUIRED", "column and alpha required for decay")
         if not (0 <= float(body.alpha) < 1):
-            raise HTTPException(status_code=400, detail="alpha must be in [0,1)")
+            raise api_error(400, "INVALID_RATE_RANGE", "alpha must be in [0,1)")
         if body.column not in df.columns:
-            raise HTTPException(status_code=400, detail="column not found")
+            raise api_error(400, "COLUMN_NOT_FOUND", "column not found")
         alpha = float(body.alpha)
         vals = pd.to_numeric(df[body.column], errors="coerce").fillna(0.0).to_numpy(dtype=float)
         out = np.empty_like(vals)
@@ -220,16 +221,16 @@ def create_transformation(
         series = pd.Series(out, index=df.index)
     elif op == "log":
         if not body.column:
-            raise HTTPException(status_code=400, detail="column required for log")
+            raise api_error(400, "TRANSFORM_PARAM_REQUIRED", "column required for log")
         if body.column not in df.columns:
-            raise HTTPException(status_code=400, detail="column not found")
+            raise api_error(400, "COLUMN_NOT_FOUND", "column not found")
         vals = pd.to_numeric(df[body.column], errors="coerce")
         series = pd.Series(np.where(vals > 0, np.log(vals), np.nan), index=df.index)
     elif op in {"add", "sub", "mul", "div"}:
         if not body.left or not body.right:
-            raise HTTPException(status_code=400, detail="left and right required for arithmetic")
+            raise api_error(400, "TRANSFORM_PARAM_REQUIRED", "left and right required for arithmetic")
         if body.left not in df.columns or body.right not in df.columns:
-            raise HTTPException(status_code=400, detail="operand column not found")
+            raise api_error(400, "COLUMN_NOT_FOUND", "operand column not found")
         if op == "add":
             series = df[body.left] + df[body.right]
         elif op == "sub":
@@ -240,22 +241,22 @@ def create_transformation(
             series = df[body.left] / df[body.right]
     elif op == "hill":
         if not body.column or body.k is None or body.s is None:
-            raise HTTPException(status_code=400, detail="column, k and s required for hill")
+            raise api_error(400, "TRANSFORM_PARAM_REQUIRED", "column, k and s required for hill")
         if body.column not in df.columns:
-            raise HTTPException(status_code=400, detail="column not found")
+            raise api_error(400, "COLUMN_NOT_FOUND", "column not found")
         vals = pd.to_numeric(df[body.column], errors="coerce").fillna(0.0).to_numpy(dtype=float)
         series = pd.Series(hill_saturation(vals, float(body.k), float(body.s)), index=df.index)
     elif op == "adstock":
         if not body.column or body.decay is None:
-            raise HTTPException(status_code=400, detail="column and decay required for adstock")
+            raise api_error(400, "TRANSFORM_PARAM_REQUIRED", "column and decay required for adstock")
         if not (0 <= float(body.decay) < 1):
-            raise HTTPException(status_code=400, detail="decay must be in [0,1)")
+            raise api_error(400, "INVALID_RATE_RANGE", "decay must be in [0,1)")
         if body.column not in df.columns:
-            raise HTTPException(status_code=400, detail="column not found")
+            raise api_error(400, "COLUMN_NOT_FOUND", "column not found")
         vals = pd.to_numeric(df[body.column], errors="coerce").fillna(0.0).to_numpy(dtype=float)
         series = pd.Series(adstock_geometric(vals, float(body.decay)), index=df.index)
     else:
-        raise HTTPException(status_code=400, detail="Unsupported operation")
+        raise api_error(400, "UNSUPPORTED_OPERATION", "Unsupported operation")
 
     df[new_name] = series
     _write_df(ds, df)
@@ -313,7 +314,7 @@ def categorize_variable(
         subgroup = get_scoped(session, Subgroup, body.subgroup_id, membership.company_id) if body.subgroup_id else None
 
         if subgroup and group and subgroup.group_id != group.id:
-            raise HTTPException(status_code=400, detail="Subgroup does not belong to selected group")
+            raise api_error(400, "SUBGROUP_GROUP_MISMATCH", "Subgroup does not belong to selected group")
         if subgroup and not group:
             group = get_scoped(session, Group, subgroup.group_id, membership.company_id)
 
@@ -338,13 +339,13 @@ def bulk_categorize_variables(
     session: Session = Depends(get_session),
 ):
     if not body.variable_ids:
-        raise HTTPException(status_code=400, detail="variable_ids cannot be empty")
+        raise api_error(400, "VARIABLE_IDS_EMPTY", "variable_ids cannot be empty")
 
     touches_group = "group_id" in body.model_fields_set or "subgroup_id" in body.model_fields_set
     group = get_scoped(session, Group, body.group_id, membership.company_id) if body.group_id else None
     subgroup = get_scoped(session, Subgroup, body.subgroup_id, membership.company_id) if body.subgroup_id else None
     if subgroup and group and subgroup.group_id != group.id:
-        raise HTTPException(status_code=400, detail="Subgroup does not belong to selected group")
+        raise api_error(400, "SUBGROUP_GROUP_MISMATCH", "Subgroup does not belong to selected group")
     if subgroup and not group:
         group = get_scoped(session, Group, subgroup.group_id, membership.company_id)
 
@@ -402,7 +403,7 @@ def undo_variable(
 ):
     var = get_scoped(session, Variable, variable_id, membership.company_id)
     if not var.is_derived:
-        raise HTTPException(status_code=400, detail="Only derived variables can be undone")
+        raise api_error(400, "ONLY_DERIVED_CAN_UNDO", "Only derived variables can be undone")
     ds = get_scoped(session, Dataset, var.dataset_id, membership.company_id)
 
     dependents = session.exec(
@@ -417,11 +418,16 @@ def undo_variable(
         spec = json.loads(dep.source_spec_json)
         referenced = {spec.get("column"), spec.get("left"), spec.get("right")}
         if var.name in referenced:
-            raise HTTPException(status_code=400, detail=f"Variable is referenced by {dep.name}. Undo dependent transforms first.")
+            raise api_error(
+                400,
+                "VARIABLE_REFERENCED_BY_DERIVED",
+                f"Variable is referenced by {dep.name}. Undo dependent transforms first.",
+                referenced_by=dep.name,
+            )
 
     df = _read_df(ds)
     if var.name not in df.columns:
-        raise HTTPException(status_code=400, detail="Column not found in dataset file")
+        raise api_error(400, "COLUMN_NOT_FOUND", "Column not found in dataset file")
 
     df = df.drop(columns=[var.name])
     _write_df(ds, df)
@@ -449,25 +455,25 @@ def preview_transformation(
 
     column = body.column or params.get("column")
     if not column or column not in df.columns:
-        raise HTTPException(status_code=400, detail="column not found")
+        raise api_error(400, "COLUMN_NOT_FOUND", "column not found")
     series = pd.to_numeric(df[column], errors="coerce")
     if series.isna().all():
-        raise HTTPException(status_code=400, detail="Column has no numeric values")
+        raise api_error(400, "COLUMN_NOT_NUMERIC", "Column has no numeric values")
 
     op = body.operation.lower()
     result: pd.Series | None = None
     if op == "lag":
         periods = int(params.get("periods") or params.get("n") or 1)
         if periods < 0:
-            raise HTTPException(status_code=400, detail="periods must be positive")
+            raise api_error(400, "INVALID_PERIODS", "periods must be positive")
         result = series.shift(periods)
     elif op == "decay":
         alpha_value = params.get("alpha") or params.get("half_life")
         if alpha_value is None:
-            raise HTTPException(status_code=400, detail="alpha parameter required for decay")
+            raise api_error(400, "TRANSFORM_PARAM_REQUIRED", "alpha parameter required for decay")
         alpha = float(alpha_value)
         if not (0 <= alpha < 1):
-            raise HTTPException(status_code=400, detail="alpha must be in [0,1)")
+            raise api_error(400, "INVALID_RATE_RANGE", "alpha must be in [0,1)")
         vals = series.fillna(0.0).to_numpy()
         out = np.empty_like(vals)
         if len(vals) > 0:
@@ -481,7 +487,7 @@ def preview_transformation(
         left = params.get("left")
         right = params.get("right")
         if not left or not right or left not in df.columns or right not in df.columns:
-            raise HTTPException(status_code=400, detail="left/right columns required")
+            raise api_error(400, "COLUMN_NOT_FOUND", "left/right columns required")
         left_vals = pd.to_numeric(df[left], errors="coerce")
         right_vals = pd.to_numeric(df[right], errors="coerce")
         if op == "add":
@@ -496,23 +502,23 @@ def preview_transformation(
         k_value = params.get("k")
         s_value = params.get("s")
         if k_value is None or s_value is None:
-            raise HTTPException(status_code=400, detail="k and s parameters required for hill")
+            raise api_error(400, "TRANSFORM_PARAM_REQUIRED", "k and s parameters required for hill")
         vals = series.fillna(0.0).to_numpy()
         result = pd.Series(hill_saturation(vals, float(k_value), float(s_value)), index=series.index)
     elif op == "adstock":
         decay_value = params.get("decay")
         if decay_value is None:
-            raise HTTPException(status_code=400, detail="decay parameter required for adstock")
+            raise api_error(400, "TRANSFORM_PARAM_REQUIRED", "decay parameter required for adstock")
         decay = float(decay_value)
         if not (0 <= decay < 1):
-            raise HTTPException(status_code=400, detail="decay must be in [0,1)")
+            raise api_error(400, "INVALID_RATE_RANGE", "decay must be in [0,1)")
         vals = series.fillna(0.0).to_numpy()
         result = pd.Series(adstock_geometric(vals, decay), index=series.index)
     else:
-        raise HTTPException(status_code=400, detail="Unsupported operation")
+        raise api_error(400, "UNSUPPORTED_OPERATION", "Unsupported operation")
 
     if result is None:
-        raise HTTPException(status_code=400, detail="Unable to compute preview")
+        raise api_error(400, "PREVIEW_COMPUTE_FAILED", "Unable to compute preview")
 
     dependent_col = getattr(ds, "dependent_variable", None)
     dependent_series = (

@@ -2,6 +2,7 @@
 
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
+import { useTranslations } from "next-intl";
 import { Pencil, Trash2, Plus, X } from "lucide-react";
 
 import { Card, CardHeader } from "@/components/ui/card";
@@ -12,7 +13,8 @@ import { Modal } from "@/components/ui/modal";
 import { ErrorText } from "@/components/ui/error-text";
 import { Select } from "@/components/ui/select";
 import { Eyebrow } from "@/components/ui/eyebrow";
-import { apiFetch, ApiError } from "@/lib/api";
+import { apiFetch } from "@/lib/api";
+import { translateApiError } from "@/lib/error-messages";
 
 type SourceMode = "dataset_column" | "rate_metric" | "manual";
 
@@ -66,6 +68,7 @@ export function InvestmentChannels({
   datasetColumns: { name: string; dtype: string }[];
   canEdit: boolean;
 }) {
+  const tErrors = useTranslations("errors");
   const [channels, setChannels] = useState<InvestmentChannel[]>([]);
   const [loading, setLoading] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
@@ -224,8 +227,7 @@ export function InvestmentChannels({
       closeModal();
       fetchChannels();
     } catch (error: any) {
-      const detail = error instanceof ApiError ? error.detail : null;
-      setFormError(detail?.detail || detail?.error || error?.message || "Failed to save channel");
+      setFormError(translateApiError(error, tErrors) || "Failed to save channel");
     } finally {
       setSaving(false);
     }
@@ -263,9 +265,9 @@ export function InvestmentChannels({
       </div>
 
       {loading ? (
-        <p className="text-sm text-[var(--color-muted)]">Loading…</p>
+        <p className="text-sm text-muted">Loading…</p>
       ) : channels.length === 0 ? (
-        <p className="text-sm text-[var(--color-muted)]">
+        <p className="text-sm text-muted">
           Sin canales configurados para este dataset. Un canal representa el gasto real ($) de un medio,
           independiente de si su variable entró al modelo.
         </p>
@@ -274,7 +276,7 @@ export function InvestmentChannels({
           {channels.map((channel) => (
             <div
               key={channel.id}
-              className="flex items-center justify-between gap-3 rounded-2xl border border-[var(--color-border)] px-4 py-3 text-sm"
+              className="flex items-center justify-between gap-3 rounded-2xl border border-line px-4 py-3 text-sm"
             >
               <div className="flex flex-1 flex-wrap items-center gap-2">
                 <span className="font-medium">{channel.name}</span>
@@ -288,7 +290,7 @@ export function InvestmentChannels({
               <div className="flex items-center gap-1">
                 <button
                   type="button"
-                  className="rounded-full p-1.5 text-[var(--color-muted)] hover:text-[var(--color-accent)] disabled:cursor-not-allowed disabled:opacity-60"
+                  className="rounded-full p-1.5 text-muted hover:text-accent disabled:cursor-not-allowed disabled:opacity-60"
                   onClick={() => openEdit(channel)}
                   disabled={!canEdit}
                   title={!canEdit ? "Solo lectura: tu rol es Visualizador" : "Edit"}
@@ -297,7 +299,7 @@ export function InvestmentChannels({
                 </button>
                 <button
                   type="button"
-                  className="rounded-full p-1.5 text-[var(--color-muted)] hover:text-[var(--color-danger)] disabled:cursor-not-allowed disabled:opacity-60"
+                  className="rounded-full p-1.5 text-muted hover:text-bad disabled:cursor-not-allowed disabled:opacity-60"
                   onClick={() => setDeleteTarget(channel)}
                   disabled={!canEdit}
                   title={!canEdit ? "Solo lectura: tu rol es Visualizador" : "Delete"}
@@ -405,7 +407,7 @@ export function InvestmentChannels({
                     />
                     <button
                       type="button"
-                      className="rounded-full p-1.5 text-[var(--color-muted)] hover:text-[var(--color-danger)]"
+                      className="rounded-full p-1.5 text-muted hover:text-bad"
                       onClick={() => removeEntryRow(index)}
                     >
                       <X size={14} />
@@ -432,7 +434,7 @@ export function InvestmentChannels({
                 </option>
               ))}
             </Select>
-            <p className="text-xs text-[var(--color-muted)]">
+            <p className="text-xs text-muted">
               Qué variable del modelo representa este canal. Si no se selecciona, la inversión sigue contando en
               el total pero no se le atribuye contribución/ROI.
               {heroXVars && " Solo se muestran las variables del modelo Hero actual, para evitar desalineamiento."}
@@ -454,7 +456,7 @@ export function InvestmentChannels({
 
       {deleteTarget && (
         <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center px-4">
-          <div className="w-full max-w-md rounded-2xl bg-[var(--color-card)] p-6 shadow-lg space-y-4">
+          <div className="w-full max-w-md rounded-2xl bg-surface p-6 shadow-lg space-y-4">
             <h3 className="text-lg font-semibold">Delete channel &quot;{deleteTarget.name}&quot;?</h3>
             <ErrorText className="text-xs">This action cannot be undone.</ErrorText>
             <div className="flex justify-end gap-2">

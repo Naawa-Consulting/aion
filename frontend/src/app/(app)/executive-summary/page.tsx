@@ -6,8 +6,8 @@ import Link from "next/link";
 import { toast } from "sonner";
 import { useTranslations } from "next-intl";
 import { useTheme } from "next-themes";
-import { Bar, BarChart, CartesianGrid, Cell, ResponsiveContainer, Tooltip as RechartsTooltip, XAxis, YAxis } from "recharts";
-import { Info, Printer } from "lucide-react";
+import { Bar, BarChart, CartesianGrid, Cell, LabelList, ResponsiveContainer, Tooltip as RechartsTooltip, XAxis, YAxis } from "recharts";
+import { Info, Printer, Download } from "lucide-react";
 
 import { Card, CardHeader } from "@/components/ui/card";
 import { Select } from "@/components/ui/select";
@@ -20,12 +20,13 @@ import { EmptyState } from "@/components/ui/empty-state";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tooltip } from "@/components/ui/tooltip";
 import { FilterBar, FilterField } from "@/components/ui/filter-bar";
-import PlannerView from "@/components/predict/PlannerView";
 import { apiFetch } from "@/lib/api";
 import { EMPTY_VALUE } from "@/lib/format";
 import { formatChartNumber, formatChartPercent } from "@/lib/chart-format";
 import { assignCategoricalColors } from "@/lib/chart-colors";
 import { useGlobalStore } from "@/lib/store";
+import { downloadBlob } from "@/lib/download";
+import { translateApiError } from "@/lib/error-messages";
 
 type Dataset = { id: string; display_name: string };
 type Model = { id: string; name: string; role: string | null; r2: number | null; adj_r2: number | null };
@@ -103,8 +104,13 @@ function InfoTooltip({ label, content }: { label: string; content: string }) {
 
 export default function ExecutiveSummaryPage() {
   const t = useTranslations("executiveSummary");
+  const tErrors = useTranslations("errors");
   const { resolvedTheme } = useTheme();
   const isDarkTheme = resolvedTheme === "dark";
+  const mutedColor = isDarkTheme ? "#81858e" : "#6d7178";
+  const lineColor = isDarkTheme ? "#262a2f" : "#e5e6ea";
+  const surfaceColor = isDarkTheme ? "#16181b" : "#ffffff";
+  const inkColor = isDarkTheme ? "#f2f3f5" : "#17181c";
   const { activeCompanyId } = useGlobalStore();
   const [datasets, setDatasets] = useState<Dataset[]>([]);
   const [selectedDataset, setSelectedDataset] = useState("");
@@ -119,6 +125,7 @@ export default function ExecutiveSummaryPage() {
   const [printedAt, setPrintedAt] = useState<string | null>(null);
   const [initializing, setInitializing] = useState(true);
   const [modelsLoading, setModelsLoading] = useState(false);
+  const [exporting, setExporting] = useState(false);
 
   useEffect(() => {
     const handleBeforePrint = () => setPrintedAt(new Date().toLocaleString());
@@ -221,6 +228,25 @@ export default function ExecutiveSummaryPage() {
     setDateRange((prev) => clampRange({ ...prev, [field]: value || null }, dateBounds, field));
   };
 
+  const handleExport = async () => {
+    if (!selectedModel) return;
+    setExporting(true);
+    try {
+      const params = new URLSearchParams();
+      if (dateRange.start) params.set("start_date", dateRange.start);
+      if (dateRange.end) params.set("end_date", dateRange.end);
+      const qs = params.toString() ? `?${params.toString()}` : "";
+      const blob = await apiFetch<Blob>(`/analysis/${selectedModel}/executive-summary/export${qs}`, {
+        responseType: "blob",
+      });
+      downloadBlob(blob, "executive-summary.xlsx");
+    } catch (err) {
+      toast.error(translateApiError(err, tErrors));
+    } finally {
+      setExporting(false);
+    }
+  };
+
   const selectedModelInfo = models.find((m) => m.id === selectedModel);
   const groups = summary?.groups ?? [];
   const baselineGroup = groups.find((g) => g.group_id === "baseline" || g.group_name?.toLowerCase() === "baseline");
@@ -242,6 +268,15 @@ export default function ExecutiveSummaryPage() {
       color: colorMap[key],
     };
   });
+  if (baselineGroup) {
+    chartData.push({
+      key: "baseline",
+      name: baselineGroup.group_name || "Baseline",
+      contribution: baselineGroup.contribution,
+      percent: baselineGroup.percent,
+      color: mutedColor,
+    });
+  }
 
   const fitBadge =
     selectedModelInfo?.r2 !== null && selectedModelInfo?.r2 !== undefined
@@ -259,6 +294,7 @@ export default function ExecutiveSummaryPage() {
         : { variant: "warning" as const, label: t("kpis.negative") }
       : null;
 
+  const yVarOrFallback = yVar || t("kpis.targetFallback");
   let insight: string | null = null;
   if (chartGroups.length >= 2) {
     insight = t("insight.double", {
@@ -266,18 +302,15 @@ export default function ExecutiveSummaryPage() {
       percent: pctLabel(chartGroups[0].percent),
       group2: chartGroups[1].group_name || "",
       percent2: pctLabel(chartGroups[1].percent),
+      yVar: yVarOrFallback,
     });
   } else if (chartGroups.length === 1) {
     insight = t("insight.single", {
       group: chartGroups[0].group_name || "",
       percent: pctLabel(chartGroups[0].percent),
-      yVar,
+      yVar: yVarOrFallback,
     });
   }
-
-  const mutedColor = isDarkTheme ? "#81858e" : "#6d7178";
-  const lineColor = isDarkTheme ? "#262a2f" : "#e5e6ea";
-  const surfaceColor = isDarkTheme ? "#16181b" : "#ffffff";
 
   return (
     <section className="space-y-6">
@@ -286,10 +319,16 @@ export default function ExecutiveSummaryPage() {
         subtitle={t("eyebrow")}
         className="no-print"
         actions={
-          <Button variant="ghost" onClick={() => window.print()} disabled={!summary}>
-            <Printer className="mr-2 h-4 w-4" />
-            {t("print")}
-          </Button>
+          <>
+            <Button variant="ghost" onClick={handleExport} disabled={!summary || exporting}>
+              <Download className="mr-2 h-4 w-4" />
+              {exporting ? t("exporting") : t("export")}
+            </Button>
+            <Button variant="ghost" onClick={() => window.print()} disabled={!summary}>
+              <Printer className="mr-2 h-4 w-4" />
+              {t("print")}
+            </Button>
+          </>
         }
       />
 
@@ -351,21 +390,24 @@ export default function ExecutiveSummaryPage() {
               </Select>
             </FilterField>
             {(dateBounds.min || dateBounds.max) && (
-              <FilterField label={t("filters.dateRange")} className="flex-1 min-w-[280px]">
-                <div className="flex flex-wrap gap-3">
+              <FilterField label={t("filters.dateRange")}>
+                <div className="flex items-center gap-2">
                   <Input
                     type="date"
                     aria-label={t("filters.dateStart")}
-                    className="w-[180px]"
+                    style={{ width: 140 }}
                     value={dateRange.start ?? ""}
                     min={dateBounds.min ?? undefined}
                     max={dateBounds.max ?? undefined}
                     onChange={(e) => updateDateField("start", e.target.value)}
                   />
+                  <span className="text-muted" aria-hidden>
+                    –
+                  </span>
                   <Input
                     type="date"
                     aria-label={t("filters.dateEnd")}
-                    className="w-[180px]"
+                    style={{ width: 140 }}
                     value={dateRange.end ?? ""}
                     min={dateBounds.min ?? undefined}
                     max={dateBounds.max ?? undefined}
@@ -414,7 +456,7 @@ export default function ExecutiveSummaryPage() {
                       icon={
                         <InfoTooltip
                           label={t("kpis.fit")}
-                          content={t("kpis.fitTooltip", { yVar: yVar || t("kpis.targetFallback") })}
+                          content={t("kpis.fitTooltip", { yVar: yVarOrFallback })}
                         />
                       }
                       trend={
@@ -427,7 +469,7 @@ export default function ExecutiveSummaryPage() {
                       icon={
                         <InfoTooltip
                           label={t("kpis.totalContribution")}
-                          content={t("kpis.totalContributionTooltip", { yVar: yVar || t("kpis.targetFallback") })}
+                          content={t("kpis.totalContributionTooltip", { yVar: yVarOrFallback })}
                         />
                       }
                     />
@@ -447,14 +489,14 @@ export default function ExecutiveSummaryPage() {
               </div>
 
               <Card className="space-y-3">
-                <CardHeader as="h2" title={t("groups.title")} subtitle={t("groups.subtitle", { yVar: yVar || t("kpis.targetFallback") })} />
+                <CardHeader as="h2" title={t("groups.title")} subtitle={t("groups.subtitle", { yVar: yVarOrFallback })} />
                 {loading ? (
-                  <Skeleton className="h-chart-sm" />
+                  <Skeleton className="h-chart-md" />
                 ) : chartData.length ? (
                   <>
-                    <div className="h-chart-sm">
+                    <div className="h-chart-md">
                       <ResponsiveContainer width="100%" height="100%">
-                        <BarChart data={chartData} layout="vertical" margin={{ left: 8, right: 24 }}>
+                        <BarChart data={chartData} layout="vertical" margin={{ left: 8, right: 48 }}>
                           <CartesianGrid horizontal={false} stroke={lineColor} />
                           <XAxis
                             type="number"
@@ -492,28 +534,25 @@ export default function ExecutiveSummaryPage() {
                               );
                             }}
                           />
-                          <Bar dataKey="percent" radius={[0, 4, 4, 0]} barSize={20}>
+                          <Bar dataKey="percent" radius={[0, 4, 4, 0]} barSize={22}>
                             {chartData.map((d) => (
                               <Cell key={d.key} fill={d.color} />
                             ))}
+                            <LabelList
+                              dataKey="percent"
+                              position="right"
+                              formatter={(v: number) => formatChartPercent(v, 1)}
+                              style={{ fill: inkColor, fontSize: 12, fontWeight: 500 }}
+                            />
                           </Bar>
                         </BarChart>
                       </ResponsiveContainer>
                     </div>
-                    {baselineGroup && (
-                      <p className="text-xs text-muted">
-                        {t("groups.baselineNote", { percent: pctLabel(baselineGroup.percent), yVar: yVar || t("kpis.targetFallback") })}
-                      </p>
-                    )}
+                    {baselineGroup && <p className="text-xs text-muted">{t("groups.baselineHint")}</p>}
                   </>
                 ) : (
                   <EmptyState title={t("groups.empty")} />
                 )}
-              </Card>
-
-              <Card className="space-y-4">
-                <CardHeader as="h2" title={t("planner.title")} subtitle={t("planner.subtitle")} />
-                <PlannerView modelId={selectedModel} />
               </Card>
             </>
           )}

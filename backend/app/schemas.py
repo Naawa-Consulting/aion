@@ -642,16 +642,19 @@ MembershipRole = Literal["modelador", "visualizador", "admin_compania"]
 class CompanyOut(BaseModel):
     id: str
     name: str
+    currency_code: str
     created_at: datetime
 
 
 class CreateCompanyRequest(BaseModel):
     name: str
     admin_user_id: str
+    currency_code: str = "MXN"
 
 
 class UpdateCompanyRequest(BaseModel):
     name: str
+    currency_code: str | None = None
 
 
 class MembershipOut(BaseModel):
@@ -679,6 +682,7 @@ class UserLookupOut(BaseModel):
 class MyMembershipOut(BaseModel):
     company_id: str
     company_name: str
+    currency_code: str
     role: MembershipRole
 
 

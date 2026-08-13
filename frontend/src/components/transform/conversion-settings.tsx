@@ -188,7 +188,7 @@ export function ConversionSettingsCard({
         subtitle="Tasa de conversión y valor promedio para ROI/ROAS en Analysis"
       />
       {loading ? (
-        <p className="text-sm text-[var(--color-muted)]">Loading…</p>
+        <p className="text-sm text-muted">Loading…</p>
       ) : (
         <>
           <div className="grid gap-4 md:grid-cols-2">

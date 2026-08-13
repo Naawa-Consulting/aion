@@ -11,7 +11,8 @@ from sqlmodel import Session, select
 
 from ..auth import CurrentMembership, get_current_membership
 from ..db import get_session
-from ..models import Dataset, Model, ModelMetrics, Variable, Subgroup, Group
+from ..errors import api_error
+from ..models import Dataset, InvestmentChannel, Model, ModelMetrics, Variable, Subgroup, Group
 from ..schemas import SummaryTableExportRequest
 from ..services.analysis import (
     AnalysisCacheKey,
@@ -33,7 +34,7 @@ def _parse_date(value: Optional[str]) -> Optional[pd.Timestamp]:
         return None
     ts = pd.to_datetime(value, errors="coerce")
     if pd.isna(ts):
-        raise HTTPException(status_code=400, detail=f"Invalid date: {value}")
+        raise api_error(400, "INVALID_DATE", f"Invalid date: {value}")
     return ts
 
 
@@ -80,7 +81,7 @@ def _fit_from_model(
     try:
         full_df = load_dataset_frame(ds)
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+        raise api_error(400, "DATASET_LOAD_ERROR", str(exc))
     time_field = time_column or getattr(ds, "time_variable", None)
     x_vars = json.loads(m.x_vars_json)
     cols = [m.y_var] + x_vars
@@ -94,7 +95,7 @@ def _fit_from_model(
             full_df, m.y_var, x_vars, media_flags, transform_params=transform_params
         )
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+        raise api_error(400, "MODEL_BUILD_ERROR", str(exc))
 
     if time_field and (start is not None or end is not None) and time_field in full_df.columns:
         ts = pd.to_datetime(full_df.loc[full_work.index, time_field], errors="coerce")
@@ -110,9 +111,7 @@ def _fit_from_model(
         X = full_X
 
     if work.shape[0] < len(cols) + 1:
-        raise HTTPException(
-            status_code=400, detail="Insufficient rows after cleaning for analysis"
-        )
+        raise api_error(400, "INSUFFICIENT_ROWS", "Insufficient rows after cleaning for analysis")
     y = work[m.y_var].to_numpy()
     Xc = sm.add_constant(X, has_constant="add")
     res = sm.OLS(y, Xc).fit()
@@ -150,6 +149,21 @@ def _group_maps(session: Session, dataset_id: str, company_id: str):
     return var_map, sg_map, g_map
 
 
+def _channel_label_map(session: Session, dataset_id: str, company_id: str) -> dict[str, str]:
+    """Maps a raw Variable.name to the business-friendly name of the InvestmentChannel it's
+    the proxy for, so query screens can show "Facebook Ads" instead of
+    "dig_ctv_branding_impresiones". Variables with no associated channel are absent from the
+    map — callers should fall back to the raw name."""
+    channels = session.exec(
+        select(InvestmentChannel).where(
+            InvestmentChannel.dataset_id == dataset_id,
+            InvestmentChannel.company_id == company_id,
+            InvestmentChannel.proxy_variable.is_not(None),
+        )
+    ).all()
+    return {c.proxy_variable: c.name for c in channels}
+
+
 def _baseline_predictor_names(var_map: dict, g_map: dict, sg_map: dict) -> set[str]:
     """Variable names whose Group (directly, or via Subgroup) is flagged Group.is_baseline —
     their contribution gets folded into the intercept instead of reported as its own line."""
@@ -185,18 +199,15 @@ def summary(
             session, model_id, membership.company_id, None, start_ts, end_ts
         )
     except HTTPException as exc:
-        if exc.detail != "Insufficient rows after cleaning for analysis" or (
-            start_ts is None and end_ts is None
-        ):
+        is_insufficient_rows = isinstance(exc.detail, dict) and exc.detail.get("code") == "INSUFFICIENT_ROWS"
+        if not is_insufficient_rows or (start_ts is None and end_ts is None):
             raise
         m, ds, work, X, Xc, y, params, full_df = _fit_from_model(session, model_id, membership.company_id)
         filtered_df = _apply_date_filter(
             full_df.copy(), getattr(ds, "time_variable", None), start_ts, end_ts
         )
         if filtered_df.empty:
-            raise HTTPException(
-                status_code=400, detail="No rows available for the selected date range"
-            )
+            raise api_error(400, "NO_ROWS_IN_RANGE", "No rows available for the selected date range")
     if filtered_df is None:
         filtered_df = work
 
@@ -216,6 +227,7 @@ def summary(
 
     var_map, sg_map, g_map = _group_maps(session, ds.id, membership.company_id)
     baseline_predictors = _baseline_predictor_names(var_map, g_map, sg_map)
+    channel_label_map = _channel_label_map(session, ds.id, membership.company_id)
 
     time_field = getattr(ds, "time_variable", None)
     contrib_result = compute_contributions(
@@ -281,6 +293,7 @@ def summary(
         rows.append(
             {
                 "name": name,
+                "display_name": channel_label_map.get(name, name),
                 "coef": coef,
                 "mean": float(series.mean()) if len(series) else 0.0,
                 "contribution": contrib,
@@ -432,9 +445,8 @@ def stacked(
             session, model_id, membership.company_id, time_col, start_ts, end_ts
         )
     except HTTPException as exc:
-        if exc.detail != "Insufficient rows after cleaning for analysis" or (
-            start_ts is None and end_ts is None
-        ):
+        is_insufficient_rows = isinstance(exc.detail, dict) and exc.detail.get("code") == "INSUFFICIENT_ROWS"
+        if not is_insufficient_rows or (start_ts is None and end_ts is None):
             raise
         m, ds, work, X, Xc, y, params, full_df = _fit_from_model(session, model_id, membership.company_id)
         # `work`/`X` above already cover the FULL history (correct adstock carryover) from
@@ -442,9 +454,7 @@ def stacked(
         # (via design_frame=X below) to scope rows/time to the requested date range.
         filtered_df = _apply_date_filter(full_df.copy(), time_col, start_ts, end_ts)
         if filtered_df.empty:
-            raise HTTPException(
-                status_code=400, detail="No rows available for the selected date range"
-            )
+            raise api_error(400, "NO_ROWS_IN_RANGE", "No rows available for the selected date range")
     if filtered_df is None:
         filtered_df = work
 
@@ -572,6 +582,53 @@ def export_summary(
     )
 
 
+@router.get("/{model_id}/executive-summary/export")
+def export_executive_summary(
+    model_id: str,
+    start_date: Optional[str] = Query(default=None),
+    end_date: Optional[str] = Query(default=None),
+    membership: CurrentMembership = Depends(get_current_membership),
+    session: Session = Depends(get_session),
+):
+    """Excel export for the Resumen Ejecutivo page — reuses summary()'s contribution numbers
+    and economics_summary()'s investment/revenue/ROI totals rather than recomputing them.
+    Lazy-imports economics.py to avoid a circular import (economics.py imports helpers from
+    this module at module load time)."""
+    from .economics import economics_summary
+
+    data = summary(model_id, True, False, start_date, end_date, membership, session)
+    econ = economics_summary(model_id, start_date, end_date, membership, session)
+
+    m = get_scoped(session, Model, model_id, membership.company_id)
+    mm = session.get(ModelMetrics, m.id)
+
+    kpi_rows = [
+        {"Metric": "Fit (R²)", "Value": float(mm.r2) if mm else None},
+        {"Metric": "Total contribution", "Value": data["total_contribution"]},
+    ]
+    if econ["economics_configured"]:
+        kpi_rows += [
+            {"Metric": "Total investment", "Value": econ["totals"]["investment"]},
+            {"Metric": "Total revenue", "Value": econ["totals"]["revenue"]},
+            {"Metric": "ROI", "Value": econ["totals"]["roi"]},
+            {"Metric": "ROAS", "Value": econ["totals"]["roas"]},
+        ]
+
+    group_rows = [
+        {
+            "Group": row.get("group_name") or "-",
+            "Contribution": row.get("contribution"),
+            "% of total": row.get("percent"),
+        }
+        for row in data["groups"]
+    ]
+
+    return excel_response(
+        {"KPIs": pd.DataFrame(kpi_rows), "Groups": pd.DataFrame(group_rows)},
+        f"executive_summary_{model_id}.xlsx",
+    )
+
+
 @router.post("/summary/export")
 def export_summary_table_excel(
     payload: SummaryTableExportRequest,
@@ -590,9 +647,7 @@ def export_summary_table_excel(
     model_info = data["model"]
     dataset_id = model_info.get("dataset_id")
     if payload.dataset_id and dataset_id and payload.dataset_id != dataset_id:
-        raise HTTPException(
-            status_code=400, detail="Model does not belong to the selected dataset"
-        )
+        raise api_error(400, "MODEL_DATASET_MISMATCH", "Model does not belong to the selected dataset")
 
     mode = payload.group_mode
     table_rows: List[dict] = []
@@ -621,13 +676,13 @@ def export_summary_table_excel(
                 {
                     "Group": row.get("group_name") or "-",
                     "Subgroup": row.get("subgroup_name") or "-",
-                    "Variable": row.get("name") or "-",
+                    "Variable": row.get("display_name") or row.get("name") or "-",
                     "Contribution": float(row.get("contribution", 0.0)),
                     "% of total": float(row.get("percent", 0.0)),
                 }
             )
     else:
-        raise HTTPException(status_code=400, detail="Invalid group mode")
+        raise api_error(400, "INVALID_GROUP_MODE", "Invalid group mode")
 
     df = pd.DataFrame(table_rows)
     filename = (

@@ -1,9 +1,25 @@
-﻿"use client";
+"use client";
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Bar, CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis, Legend, ComposedChart, ReferenceLine } from "recharts";
+import Link from "next/link";
+import {
+  Bar,
+  BarChart,
+  CartesianGrid,
+  Cell,
+  Legend,
+  Line,
+  LineChart,
+  ReferenceLine,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from "recharts";
 import { toast } from "sonner";
+import { useTranslations } from "next-intl";
 import { useTheme } from "next-themes";
+import { Info, MoreVertical, Pencil } from "lucide-react";
 
 import { Card, CardHeader } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -12,13 +28,27 @@ import { Badge } from "@/components/ui/badge";
 import { ToggleChip } from "@/components/ui/toggle-chip";
 import { Select } from "@/components/ui/select";
 import { Eyebrow } from "@/components/ui/eyebrow";
+import { PageHeader } from "@/components/ui/page-header";
+import { EmptyState } from "@/components/ui/empty-state";
+import { Skeleton } from "@/components/ui/skeleton";
+import { Tooltip as InfoPopover } from "@/components/ui/tooltip";
+import { StatCard } from "@/components/ui/stat-card";
+import { Disclosure } from "@/components/ui/disclosure";
+import { Tabs } from "@/components/ui/tabs";
+import { Table, TableHeader, TableRow, Th, TableCell } from "@/components/ui/table";
+import { Modal } from "@/components/ui/modal";
+import { Dropdown, DropdownItem } from "@/components/ui/dropdown";
+import { RowActions } from "@/components/ui/row-actions";
+import { IconButton } from "@/components/ui/icon-button";
 import { SelectedPredictorsQuickView } from "@/components/modeling/SelectedPredictorsQuickView";
 import { FilterBar, FilterField } from "@/components/ui/filter-bar";
 import { apiFetch, ApiError } from "@/lib/api";
+import { translateApiError } from "@/lib/error-messages";
 import { useCanEdit } from "@/hooks/useCanEdit";
 import { useGlobalStore } from "@/lib/store";
 import { chartColor } from "@/lib/chart-colors";
 import { formatChartNumber } from "@/lib/chart-format";
+import { EMPTY_VALUE } from "@/lib/format";
 import { downloadBlob } from "@/lib/download";
 
 type Dataset = { id: string; display_name: string; columns: { name: string; dtype: string }[] };
@@ -41,6 +71,7 @@ type ModelMetrics = {
   mape?: number | null;
   vif: { name: string; vif: number }[];
 };
+type ModelRole = "hero" | "challenger1" | "challenger2" | "none";
 type Model = {
   id: string;
   name: string;
@@ -49,7 +80,7 @@ type Model = {
   x_vars: string[];
   is_hero: boolean;
   apply_media_transforms: boolean;
-  role: "hero" | "challenger1" | "challenger2" | "none";
+  role: ModelRole;
   metrics: ModelMetrics;
 };
 type ModelSummary = {
@@ -82,16 +113,23 @@ type Predictions = {
 
 type GroupFilter = "all" | string;
 type SubgroupFilter = "all" | string;
+type Quality = "good" | "review" | null;
 
-const formatPValue = (value: number) => {
-  if (value == null || Number.isNaN(value)) return "-";
-  const formatted = value < 0.0001 ? "<0.0001" : value.toFixed(4);
-  const stars = value < 0.001 ? "***" : value < 0.01 ? "**" : value < 0.05 ? "*" : "";
-  return stars ? `${formatted} ${stars}` : formatted;
+const ROLE_LABEL: Record<string, string> = { hero: "Hero", challenger1: "Ch. 1", challenger2: "Ch. 2" };
+const NEW_MODEL_VALUE = "__new__";
+
+const formatPValueNumber = (value: number) => {
+  if (value == null || Number.isNaN(value)) return EMPTY_VALUE;
+  return value < 0.0001 ? "<0.0001" : value.toFixed(4);
+};
+
+const pValueStars = (value: number) => {
+  if (value == null || Number.isNaN(value)) return "";
+  return value < 0.001 ? "***" : value < 0.01 ? "**" : value < 0.05 ? "*" : "";
 };
 
 const formatCorr = (value: number | null | undefined) => {
-  if (value == null || Number.isNaN(value)) return "-";
+  if (value == null || Number.isNaN(value)) return EMPTY_VALUE;
   return value.toFixed(3);
 };
 
@@ -107,11 +145,54 @@ const formatTimeLabel = (value: string | number, includeYear = true) => {
   return String(value);
 };
 
+const quality = (value: number | null, threshold: number, higherIsBetter: boolean): Quality => {
+  if (value == null || Number.isNaN(value)) return null;
+  if (higherIsBetter) return value >= threshold ? "good" : "review";
+  return value <= threshold ? "good" : "review";
+};
+
+const durbinWatsonQuality = (value: number | null | undefined): Quality => {
+  if (value == null || Number.isNaN(value)) return null;
+  return value >= 1.5 && value <= 2.5 ? "good" : "review";
+};
+
+function SecondaryLink({ href, children }: { href: string; children: React.ReactNode }) {
+  return (
+    <Link
+      href={href}
+      className="inline-flex h-control-md items-center rounded-lg bg-accent-bg px-4 text-sm font-medium text-accent hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2"
+    >
+      {children}
+    </Link>
+  );
+}
+
+function InfoTooltip({ label, content }: { label: string; content: string }) {
+  return (
+    <InfoPopover content={<span style={{ whiteSpace: "normal", display: "block", maxWidth: 220 }}>{content}</span>}>
+      <button
+        type="button"
+        aria-label={label}
+        className="rounded-full p-0.5 text-muted transition hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+      >
+        <Info className="h-3.5 w-3.5" />
+      </button>
+    </InfoPopover>
+  );
+}
+
 export default function ModelingPage() {
+  const t = useTranslations("modeling");
+  const tCommon = useTranslations("common");
+  const tErrors = useTranslations("errors");
   const canEdit = useCanEdit();
   const { activeCompanyId } = useGlobalStore();
   const { resolvedTheme } = useTheme();
   const isDarkTheme = resolvedTheme === "dark";
+  const mutedColor = isDarkTheme ? "#81858e" : "#6d7178";
+  const lineColor = isDarkTheme ? "#262a2f" : "#e5e6ea";
+  const surfaceColor = isDarkTheme ? "#16181b" : "#ffffff";
+
   const [datasets, setDatasets] = useState<Dataset[]>([]);
   const [selectedDataset, setSelectedDataset] = useState<string>("");
   const [variables, setVariables] = useState<Variable[]>([]);
@@ -125,13 +206,26 @@ export default function ModelingPage() {
   const [editingModelId, setEditingModelId] = useState<string | null>(null);
   const [summary, setSummary] = useState<ModelSummary | null>(null);
   const [predictions, setPredictions] = useState<Predictions | null>(null);
-const [showResiduals, setShowResiduals] = useState(false);
-const [loading, setLoading] = useState(false);
-const [showQuickView, setShowQuickView] = useState(false);
-const [groupFilter, setGroupFilter] = useState<GroupFilter>("all");
-const [subgroupFilter, setSubgroupFilter] = useState<SubgroupFilter>("all");
+  const [showResiduals, setShowResiduals] = useState(false);
+  const [editSummary, setEditSummary] = useState<ModelSummary | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [initializing, setInitializing] = useState(true);
+  const [modelsLoading, setModelsLoading] = useState(false);
+  const [showQuickView, setShowQuickView] = useState(false);
+  const [groupFilter, setGroupFilter] = useState<GroupFilter>("all");
+  const [subgroupFilter, setSubgroupFilter] = useState<SubgroupFilter>("all");
   const [duplicateLoadingId, setDuplicateLoadingId] = useState<string | null>(null);
   const [bestLoadingId, setBestLoadingId] = useState<string | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<Model | null>(null);
+  const [deleteLoading, setDeleteLoading] = useState(false);
+  const [detailOpen, setDetailOpen] = useState(false);
+  const [activeTab, setActiveTab] = useState("models");
+  const autoOpenedRef = useRef(false);
+
+  const openBuilder = () => {
+    setDetailOpen(true);
+    setActiveTab("builder");
+  };
 
   useEffect(() => {
     setGroupFilter("all");
@@ -155,6 +249,26 @@ const [subgroupFilter, setSubgroupFilter] = useState<SubgroupFilter>("all");
     }
   }, [models]);
 
+  // Fit metrics + coefficients for whichever model the builder is currently editing — lets a
+  // modelador see "does this model need more/fewer variables" without leaving the tab. Separate
+  // from `summary` (always the Hero) since the edited model may not be the Hero.
+  useEffect(() => {
+    if (!editingModelId) {
+      setEditSummary(null);
+      return;
+    }
+    let active = true;
+    apiFetch<ModelSummary>(`/models/${editingModelId}/summary`)
+      .then((data) => {
+        if (active) setEditSummary(data);
+      })
+      .catch(() => {
+        if (active) setEditSummary(null);
+      });
+    return () => {
+      active = false;
+    };
+  }, [editingModelId]);
 
   const fetchDatasets = useCallback(async () => {
     try {
@@ -165,6 +279,8 @@ const [subgroupFilter, setSubgroupFilter] = useState<SubgroupFilter>("all");
       }
     } catch (err) {
       toast.error((err as Error)?.message || "Failed to load datasets");
+    } finally {
+      setInitializing(false);
     }
   }, []);
 
@@ -191,11 +307,21 @@ const [subgroupFilter, setSubgroupFilter] = useState<SubgroupFilter>("all");
   }, []);
 
   const fetchModels = useCallback(async (datasetId: string) => {
+    setModelsLoading(true);
     try {
       const data = await apiFetch<Model[]>(`/models?dataset_id=${datasetId}`);
       setModels(data);
+      if (!autoOpenedRef.current) {
+        autoOpenedRef.current = true;
+        if (data.length === 0) {
+          setDetailOpen(true);
+          setActiveTab("builder");
+        }
+      }
     } catch (err) {
       toast.error((err as Error)?.message || "Failed to load models");
+    } finally {
+      setModelsLoading(false);
     }
   }, []);
 
@@ -306,9 +432,7 @@ const [subgroupFilter, setSubgroupFilter] = useState<SubgroupFilter>("all");
       await fetchModels(selectedDataset);
       resetForm();
     } catch (err) {
-      const detail = err instanceof ApiError ? err.detail : null;
-      const detailMessage = typeof detail === "string" ? detail : detail?.detail || detail?.error;
-      toast.error(detailMessage || (err as Error)?.message || "Could not save model");
+      toast.error(translateApiError(err, tErrors));
     } finally {
       setLoading(false);
     }
@@ -327,18 +451,21 @@ const [subgroupFilter, setSubgroupFilter] = useState<SubgroupFilter>("all");
     setYVar(model.y_var);
     setXSelected(model.x_vars);
     setApplyMediaTransforms(model.apply_media_transforms);
+    setActiveTab("builder");
   };
 
-  const deleteModel = async (model: Model) => {
-    if (!confirm(`Delete model ${model.name}?`)) return;
+  const confirmDeleteModel = async () => {
+    if (!deleteTarget) return;
+    setDeleteLoading(true);
     try {
-      await apiFetch(`/models/${model.id}`, { method: "DELETE" });
+      await apiFetch(`/models/${deleteTarget.id}`, { method: "DELETE" });
       toast.success("Model deleted");
-      fetchModels(selectedDataset);
+      setDeleteTarget(null);
+      await fetchModels(selectedDataset);
     } catch (err) {
-      const detail = err instanceof ApiError ? err.detail : null;
-      const detailMessage = typeof detail === "string" ? detail : detail?.detail || detail?.error;
-      toast.error(detailMessage || (err as Error)?.message || "Failed to delete");
+      toast.error(translateApiError(err, tErrors));
+    } finally {
+      setDeleteLoading(false);
     }
   };
 
@@ -350,9 +477,7 @@ const [subgroupFilter, setSubgroupFilter] = useState<SubgroupFilter>("all");
       toast.success("Model duplicated");
       await fetchModels(selectedDataset);
     } catch (err) {
-      const detail = err instanceof ApiError ? err.detail : null;
-      const detailMessage = typeof detail === "string" ? detail : detail?.detail || detail?.error;
-      toast.error(detailMessage || (err as Error)?.message || "Failed to duplicate model");
+      toast.error(translateApiError(err, tErrors));
     } finally {
       setDuplicateLoadingId(null);
     }
@@ -366,9 +491,7 @@ const [subgroupFilter, setSubgroupFilter] = useState<SubgroupFilter>("all");
       toast.success("Best model created");
       await fetchModels(selectedDataset);
     } catch (err) {
-      const detail = err instanceof ApiError ? err.detail : null;
-      const detailMessage = typeof detail === "string" ? detail : detail?.detail || detail?.error;
-      toast.error(detailMessage || (err as Error)?.message || "Failed to create best model");
+      toast.error(translateApiError(err, tErrors));
     } finally {
       setBestLoadingId(null);
     }
@@ -384,9 +507,7 @@ const [subgroupFilter, setSubgroupFilter] = useState<SubgroupFilter>("all");
       toast.success(`Marked as ${role}`);
       fetchModels(selectedDataset);
     } catch (err) {
-      const detail = err instanceof ApiError ? err.detail : null;
-      const detailMessage = typeof detail === "string" ? detail : detail?.detail || detail?.error;
-      toast.error(detailMessage || (err as Error)?.message || "Failed to set role");
+      toast.error(translateApiError(err, tErrors));
     }
   };
 
@@ -438,13 +559,14 @@ const [subgroupFilter, setSubgroupFilter] = useState<SubgroupFilter>("all");
   }, [visibleCorrelations, xSelected, allVisibleSelected]);
 
   const heroModel = models.find((m) => m.role === "hero");
+  const editingModel = editingModelId ? models.find((m) => m.id === editingModelId) : undefined;
   const challenger1 = models.find((m) => m.role === "challenger1");
   const challenger2 = models.find((m) => m.role === "challenger2");
   const compareModels = [heroModel, challenger1, challenger2].filter(Boolean) as Model[];
   const heroComparisonIndex = compareModels.findIndex((m) => m.role === "hero");
 
   const formatMetricValue = (value: number | null) => {
-    if (value == null || Number.isNaN(value)) return "-";
+    if (value == null || Number.isNaN(value)) return EMPTY_VALUE;
     if (Math.abs(value) >= 1000) return value.toFixed(0);
     if (Math.abs(value) >= 100) return value.toFixed(1);
     if (Math.abs(value) >= 1) return value.toFixed(2);
@@ -461,17 +583,17 @@ const [subgroupFilter, setSubgroupFilter] = useState<SubgroupFilter>("all");
   };
 
   const metricConfigs: MetricConfig[] = [
-    { key: "r2", label: "R^2", type: "higher", getValue: (m) => m.metrics.r2 },
-    { key: "adj_r2", label: "Adj R^2", type: "higher", getValue: (m) => m.metrics.adj_r2 },
+    { key: "r2", label: t("comparison.metrics.r2"), type: "higher", getValue: (m) => m.metrics.r2 },
+    { key: "adj_r2", label: t("comparison.metrics.adjR2"), type: "higher", getValue: (m) => m.metrics.adj_r2 },
     {
       key: "vif_max",
-      label: "VIF max",
+      label: t("comparison.metrics.vifMax"),
       type: "lower",
       getValue: (m) => (m.metrics.vif.length ? Math.max(...m.metrics.vif.map((v) => v.vif)) : null),
     },
     {
       key: "vif_mean",
-      label: "VIF mean",
+      label: t("comparison.metrics.vifMean"),
       type: "lower",
       getValue: (m) =>
         m.metrics.vif.length
@@ -480,19 +602,19 @@ const [subgroupFilter, setSubgroupFilter] = useState<SubgroupFilter>("all");
     },
     {
       key: "durbin_watson",
-      label: "Durbin-Watson",
+      label: t("comparison.metrics.durbinWatson"),
       type: "target",
       target: 2,
       getValue: (m) => m.metrics.durbin_watson,
     },
-    { key: "mae", label: "MAE", type: "lower", getValue: (m) => m.metrics.mae },
-    { key: "rmse", label: "RMSE", type: "lower", getValue: (m) => m.metrics.rmse },
+    { key: "mae", label: t("comparison.metrics.mae"), type: "lower", getValue: (m) => m.metrics.mae },
+    { key: "rmse", label: t("comparison.metrics.rmse"), type: "lower", getValue: (m) => m.metrics.rmse },
     {
       key: "mape",
-      label: "MAPE",
+      label: t("comparison.metrics.mape"),
       type: "lower",
       getValue: (m) => (m.metrics.mape != null ? m.metrics.mape : null),
-      format: (value) => (value == null || Number.isNaN(value) ? "-" : `${value.toFixed(1)}%`),
+      format: (value) => (value == null || Number.isNaN(value) ? EMPTY_VALUE : `${value.toFixed(1)}%`),
     },
   ];
 
@@ -544,135 +666,247 @@ const [subgroupFilter, setSubgroupFilter] = useState<SubgroupFilter>("all");
     }));
   }, [predictions]);
 
-  return (
-    <>
-      <section className="space-y-6">
-      <header className="space-y-4">
-        <div>
-          <p className="text-sm text-[var(--color-muted)]">Module 3</p>
-          <h1 className="text-2xl font-semibold tracking-tight">Modeling</h1>
-        </div>
-        <FilterBar>
-          <FilterField label="DATASET" className="w-[240px]">
-            <Select
-              value={selectedDataset}
-              onChange={(e) => {
-                setSelectedDataset(e.target.value);
-                resetForm();
-              }}
-            >
-              {datasets.map((ds) => (
-                <option key={ds.id} value={ds.id}>
-                  {ds.display_name}
-                </option>
-              ))}
-            </Select>
-          </FilterField>
-          <FilterField label="DEPENDENT VARIABLE" className="w-[260px]">
-            <Select value={yVar} onChange={(e) => setYVar(e.target.value)}>
-              <option value="">Select Y</option>
-              {variables.map((v) => (
-                <option key={v.id} value={v.name}>
-                  {v.name}
-                </option>
-              ))}
-            </Select>
-          </FilterField>
-        </FilterBar>
-      </header>
+  const tornadoData = useMemo(() => {
+    if (!summary) return [];
+    return summary.coefficients
+      .filter((c): c is Coefficient & { beta_std: number } => c.beta_std != null && Number.isFinite(c.beta_std))
+      .map((c) => ({ name: c.name, value: c.beta_std }))
+      .sort((a, b) => Math.abs(b.value) - Math.abs(a.value));
+  }, [summary]);
 
-      <div className="grid gap-6 lg:grid-cols-[360px,1fr]">
-        <Card className="space-y-4">
-          <CardHeader title="Correlations" subtitle="Choose predictors" />
-          <div className="flex flex-wrap gap-2 text-xs">
-            <ToggleChip
-              active={groupFilter === "all"}
-              onClick={() => {
-                setGroupFilter("all");
-                setSubgroupFilter("all");
-              }}
-            >
-              All
-            </ToggleChip>
-            {groupOptions.map((group) => (
+  const tornadoHeight = Math.min(420, Math.max(160, tornadoData.length * 34 + 24));
+
+  const yVarOrFallback = yVar || "Y";
+  const showEmptyDatasets = !initializing && datasets.length === 0;
+
+  // Shared between the page-level Resumen (always the Hero) and the Builder tab (whichever
+  // model is being edited) — same fit-quality read regardless of which model it's showing.
+  const renderQualityStats = (model: Model) => {
+    const modelVifMax = model.metrics.vif.length ? Math.max(...model.metrics.vif.map((v) => v.vif)) : null;
+    const modelR2Quality = quality(model.metrics.r2, 0.7, true);
+    const modelVifQuality = quality(modelVifMax, 5, false);
+    const modelDwQuality = durbinWatsonQuality(model.metrics.durbin_watson);
+    const modelYVar = model.y_var || yVarOrFallback;
+    return (
+      <>
+        <StatCard
+          label={t("kpis.r2")}
+          value={model.metrics.r2.toFixed(3)}
+          icon={<InfoTooltip label={t("kpis.r2")} content={t("kpis.r2Tooltip", { yVar: modelYVar })} />}
+          trend={
+            <span className="inline-flex items-center gap-1.5 whitespace-nowrap">
+              {modelR2Quality && (
+                <Badge variant={modelR2Quality === "good" ? "success" : "warning"}>{t(`kpis.quality.${modelR2Quality}`)}</Badge>
+              )}
+              <span className="text-xs tabular-nums text-muted">{t("kpis.adjSuffix", { value: model.metrics.adj_r2.toFixed(3) })}</span>
+            </span>
+          }
+        />
+        <StatCard label={t("kpis.mae")} value={formatMetricValue(model.metrics.mae)} />
+        <StatCard label={t("kpis.rmse")} value={formatMetricValue(model.metrics.rmse)} />
+        <StatCard
+          label={t("kpis.vifMax")}
+          value={modelVifMax != null ? modelVifMax.toFixed(2) : EMPTY_VALUE}
+          icon={<InfoTooltip label={t("kpis.vifMax")} content={t("kpis.vifTooltip")} />}
+          trend={modelVifQuality ? <Badge variant={modelVifQuality === "good" ? "success" : "warning"}>{t(`kpis.quality.${modelVifQuality}`)}</Badge> : undefined}
+        />
+        <StatCard
+          label={t("kpis.durbinWatson")}
+          value={model.metrics.durbin_watson != null ? model.metrics.durbin_watson.toFixed(3) : EMPTY_VALUE}
+          icon={<InfoTooltip label={t("kpis.durbinWatson")} content={t("kpis.durbinWatsonTooltip")} />}
+          trend={modelDwQuality ? <Badge variant={modelDwQuality === "good" ? "success" : "warning"}>{t(`kpis.quality.${modelDwQuality}`)}</Badge> : undefined}
+        />
+      </>
+    );
+  };
+
+  // Shared between the standalone Coefficients tab (Hero) and the Builder tab's inline quality
+  // section (whichever model is being edited) — always the full detail, no toggle (point 5:
+  // hiding stats behind a click made the table less useful than just showing it).
+  const renderCoefficientsTable = (modelSummary: ModelSummary) => (
+    <div className="space-y-2">
+      <Table wrapperClassName="max-h-[480px] overflow-auto">
+        <TableHeader className="sticky top-0 z-10">
+          <TableRow>
+            <Th>{t("coefficients.colVariable")}</Th>
+            <Th className="text-right">{t("coefficients.colCoef")}</Th>
+            <Th className="text-right">{t("coefficients.colStdBeta")}</Th>
+            <Th className="text-right">{t("coefficients.colStdErr")}</Th>
+            <Th className="text-right">{t("coefficients.colT")}</Th>
+            <Th className="text-right">{t("coefficients.colP")}</Th>
+            <Th className="text-center">{t("coefficients.colSig")}</Th>
+            <Th className="text-right">{t("coefficients.colVif")}</Th>
+          </TableRow>
+        </TableHeader>
+        <tbody>
+          {[modelSummary.intercept, ...modelSummary.coefficients].map((item) => (
+            <TableRow key={item.name} className="hover:bg-surface-2">
+              <TableCell>
+                <div className="flex items-center gap-2">
+                  <span>{item.name}</span>
+                  {item.is_media && <Badge variant="accent">{t("coefficients.mediaBadge")}</Badge>}
+                </div>
+                {item.is_media && (
+                  <div className="text-2xs text-muted">
+                    decay {item.decay?.toFixed(2)}
+                    {item.half_life != null ? ` (half-life ${item.half_life.toFixed(1)})` : ""} · K{" "}
+                    {item.hill_k?.toFixed(2)} · S {item.hill_s?.toFixed(1)}
+                    {item.lag ? ` · lag ${item.lag}` : ""}
+                  </div>
+                )}
+              </TableCell>
+              <TableCell className="text-right tabular-nums">{item.coef.toFixed(4)}</TableCell>
+              <TableCell className="text-right tabular-nums">
+                {item.beta_std != null ? item.beta_std.toFixed(3) : EMPTY_VALUE}
+              </TableCell>
+              <TableCell className="text-right tabular-nums">{item.std_err.toFixed(4)}</TableCell>
+              <TableCell className="text-right tabular-nums">{item.t_value.toFixed(2)}</TableCell>
+              <TableCell className="text-right tabular-nums">{formatPValueNumber(item.p_value)}</TableCell>
+              <TableCell className="text-center tabular-nums text-muted">{pValueStars(item.p_value)}</TableCell>
+              <TableCell className="text-right tabular-nums">
+                {item.vif != null ? item.vif.toFixed(2) : EMPTY_VALUE}
+              </TableCell>
+            </TableRow>
+          ))}
+        </tbody>
+      </Table>
+      <p className="text-2xs text-muted">{t("coefficients.significanceLegend")}</p>
+    </div>
+  );
+
+  const tabItems = [
+    {
+      id: "builder",
+      label: t("tabs.builder"),
+      content: (
+        <div className="grid gap-6 lg:grid-cols-[360px,1fr]">
+          <Card className="space-y-4">
+            <CardHeader title={t("builder.predictorsTitle")} subtitle={t("builder.predictorsSubtitle")} />
+            <div className="flex flex-wrap gap-2 text-xs">
               <ToggleChip
-                key={group}
-                active={groupFilter === group}
+                active={groupFilter === "all"}
                 onClick={() => {
-                  setGroupFilter(group);
+                  setGroupFilter("all");
                   setSubgroupFilter("all");
                 }}
               >
-                {group}
+                {t("builder.filterAll")}
               </ToggleChip>
-            ))}
-          </div>
-          {groupFilter !== "all" && subgroupOptions.length > 0 && (
-            <div className="flex flex-wrap gap-2 text-2xs text-[var(--color-muted)]">
-              <ToggleChip active={subgroupFilter === "all"} onClick={() => setSubgroupFilter("all")}>
-                All subgroups
-              </ToggleChip>
-              {subgroupOptions.map((subgroup) => (
-                <ToggleChip key={subgroup} active={subgroupFilter === subgroup} onClick={() => setSubgroupFilter(subgroup)}>
-                  {subgroup}
+              {groupOptions.map((group) => (
+                <ToggleChip
+                  key={group}
+                  active={groupFilter === group}
+                  onClick={() => {
+                    setGroupFilter(group);
+                    setSubgroupFilter("all");
+                  }}
+                >
+                  {group}
                 </ToggleChip>
               ))}
             </div>
-          )}
-          <Input placeholder="Search variables" value={corrSearch} onChange={(e) => setCorrSearch(e.target.value)} />
-          <div className="flex items-center justify-between px-1 text-xs text-[var(--color-muted)]">
-            <label className="flex items-center gap-2">
-              <input
-                ref={selectAllRef}
-                type="checkbox"
-                className="h-4 w-4 accent-[var(--color-accent)]"
-                checked={allVisibleSelected}
-                onChange={handleToggleSelectAll}
-                disabled={!visibleCorrelations.length}
-              />
-              <span>Select all (filtered)</span>
-            </label>
-            <button
-              type="button"
-              className="rounded-full border border-[var(--color-border)] px-2.5 py-1 text-2xs text-[var(--color-muted)] hover:bg-[var(--color-border)]/30"
-              onClick={() => setShowQuickView(true)}
-            >
-              Selected: {xSelected.length}
-            </button>
-          </div>
-          <div className="h-[420px] overflow-y-auto pr-2">
-            <div className="space-y-2">
-              {visibleCorrelations.map((item) => (
-                <label key={item.name} className="flex items-center justify-between gap-4 text-sm">
-                  <div className="min-w-0">
-                    <p className="truncate text-[var(--color-foreground)]">{item.name}</p>
-                    <p className="text-xs text-[var(--color-muted)]">
-                      Y: {formatCorr(item.corr_y)}
-                      {editingModelId ? <> | res: {formatCorr(item.corr_res)}</> : null}
-                    </p>
-                  </div>
-                  <input type="checkbox" checked={xSelected.includes(item.name)} onChange={() => handleToggleX(item.name)} />
-                </label>
-              ))}
-              {!visibleCorrelations.length && (
-                <p className="text-sm text-[var(--color-muted)]">No predictors match your current filters.</p>
-              )}
+            {groupFilter !== "all" && subgroupOptions.length > 0 && (
+              <div className="flex flex-wrap gap-2 text-2xs text-muted">
+                <ToggleChip active={subgroupFilter === "all"} onClick={() => setSubgroupFilter("all")}>
+                  {t("builder.subgroupAll")}
+                </ToggleChip>
+                {subgroupOptions.map((subgroup) => (
+                  <ToggleChip key={subgroup} active={subgroupFilter === subgroup} onClick={() => setSubgroupFilter(subgroup)}>
+                    {subgroup}
+                  </ToggleChip>
+                ))}
+              </div>
+            )}
+            <Input
+              placeholder={t("builder.searchPlaceholder")}
+              aria-label={t("builder.searchPlaceholder")}
+              value={corrSearch}
+              onChange={(e) => setCorrSearch(e.target.value)}
+            />
+            <div className="flex items-center justify-between px-1 text-xs text-muted">
+              <label className="flex items-center gap-2">
+                <input
+                  ref={selectAllRef}
+                  type="checkbox"
+                  className="h-4 w-4 accent-accent"
+                  checked={allVisibleSelected}
+                  onChange={handleToggleSelectAll}
+                  disabled={!visibleCorrelations.length}
+                />
+                <span>{t("builder.selectAllFiltered")}</span>
+              </label>
+              <button
+                type="button"
+                className="rounded-full border border-border-control px-2.5 py-1 text-2xs text-muted hover:bg-surface-2"
+                onClick={() => setShowQuickView(true)}
+              >
+                {t("builder.selectedCount", { count: xSelected.length })}
+              </button>
             </div>
-          </div>
-        </Card>
+            <div className="h-[420px] overflow-y-auto pr-2">
+              <div className="space-y-2">
+                {visibleCorrelations.map((item) => (
+                  <label key={item.name} className="flex items-center justify-between gap-4 text-sm">
+                    <div className="min-w-0">
+                      <p className="truncate text-ink">{item.name}</p>
+                      <p className="text-xs text-muted">
+                        {t("builder.yLabel")}: {formatCorr(item.corr_y)}
+                        {editingModelId ? (
+                          <>
+                            {" "}· {t("builder.residualLabel")}: {formatCorr(item.corr_res)}
+                          </>
+                        ) : null}
+                      </p>
+                    </div>
+                    <input type="checkbox" checked={xSelected.includes(item.name)} onChange={() => handleToggleX(item.name)} />
+                  </label>
+                ))}
+                {!visibleCorrelations.length && <p className="text-sm text-muted">{t("builder.noMatches")}</p>}
+              </div>
+            </div>
+          </Card>
 
-        <div className="space-y-6">
+          <div className="space-y-6">
           <Card className="space-y-4">
-            <CardHeader title={editingModelId ? "Edit model" : "Create model"} subtitle="Select variables and save" />
+            <CardHeader
+              title={editingModelId ? t("builder.formTitleEdit") : t("builder.formTitleCreate")}
+              subtitle={t("builder.formSubtitle")}
+            />
+            <FilterField label={t("builder.modelSelectorLabel")} className="max-w-xs">
+              <Select
+                value={editingModelId ?? NEW_MODEL_VALUE}
+                onChange={(e) => {
+                  const val = e.target.value;
+                  if (val === NEW_MODEL_VALUE) {
+                    resetForm();
+                    return;
+                  }
+                  const model = models.find((m) => m.id === val);
+                  if (model) startEdit(model);
+                }}
+              >
+                <option value={NEW_MODEL_VALUE}>{t("builder.newModelOption")}</option>
+                {models.map((m) => (
+                  <option key={m.id} value={m.id}>
+                    {m.name}
+                  </option>
+                ))}
+              </Select>
+            </FilterField>
             <div className="grid gap-3 md:grid-cols-2">
               <div className="space-y-2">
-                <Eyebrow>Model name</Eyebrow>
-                <Input value={modelName} onChange={(e) => setModelName(e.target.value)} placeholder="Hero Model" />
+                <Eyebrow htmlFor="modeling-model-name">{t("builder.modelNameLabel")}</Eyebrow>
+                <Input
+                  id="modeling-model-name"
+                  value={modelName}
+                  onChange={(e) => setModelName(e.target.value)}
+                  placeholder={t("builder.modelNamePlaceholder")}
+                />
               </div>
               <div className="space-y-2">
-                <Eyebrow>Predictors selected</Eyebrow>
-                <p className="text-sm text-[var(--color-muted)]">
-                  {xSelected.length ? `${xSelected.length} selected` : "None yet"}
+                <Eyebrow>{t("builder.predictorsSelectedLabel")}</Eyebrow>
+                <p className="text-sm text-muted">
+                  {xSelected.length ? t("builder.selectedCount", { count: xSelected.length }) : t("builder.predictorsNone")}
                 </p>
               </div>
             </div>
@@ -680,421 +914,558 @@ const [subgroupFilter, setSubgroupFilter] = useState<SubgroupFilter>("all");
               predictors={xSelected}
               onRemove={(name) => setXSelected((prev) => prev.filter((p) => p !== name))}
               onClear={() => setXSelected([])}
+              title={t("quickView.title")}
+              countLabel={(count) => t("quickView.count", { count })}
+              clearLabel={t("quickView.clear")}
+              removeLabel={(name) => t("quickView.remove", { name })}
+              emptyLabel={t("quickView.empty")}
             />
-            <label
-              className="flex items-center gap-2 text-sm"
-              title="Cuando está activo, las variables de medios (marcadas en Group/Subgroup) reciben adstock + saturación Hill automáticos al ajustar el modelo. Desactívalo para usar valores crudos (por ejemplo si ya las transformaste manualmente en Transform)."
-            >
+            <label className="flex items-center gap-2 text-sm text-ink" title={t("builder.mediaTransformTooltip")}>
               <input
                 type="checkbox"
                 checked={applyMediaTransforms}
                 onChange={(e) => setApplyMediaTransforms(e.target.checked)}
               />
-              Aplicar adstock + saturación a variables de medios
+              {t("builder.mediaTransformLabel")}
             </label>
             <div className="flex gap-2 justify-end">
               {editingModelId && (
                 <Button variant="ghost" onClick={resetForm}>
-                  Cancel
+                  {t("builder.cancel")}
                 </Button>
               )}
               <Button
                 onClick={handleSubmit}
                 disabled={!canEdit || loading}
-                title={!canEdit ? "Solo lectura: tu rol es Visualizador" : undefined}
+                title={!canEdit ? tCommon("readOnlyTooltip") : undefined}
               >
-                {loading ? "Saving..." : editingModelId ? "Update model" : "Create model"}
+                {loading ? t("builder.saving") : editingModelId ? t("builder.submitUpdate") : t("builder.submitCreate")}
               </Button>
             </div>
           </Card>
 
           <Card className="space-y-4">
-            <CardHeader title="Models" subtitle="Manage hero and challengers" />
-            <div className="overflow-auto">
-              <table className="min-w-full text-sm">
-                <thead className="bg-[var(--color-bg)]/70">
-                  <tr>
-                    <th className="px-3 py-2 text-left">Name</th>
-                    <th className="px-3 py-2 text-left">Role</th>
-                    <th className="px-3 py-2 text-left">R^2</th>
-                    <th className="px-3 py-2 text-left">Adj R^2</th>
-                    <th className="px-3 py-2 text-left">MAE</th>
-                    <th className="px-3 py-2 text-left">RMSE</th>
-                    <th className="px-3 py-2 text-left">Actions</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {models.map((m) => (
-                    <tr key={m.id} className="odd:bg-transparent even:bg-[var(--color-border)]/20">
-                      <td className="px-3 py-2 font-medium">
-                        {m.name}
-                        {!m.apply_media_transforms && (
-                          <span
-                            className="ml-2 text-3xs uppercase text-[var(--color-muted)]"
-                            title="Este modelo NO aplica adstock+saturación a variables de medios (valores crudos)"
-                          >
-                            sin transform
-                          </span>
-                        )}
-                      </td>
-                      <td className="px-3 py-2">
-                        <Badge>{m.role === "none" ? "-" : m.role}</Badge>
-                      </td>
-                      <td className="px-3 py-2">{m.metrics.r2.toFixed(3)}</td>
-                      <td className="px-3 py-2">{m.metrics.adj_r2.toFixed(3)}</td>
-                      <td className="px-3 py-2">{m.metrics.mae.toFixed(2)}</td>
-                      <td className="px-3 py-2">{m.metrics.rmse.toFixed(2)}</td>
-                      <td className="px-3 py-2 space-x-2">
-                        <Button variant="ghost" size="sm" onClick={() => startEdit(m)}>
-                          Edit
-                        </Button>
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          onClick={() => deleteModel(m)}
-                          disabled={!canEdit}
-                          title={!canEdit ? "Solo lectura: tu rol es Visualizador" : undefined}
-                        >
-                          Delete
-                        </Button>
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          onClick={() => handleDuplicateModel(m)}
-                          disabled={!canEdit || duplicateLoadingId === m.id}
-                          title={!canEdit ? "Solo lectura: tu rol es Visualizador" : undefined}
-                        >
-                          {duplicateLoadingId === m.id ? "Copying..." : "Copy"}
-                        </Button>
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          onClick={() => handleBestModel(m)}
-                          disabled={!canEdit || bestLoadingId === m.id}
-                          title={!canEdit ? "Solo lectura: tu rol es Visualizador" : undefined}
-                        >
-                          {bestLoadingId === m.id ? "Finding…" : "Best"}
-                        </Button>
-                        {m.role !== "hero" && (
-                          <Button
-                            variant="secondary"
-                            size="sm"
-                            onClick={() => setRole(m, "hero")}
-                            disabled={!canEdit}
-                            title={!canEdit ? "Solo lectura: tu rol es Visualizador" : undefined}
-                          >
-                            Hero
-                          </Button>
-                        )}
-                        {m.role !== "challenger1" && (
-                          <Button
-                            variant="secondary"
-                            size="sm"
-                            onClick={() => setRole(m, "challenger1")}
-                            disabled={!canEdit}
-                            title={!canEdit ? "Solo lectura: tu rol es Visualizador" : undefined}
-                          >
-                            Ch. 1
-                          </Button>
-                        )}
-                        {m.role !== "challenger2" && (
-                          <Button
-                            variant="secondary"
-                            size="sm"
-                            onClick={() => setRole(m, "challenger2")}
-                            disabled={!canEdit}
-                            title={!canEdit ? "Solo lectura: tu rol es Visualizador" : undefined}
-                          >
-                            Ch. 2
-                          </Button>
-                        )}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+            <CardHeader title={t("builder.qualityTitle")} subtitle={t("builder.qualitySubtitle")} />
+            {editingModel ? (
+              <>
+                <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">{renderQualityStats(editingModel)}</div>
+                {editSummary ? renderCoefficientsTable(editSummary) : <Skeleton className="h-48" />}
+              </>
+            ) : (
+              <p className="text-sm text-muted">{t("builder.qualityEmptyHint")}</p>
+            )}
           </Card>
+          </div>
         </div>
-      </div>
-
-      <Card className="space-y-4">
-        <CardHeader title="Comparison" subtitle="Hero vs Challengers" />
-        {compareModels.length ? (
-          <>
-            <div className="overflow-auto">
-              <table className="min-w-full text-sm">
-                <thead className="bg-[var(--color-bg)]/70">
-                  <tr>
-                    <th className="px-3 py-2 text-left text-2xs uppercase tracking-wide text-[var(--color-muted)]">
-                      Metric
-                    </th>
+      ),
+    },
+    {
+      id: "models",
+      label: t("tabs.models"),
+      content: (
+        <Card className="space-y-4">
+          <CardHeader title={t("models.title")} subtitle={t("models.subtitle")} />
+          {models.length ? (
+            <Table wrapperClassName="max-h-[480px] overflow-auto">
+              <TableHeader className="sticky top-0 z-10">
+                <TableRow>
+                  <Th>{t("models.colName")}</Th>
+                  <Th>{t("models.colRole")}</Th>
+                  <Th className="text-right">{t("models.colR2")}</Th>
+                  <Th className="text-right">{t("models.colAdjR2")}</Th>
+                  <Th className="text-right">{t("models.colMae")}</Th>
+                  <Th className="text-right">{t("models.colRmse")}</Th>
+                  <Th>{t("models.colActions")}</Th>
+                </TableRow>
+              </TableHeader>
+              <tbody>
+                {models.map((m) => (
+                  <TableRow key={m.id} className="hover:bg-surface-2">
+                    <TableCell>
+                      <span className="font-medium">{m.name}</span>
+                      {!m.apply_media_transforms && (
+                        <span className="ml-2 text-3xs uppercase text-muted" title={t("models.noTransformTooltip")}>
+                          {t("models.noTransformBadge")}
+                        </span>
+                      )}
+                    </TableCell>
+                    <TableCell>
+                      <Badge variant={m.role === "hero" ? "accent" : "neutral"}>
+                        {m.role === "none" ? t("models.roleNone") : ROLE_LABEL[m.role] || m.role}
+                      </Badge>
+                    </TableCell>
+                    <TableCell className="text-right tabular-nums">{m.metrics.r2.toFixed(3)}</TableCell>
+                    <TableCell className="text-right tabular-nums">{m.metrics.adj_r2.toFixed(3)}</TableCell>
+                    <TableCell className="text-right tabular-nums">{m.metrics.mae.toFixed(2)}</TableCell>
+                    <TableCell className="text-right tabular-nums">{m.metrics.rmse.toFixed(2)}</TableCell>
+                    <TableCell>
+                      <RowActions>
+                        <IconButton size="sm" aria-label={t("models.actionEdit")} onClick={() => startEdit(m)}>
+                          <Pencil className="h-4 w-4" />
+                        </IconButton>
+                        <Dropdown
+                          align="right"
+                          triggerAriaLabel={t("models.actionMore")}
+                          trigger={
+                            <span className="inline-flex h-control-sm w-control-sm items-center justify-center rounded-full border border-border-control transition duration-150 hover:bg-accent-bg">
+                              <MoreVertical className="h-4 w-4" />
+                            </span>
+                          }
+                        >
+                          {m.role !== "hero" && (
+                            <DropdownItem
+                              onClick={() => setRole(m, "hero")}
+                              disabled={!canEdit}
+                              title={!canEdit ? tCommon("readOnlyTooltip") : undefined}
+                            >
+                              {t("models.setHero")}
+                            </DropdownItem>
+                          )}
+                          {m.role !== "challenger1" && (
+                            <DropdownItem
+                              onClick={() => setRole(m, "challenger1")}
+                              disabled={!canEdit}
+                              title={!canEdit ? tCommon("readOnlyTooltip") : undefined}
+                            >
+                              {t("models.setChallenger1")}
+                            </DropdownItem>
+                          )}
+                          {m.role !== "challenger2" && (
+                            <DropdownItem
+                              onClick={() => setRole(m, "challenger2")}
+                              disabled={!canEdit}
+                              title={!canEdit ? tCommon("readOnlyTooltip") : undefined}
+                            >
+                              {t("models.setChallenger2")}
+                            </DropdownItem>
+                          )}
+                          <DropdownItem
+                            onClick={() => handleDuplicateModel(m)}
+                            disabled={!canEdit || duplicateLoadingId === m.id}
+                            title={!canEdit ? tCommon("readOnlyTooltip") : undefined}
+                          >
+                            {duplicateLoadingId === m.id ? t("models.actionDuplicating") : t("models.actionDuplicate")}
+                          </DropdownItem>
+                          <DropdownItem
+                            onClick={() => handleBestModel(m)}
+                            disabled={!canEdit || bestLoadingId === m.id}
+                            title={!canEdit ? tCommon("readOnlyTooltip") : undefined}
+                          >
+                            {bestLoadingId === m.id ? t("models.actionBestRunning") : t("models.actionBest")}
+                          </DropdownItem>
+                          <DropdownItem
+                            onClick={() => setDeleteTarget(m)}
+                            disabled={!canEdit}
+                            title={!canEdit ? tCommon("readOnlyTooltip") : undefined}
+                            className="text-bad"
+                          >
+                            {t("models.actionDelete")}
+                          </DropdownItem>
+                        </Dropdown>
+                      </RowActions>
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </tbody>
+            </Table>
+          ) : (
+            <EmptyState
+              title={t("models.empty.title")}
+              description={t("models.empty.description")}
+              action={<Button onClick={openBuilder}>{t("models.empty.cta")}</Button>}
+            />
+          )}
+        </Card>
+      ),
+    },
+    {
+      id: "comparison",
+      label: t("tabs.comparison"),
+      content: (
+        <Card className="space-y-4">
+          <CardHeader title={t("comparison.title")} subtitle={t("comparison.subtitle")} />
+          {compareModels.length ? (
+            <>
+              <Table wrapperClassName="overflow-auto">
+                <TableHeader>
+                  <TableRow>
+                    <Th>{t("comparison.metricLabel")}</Th>
                     {compareModels.map((m, idx) => (
-                      <th
-                        key={m.id}
-                        className={`px-3 py-2 text-center text-xs font-medium ${
-                          idx === heroComparisonIndex ? "bg-[var(--color-border)]/30 rounded-t-md" : ""
-                        }`}
-                      >
-                        <div className="flex flex-col items-center gap-1">
-                          <span className="text-sm text-[var(--color-foreground)]">{m.name}</span>
-                          {m.role === "hero" && <Badge variant="neutral">Hero</Badge>}
+                      <Th key={m.id} className={`text-center${idx === heroComparisonIndex ? " bg-surface-2" : ""}`}>
+                        <div className="flex flex-col items-center gap-1 py-1 text-2xs font-medium normal-case tracking-normal text-ink">
+                          <span className="text-sm">{m.name}</span>
+                          {m.role === "hero" && <Badge variant="accent">Hero</Badge>}
                         </div>
-                      </th>
+                      </Th>
                     ))}
-                  </tr>
-                </thead>
+                  </TableRow>
+                </TableHeader>
                 <tbody>
                   {metricRows.map((row) => (
-                    <tr key={row.key} className="odd:bg-transparent even:bg-[var(--color-border)]/20">
-                      <td className="px-3 py-2 text-xs font-medium text-[var(--color-muted)]">{row.label}</td>
+                    <TableRow key={row.key}>
+                      <TableCell className="text-xs font-medium text-muted">{row.label}</TableCell>
                       {row.values.map((value, idx) => {
                         const isBest = row.bestIndex != null && idx === row.bestIndex;
                         const isHero = idx === heroComparisonIndex;
-                        const cellClasses = [
-                          "px-3 py-2 text-center text-sm transition-colors",
-                          isHero ? "bg-[var(--color-border)]/20" : "",
-                          isBest ? "bg-[var(--color-success-soft)] text-[var(--color-success)] font-semibold rounded-md" : "",
-                        ]
-                          .filter(Boolean)
-                          .join(" ");
                         const displayValue = row.format ? row.format(value) : formatMetricValue(value);
                         return (
-                          <td key={`${row.key}-${idx}`} className={cellClasses}>
-                            <div className="inline-flex items-center gap-1">
+                          <TableCell
+                            key={`${row.key}-${idx}`}
+                            className={`text-center tabular-nums${isHero ? " bg-surface-2" : ""}${
+                              isBest ? " rounded-md bg-good-bg font-semibold text-good" : ""
+                            }`}
+                          >
+                            <span className="inline-flex items-center gap-1">
                               <span>{displayValue}</span>
-                              {isBest && <Badge variant="success">Best</Badge>}
-                            </div>
-                          </td>
+                              {isBest && <Badge variant="success">{t("comparison.best")}</Badge>}
+                            </span>
+                          </TableCell>
                         );
                       })}
-                    </tr>
+                    </TableRow>
                   ))}
                 </tbody>
-              </table>
-            </div>
-            {comparisonChartData.length > 0 ? (
-              <div className="h-64">
-                <ResponsiveContainer width="100%" height="100%">
-                  <ComposedChart data={comparisonChartData} margin={{ top: 10, right: 32, left: 0, bottom: 0 }}>
-                    <CartesianGrid strokeDasharray="3 3" />
-                    <XAxis dataKey="model" stroke="var(--color-muted)" />
-                    <YAxis
-                      yAxisId="left"
-                      axisLine={false}
-                      tickLine={false}
-                      stroke="var(--color-muted)"
-                      tickFormatter={(value) => formatChartNumber(Number(value), 2)}
-                    />
-                    <YAxis
-                      yAxisId="right"
-                      orientation="right"
-                      domain={[0, 1]}
-                      axisLine={false}
-                      tickLine={false}
-                      stroke="var(--color-muted)"
-                    />
-                    <Tooltip
-                      formatter={(value, name) => {
-                        const num = typeof value === "number" ? value : Number(value);
-                        if (value == null || Number.isNaN(num)) return ["-", name];
-                        const decimals = name === "R^2" ? 3 : num < 1 ? 4 : 2;
-                        return [num.toFixed(decimals), name];
-                      }}
-                    />
-                    <Legend />
-                    <Bar
-                      yAxisId="left"
-                      dataKey="mae"
-                      name="MAE"
-                      barSize={18}
-                      radius={[6, 6, 0, 0]}
-                      fill={chartColor(1, isDarkTheme)}
-                    />
-                    <Bar
-                      yAxisId="left"
-                      dataKey="rmse"
-                      name="RMSE"
-                      barSize={18}
-                      radius={[6, 6, 0, 0]}
-                      fill={chartColor(2, isDarkTheme)}
-                    />
-                    <Line
-                      yAxisId="right"
-                      type="monotone"
-                      dataKey="r2"
-                      name="R^2"
-                      dot={false}
-                      stroke={chartColor(0, isDarkTheme)}
-                      strokeWidth={2}
-                    />
-                  </ComposedChart>
-                </ResponsiveContainer>
+              </Table>
+              <div className="grid gap-4 sm:grid-cols-2">
+                <div>
+                  <p className="mb-2 text-2xs font-medium uppercase tracking-wide text-muted">{t("comparison.errorChartTitle")}</p>
+                  <div className="h-chart-sm">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <BarChart data={comparisonChartData} margin={{ top: 10, right: 16, left: 0, bottom: 0 }}>
+                        <CartesianGrid strokeDasharray="3 3" stroke={lineColor} />
+                        <XAxis dataKey="model" tick={{ fill: mutedColor, fontSize: 11 }} axisLine={{ stroke: lineColor }} />
+                        <YAxis
+                          tick={{ fill: mutedColor, fontSize: 11 }}
+                          axisLine={{ stroke: lineColor }}
+                          tickFormatter={(value) => formatChartNumber(Number(value), 2)}
+                        />
+                        <Tooltip
+                          formatter={(value: number) => formatChartNumber(value, 3)}
+                          contentStyle={{ background: surfaceColor, borderColor: lineColor, fontSize: 12 }}
+                        />
+                        <Legend wrapperStyle={{ fontSize: 12, color: mutedColor }} />
+                        <Bar dataKey="mae" name={t("comparison.metrics.mae")} radius={[6, 6, 0, 0]} fill={chartColor(1, isDarkTheme)} />
+                        <Bar dataKey="rmse" name={t("comparison.metrics.rmse")} radius={[6, 6, 0, 0]} fill={chartColor(2, isDarkTheme)} />
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </div>
+                </div>
+                <div>
+                  <p className="mb-2 text-2xs font-medium uppercase tracking-wide text-muted">{t("comparison.r2ChartTitle")}</p>
+                  <div className="h-chart-sm">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <BarChart data={comparisonChartData} margin={{ top: 10, right: 16, left: 0, bottom: 0 }}>
+                        <CartesianGrid strokeDasharray="3 3" stroke={lineColor} />
+                        <XAxis dataKey="model" tick={{ fill: mutedColor, fontSize: 11 }} axisLine={{ stroke: lineColor }} />
+                        <YAxis
+                          domain={[0, 1]}
+                          tick={{ fill: mutedColor, fontSize: 11 }}
+                          axisLine={{ stroke: lineColor }}
+                          tickFormatter={(value) => formatChartNumber(Number(value), 2)}
+                        />
+                        <ReferenceLine
+                          y={0.7}
+                          stroke={chartColor(7, isDarkTheme)}
+                          strokeDasharray="4 4"
+                          label={{ value: t("kpis.quality.good"), fontSize: 10, position: "insideTopRight", fill: mutedColor }}
+                        />
+                        <Tooltip
+                          formatter={(value: number) => formatChartNumber(value, 3)}
+                          contentStyle={{ background: surfaceColor, borderColor: lineColor, fontSize: 12 }}
+                        />
+                        <Bar dataKey="r2" name="R²" radius={[6, 6, 0, 0]} fill={chartColor(0, isDarkTheme)} />
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </div>
+                </div>
               </div>
-            ) : null}
-          </>
-        ) : (
-          <p className="text-sm text-[var(--color-muted)]">
-            Set a hero and at least one challenger model to compare performance.
-          </p>
-        )}
-      </Card>
-
-      <div className="space-y-6">
+            </>
+          ) : (
+            <EmptyState title={t("comparison.empty")} />
+          )}
+        </Card>
+      ),
+    },
+    {
+      id: "diagnostics",
+      label: t("tabs.diagnostics"),
+      content: (
         <Card className="space-y-4">
-          <div className="flex items-center justify-between">
-            <CardHeader title="Actual vs Model" subtitle="Toggle residuals for diagnostics" />
-            <label className="text-xs flex items-center gap-2">
-              <input type="checkbox" checked={showResiduals} onChange={(e) => setShowResiduals(e.target.checked)} />
-              Residuals
-            </label>
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <CardHeader title={t("diagnostics.title")} subtitle={t("diagnostics.subtitle")} />
+            <div className="flex gap-1">
+              <ToggleChip active={!showResiduals} onClick={() => setShowResiduals(false)}>
+                {t("diagnostics.viewActual")}
+              </ToggleChip>
+              <ToggleChip active={showResiduals} onClick={() => setShowResiduals(true)}>
+                {t("diagnostics.viewResiduals")}
+              </ToggleChip>
+            </div>
           </div>
           {predictionSeries.length ? (
-            <div className="h-[480px]">
-              <ResponsiveContainer>
-                <LineChart data={predictionSeries}>
-                  <CartesianGrid strokeDasharray="3 3" />
-                  <XAxis
-                    dataKey="label"
-                    tickFormatter={(value) => formatTimeLabel(String(value), true)}
-                    minTickGap={12}
-                    height={40}
-                    tick={{ fontSize: 11 }}
-                  />
-                  <YAxis tickFormatter={(value) => formatChartNumber(Number(value))} />
-                  <Tooltip
-                    labelFormatter={(value) => formatTimeLabel(String(value), true)}
-                    formatter={(value: number | string, name) => {
-                      if (typeof value === "number") {
-                        return [value.toFixed(4), name];
-                      }
-                      return [value, name];
-                    }}
-                  />
-                  <Legend />
-                  {showResiduals ? (
-                    <Line type="monotone" dataKey="residual" stroke={chartColor(7, isDarkTheme)} dot={false} name="Residual" />
-                  ) : (
-                    <>
-                      <Line type="monotone" dataKey="y_true" stroke={chartColor(0, isDarkTheme)} dot={false} name="Actual" />
-                      <Line type="monotone" dataKey="y_pred" stroke={chartColor(2, isDarkTheme)} dot={false} name="Model" />
-                    </>
-                  )}
-                </LineChart>
+            <div className="h-chart-lg">
+              <ResponsiveContainer width="100%" height="100%">
+                {showResiduals ? (
+                  <BarChart data={predictionSeries}>
+                    <CartesianGrid strokeDasharray="3 3" stroke={lineColor} />
+                    <XAxis
+                      dataKey="label"
+                      tickFormatter={(value) => formatTimeLabel(String(value), true)}
+                      minTickGap={12}
+                      height={40}
+                      tick={{ fill: mutedColor, fontSize: 11 }}
+                      axisLine={{ stroke: lineColor }}
+                    />
+                    <YAxis
+                      tickFormatter={(value) => formatChartNumber(Number(value))}
+                      tick={{ fill: mutedColor, fontSize: 11 }}
+                      axisLine={{ stroke: lineColor }}
+                    />
+                    <ReferenceLine y={0} stroke={lineColor} />
+                    <Tooltip
+                      labelFormatter={(value) => formatTimeLabel(String(value), true)}
+                      formatter={(value: number) => [value.toFixed(4), t("diagnostics.seriesResidual")]}
+                      contentStyle={{ background: surfaceColor, borderColor: lineColor, fontSize: 12 }}
+                    />
+                    <Bar dataKey="residual" name={t("diagnostics.seriesResidual")}>
+                      {predictionSeries.map((entry, idx) => (
+                        <Cell key={idx} fill={entry.residual >= 0 ? chartColor(0, isDarkTheme) : chartColor(1, isDarkTheme)} />
+                      ))}
+                    </Bar>
+                  </BarChart>
+                ) : (
+                  <LineChart data={predictionSeries}>
+                    <CartesianGrid strokeDasharray="3 3" stroke={lineColor} />
+                    <XAxis
+                      dataKey="label"
+                      tickFormatter={(value) => formatTimeLabel(String(value), true)}
+                      minTickGap={12}
+                      height={40}
+                      tick={{ fill: mutedColor, fontSize: 11 }}
+                      axisLine={{ stroke: lineColor }}
+                    />
+                    <YAxis
+                      tickFormatter={(value) => formatChartNumber(Number(value))}
+                      tick={{ fill: mutedColor, fontSize: 11 }}
+                      axisLine={{ stroke: lineColor }}
+                    />
+                    <Tooltip
+                      labelFormatter={(value) => formatTimeLabel(String(value), true)}
+                      formatter={(value: number, name) => [value.toFixed(4), name]}
+                      contentStyle={{ background: surfaceColor, borderColor: lineColor, fontSize: 12 }}
+                    />
+                    <Legend wrapperStyle={{ fontSize: 12, color: mutedColor }} />
+                    <Line type="monotone" dataKey="y_true" stroke={chartColor(0, isDarkTheme)} dot={false} name={t("diagnostics.seriesActual")} />
+                    <Line type="monotone" dataKey="y_pred" stroke={chartColor(2, isDarkTheme)} dot={false} name={t("diagnostics.seriesModel")} />
+                  </LineChart>
+                )}
               </ResponsiveContainer>
             </div>
           ) : (
-            <p className="text-sm text-[var(--color-muted)]">No prediction data yet.</p>
+            <EmptyState title={t("diagnostics.empty")} />
           )}
         </Card>
-
+      ),
+    },
+    {
+      id: "coefficients",
+      label: t("tabs.coefficients"),
+      content: (
         <Card className="space-y-4">
-          <div className="flex items-center justify-between">
-            <CardHeader title="Hero Model Summary" subtitle="Coefficients & diagnostics" />
-            <Button variant="ghost" onClick={() => heroModel && downloadModelSummary(heroModel.id)} disabled={!summary || !heroModel}>
-              Export Excel
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <CardHeader title={t("coefficients.title")} subtitle={t("coefficients.subtitle")} />
+            <Button
+              variant="ghost"
+              onClick={() => heroModel && downloadModelSummary(heroModel.id)}
+              disabled={!summary || !heroModel}
+            >
+              {t("coefficients.export")}
             </Button>
           </div>
-          {summary ? (
-            <div className="overflow-auto max-h-[480px] pr-2">
-              <table className="min-w-full text-sm">
-                <thead className="bg-[var(--color-bg)]/70">
-                  <tr>
-                    <th className="px-3 py-2 text-left">Variable</th>
-                    <th className="px-3 py-2 text-left">Beta</th>
-                    <th className="px-3 py-2 text-left">Std Beta</th>
-                    <th className="px-3 py-2 text-left">Std Err</th>
-                    <th className="px-3 py-2 text-left">t</th>
-                    <th className="px-3 py-2 text-left">p</th>
-                    <th className="px-3 py-2 text-left">VIF</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {[summary.intercept, ...summary.coefficients].map((item) => (
-                    <tr key={item.name} className="odd:bg-transparent even:bg-[var(--color-border)]/20">
-                      <td className="px-3 py-2">
-                        <div className="flex items-center gap-2">
-                          <span>{item.name}</span>
-                          {item.is_media && <Badge>Medios</Badge>}
-                        </div>
-                        {item.is_media && (
-                          <div className="text-2xs text-[var(--color-muted)]">
-                            decay {item.decay?.toFixed(2)}
-                            {item.half_life != null ? ` (half-life ${item.half_life.toFixed(1)})` : ""} · K{" "}
-                            {item.hill_k?.toFixed(2)} · S {item.hill_s?.toFixed(1)}
-                            {item.lag ? ` · lag ${item.lag}` : ""}
-                          </div>
-                        )}
-                      </td>
-                      <td className="px-3 py-2">{item.coef.toFixed(4)}</td>
-                      <td className="px-3 py-2">{item.beta_std != null ? item.beta_std.toFixed(3) : "-"}</td>
-                      <td className="px-3 py-2">{item.std_err.toFixed(4)}</td>
-                      <td className="px-3 py-2">{item.t_value.toFixed(2)}</td>
-                      <td className="px-3 py-2">{formatPValue(item.p_value)}</td>
-                      <td className="px-3 py-2">{item.vif != null ? item.vif.toFixed(2) : "-"}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          ) : (
-            <p className="text-sm text-[var(--color-muted)]">Select a Hero model to view details.</p>
-          )}
+          {summary ? renderCoefficientsTable(summary) : <EmptyState title={t("coefficients.empty")} />}
         </Card>
-      </div>
-    </section>
+      ),
+    },
+  ];
 
-    {showQuickView && (
-      <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-4">
-        <div className="w-full max-w-sm rounded-2xl bg-[var(--color-card)] p-4 shadow-2xl">
-            <div className="mb-3 flex items-center justify-between">
-              <div>
-                <h3 className="text-sm font-semibold text-[var(--color-foreground)]">Selected predictors</h3>
-                <p className="text-xs text-[var(--color-muted)]">{xSelected.length} total</p>
-              </div>
-              <button
-                type="button"
-                className="text-xs text-[var(--color-muted)] hover:text-[var(--color-foreground)]"
-                onClick={() => setShowQuickView(false)}
-              >
-                Close
-              </button>
-            </div>
-            <div className="max-h-[50vh] space-y-2 overflow-y-auto pr-1">
-              {selectedDetails.length ? (
-                selectedDetails.map((item) => (
-                  <div
-                    key={item.name}
-                    className="flex items-center justify-between rounded-xl border border-[var(--color-border)] px-3 py-2"
-                  >
-                    <div className="min-w-0">
-                      <p className="truncate text-sm font-medium text-[var(--color-foreground)]">{item.name}</p>
-                      <p className="text-xs text-[var(--color-muted)]">
-                        Y: {formatCorr(item.corr_y)}
-                        {editingModelId ? <> | res: {formatCorr(item.corr_res)}</> : null}
-                      </p>
-                    </div>
-                    <button
-                      type="button"
-                      className="rounded-full border border-[var(--color-border)] px-2 py-0.5 text-xs text-[var(--color-muted)] hover:bg-[var(--color-border)]/30"
-                      onClick={() => handleToggleX(item.name)}
-                    >
-                      remove
-                    </button>
-                  </div>
-                ))
-              ) : (
-                <p className="text-sm text-[var(--color-muted)]">No predictors selected.</p>
-              )}
-            </div>
+  return (
+    <section className="space-y-6">
+      <PageHeader title={t("title")} subtitle={t("eyebrow")} />
+
+      {initializing ? (
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+          {Array.from({ length: 4 }).map((_, i) => (
+            <Skeleton key={i} className="h-[104px]" />
+          ))}
         </div>
-      </div>
-    )}
-    </>
+      ) : showEmptyDatasets ? (
+        <Card>
+          <EmptyState
+            title={t("noDatasets.title")}
+            description={t("noDatasets.description")}
+            action={<SecondaryLink href="/datasets">{t("noDatasets.cta")}</SecondaryLink>}
+          />
+        </Card>
+      ) : (
+        <>
+          <FilterBar>
+            <FilterField label={t("filters.dataset")} className="w-[240px]">
+              <Select
+                value={selectedDataset}
+                onChange={(e) => {
+                  setSelectedDataset(e.target.value);
+                  resetForm();
+                }}
+              >
+                {datasets.map((ds) => (
+                  <option key={ds.id} value={ds.id}>
+                    {ds.display_name}
+                  </option>
+                ))}
+              </Select>
+            </FilterField>
+            <FilterField label={t("filters.dependentVariable")} className="w-[260px]">
+              <Select value={yVar} onChange={(e) => setYVar(e.target.value)}>
+                <option value="">{t("filters.dependentVariablePlaceholder")}</option>
+                {variables.map((v) => (
+                  <option key={v.id} value={v.name}>
+                    {v.name}
+                  </option>
+                ))}
+              </Select>
+            </FilterField>
+          </FilterBar>
+
+          {/* Resumen: siempre visible — la vitrina del hero model. */}
+          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4" aria-busy={modelsLoading}>
+            {modelsLoading ? (
+              Array.from({ length: 5 }).map((_, i) => <Skeleton key={i} className="h-[104px]" />)
+            ) : heroModel ? (
+              renderQualityStats(heroModel)
+            ) : (
+              <div className="sm:col-span-2 lg:col-span-4">
+                <Card>
+                  <EmptyState
+                    title={t("kpis.noHero.title")}
+                    description={t("kpis.noHero.description")}
+                    action={<Button onClick={openBuilder}>{t("kpis.noHero.cta")}</Button>}
+                  />
+                </Card>
+              </div>
+            )}
+          </div>
+
+          {heroModel && (
+            <Card className="space-y-3">
+              <CardHeader as="h2" title={t("tornado.title")} subtitle={t("tornado.subtitle", { yVar: yVarOrFallback })} />
+              {tornadoData.length ? (
+                <>
+                  <div style={{ height: tornadoHeight }}>
+                    <ResponsiveContainer width="100%" height="100%">
+                      <BarChart data={tornadoData} layout="vertical" margin={{ top: 8, right: 24, left: 8, bottom: 8 }}>
+                        <CartesianGrid strokeDasharray="3 3" stroke={lineColor} horizontal={false} />
+                        <XAxis
+                          type="number"
+                          tick={{ fill: mutedColor, fontSize: 11 }}
+                          axisLine={{ stroke: lineColor }}
+                          tickFormatter={(value) => formatChartNumber(Number(value), 2)}
+                        />
+                        <YAxis
+                          type="category"
+                          dataKey="name"
+                          width={140}
+                          tick={{ fill: mutedColor, fontSize: 11 }}
+                          axisLine={{ stroke: lineColor }}
+                          tickFormatter={(value: string) => (value.length > 18 ? `${value.slice(0, 17)}…` : value)}
+                        />
+                        <ReferenceLine x={0} stroke={lineColor} />
+                        <Tooltip
+                          formatter={(value: number) => formatChartNumber(value, 3)}
+                          labelFormatter={(value) => String(value)}
+                          contentStyle={{ background: surfaceColor, borderColor: lineColor, fontSize: 12 }}
+                        />
+                        <Bar dataKey="value" radius={[0, 4, 4, 0]} isAnimationActive animationDuration={400}>
+                          {tornadoData.map((entry, idx) => (
+                            <Cell key={idx} fill={entry.value >= 0 ? chartColor(0, isDarkTheme) : chartColor(1, isDarkTheme)} />
+                          ))}
+                        </Bar>
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </div>
+                  <div className="flex items-center gap-4 text-2xs text-muted">
+                    <span className="inline-flex items-center gap-1.5">
+                      <span className="inline-block h-2.5 w-2.5 rounded-sm" style={{ backgroundColor: chartColor(0, isDarkTheme) }} aria-hidden />
+                      {t("tornado.positive")}
+                    </span>
+                    <span className="inline-flex items-center gap-1.5">
+                      <span className="inline-block h-2.5 w-2.5 rounded-sm" style={{ backgroundColor: chartColor(1, isDarkTheme) }} aria-hidden />
+                      {t("tornado.negative")}
+                    </span>
+                  </div>
+                </>
+              ) : (
+                <p className="text-sm text-muted">{t("tornado.empty")}</p>
+              )}
+            </Card>
+          )}
+
+          {/* Detalle: constructor, lista de modelos, comparación y diagnóstico — oculto hasta que se pide. */}
+          <Disclosure
+            title={t("detail.show")}
+            toggleLabel={detailOpen ? t("detail.hide") : t("detail.show")}
+            subtitle={t("detail.subtitle")}
+            open={detailOpen}
+            onOpenChange={setDetailOpen}
+          >
+            <Tabs items={tabItems} active={activeTab} onChange={setActiveTab} />
+          </Disclosure>
+        </>
+      )}
+
+      <Modal open={showQuickView} onClose={() => setShowQuickView(false)} title={t("quickView.title")}>
+        <p className="mb-3 text-xs text-muted">{t("quickView.count", { count: xSelected.length })}</p>
+        <div className="max-h-[50vh] space-y-2 overflow-y-auto pr-1">
+          {selectedDetails.length ? (
+            selectedDetails.map((item) => (
+              <div key={item.name} className="flex items-center justify-between rounded-xl border border-line px-3 py-2">
+                <div className="min-w-0">
+                  <p className="truncate text-sm font-medium text-ink">{item.name}</p>
+                  <p className="text-xs text-muted">
+                    {t("builder.yLabel")}: {formatCorr(item.corr_y)}
+                    {editingModelId ? (
+                      <>
+                        {" "}· {t("builder.residualLabel")}: {formatCorr(item.corr_res)}
+                      </>
+                    ) : null}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  aria-label={t("quickView.remove", { name: item.name })}
+                  className="rounded-full border border-border-control px-2 py-0.5 text-xs text-muted hover:bg-surface-2"
+                  onClick={() => handleToggleX(item.name)}
+                >
+                  ×
+                </button>
+              </div>
+            ))
+          ) : (
+            <p className="text-sm text-muted">{t("quickView.empty")}</p>
+          )}
+        </div>
+      </Modal>
+
+      <Modal open={Boolean(deleteTarget)} onClose={() => setDeleteTarget(null)} title={t("models.confirmDelete.title")}>
+        <p className="text-sm text-ink">{t("models.confirmDelete.body", { name: deleteTarget?.name || "" })}</p>
+        <div className="mt-5 flex justify-end gap-2">
+          <Button variant="ghost" onClick={() => setDeleteTarget(null)} disabled={deleteLoading}>
+            {tCommon("cancel")}
+          </Button>
+          <Button variant="danger" onClick={confirmDeleteModel} disabled={deleteLoading}>
+            {t("models.confirmDelete.confirm")}
+          </Button>
+        </div>
+      </Modal>
+    </section>
   );
 }
-
-
-
-
-

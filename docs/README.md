@@ -6,6 +6,22 @@
 Este documento es la referencia de contratos (endpoints, request/response) entre frontend y
 backend, por módulo. Actualízalo cuando agregues o cambies un endpoint.
 
+## Error responses (Fase 7.9)
+
+User-facing 4xx errors across the 8 routers now use `backend/app/errors.py::api_error(status_code, code,
+message, **extra)`, which raises an `HTTPException` with `detail = {"code": SCREAMING_SNAKE_CASE, "message":
+str, **extra}` instead of a bare string — `code` is stable and machine-readable, `message` is the same
+English text the string used to be (kept as a fallback), and `**extra` preserves any structured fields older
+call sites already returned (e.g. `dependencies`, `differences`, `samples`, `dataset_id`). **Not** applied to
+500s or to auth/tenancy infrastructure errors (`tenancy.py::get_scoped`'s 404, `auth.py`'s 401/403) — those
+stay plain-string `HTTPException`s, out of scope. Frontend: `lib/api.ts`'s `ApiError` now also carries `.code`;
+`lib/error-messages.ts::translateApiError(err, t)` (where `t = useTranslations("errors")`) looks up
+`errors.<CODE>` in `lib/i18n/messages/{es,en}.json` and falls back to the raw backend `message` for any code
+not (yet) mapped there. When adding a new user-facing 4xx, raise it via `api_error(...)` with a new code and
+add that code to both locale files — don't reintroduce a bare-string `HTTPException` for anything a user sees
+in a toast/inline error, or it'll silently skip translation (still shows the English message via the
+fallback, just not localized).
+
 ## Module 1
 
 - UI: `/datasets` replaces the legacy upload screen. Drag-and-drop zone, dataset list with stats, schema preview, rename/delete actions, dependency warning modal, sticky toasts.
@@ -154,6 +170,14 @@ decay/half-life/K/S inline. The Hill-curve chart itself moved to `/analysis` in 
     affect every model on every dataset in the company.
 - Stacked contributions: `GET /analysis/{model_id}/stacked?time_col=...&freq=day|week|month&by=group|subgroup&include_intercept=bool&as_percent=bool` uses the same date-filtered sums per period; Excel download: `GET /analysis/{model_id}/export/stacked.xlsx`.
 - Frontend `/analysis` now offers dashboard cards (total, baseline, top groups), value/% toggles, stacked area chart, and download buttons with icons.
+- **Business-friendly variable names (Fase 7.9)**: each row in `GET /analysis/{model_id}/summary`'s
+  `variables[]` now also carries `display_name` — the `InvestmentChannel.name` a user picked in Transform, if
+  that `Variable.name` is some channel's `proxy_variable` (see `routers/analysis.py::_channel_label_map`), else
+  the raw column name unchanged. Lets query screens show "Facebook Ads" instead of
+  `dig_ctv_branding_impresiones` without a new mapping table — the channel↔variable link already existed for
+  the economic layer. Scoped to `analysis.py` only; `models.py`'s coefficient/correlation lists (Modeling) still
+  show the raw predictor name, which is intentional there (modelador-facing technical detail, Fase 7.6's
+  detail toggle). `POST /analysis/summary/export`'s `"variable"` mode uses `display_name` too.
 
 ### Exports (Fase 4)
 
@@ -316,7 +340,7 @@ total_projected_contribution, total_projected_revenue, economics_configured}`. O
 
 ## Module 5
 
-- Scenario builder is now a time-phased planner: choose horizon, start date, and frequency, then edit a grid of periods × variables (either multipliers or absolute overrides). Saved scenarios (max 3 per model) surface as cards with quick metrics and load/delete actions; comparisons and projected totals update in real time with toasts + micro loading states.
+- Scenario builder is now a time-phased planner: choose horizon, start date, and frequency, then edit a grid of periods × variables (either multipliers or absolute overrides). Saved scenarios (max 5 per model, enforced by `_ensure_scenario_capacity` in `routers/predict.py`) surface as cards with quick metrics and load/delete actions; comparisons and projected totals update in real time with toasts + micro loading states.
 - Preview endpoint: `POST /predict/scenarios/preview` with `{ model_id, horizon, start_date, freq, adjustments }` returns `{ periods, total, average_per_period, groups, subgroups, series }` for instant UI feedback.
 - Scenario CRUD: `POST /predict/scenarios` saves a scenario, `GET /predict/scenarios?model_id=...` lists them, `GET /predict/scenarios/{id}` fetches one, `PATCH /predict/scenarios/{id}` renames/updates adjustments, and `DELETE /predict/scenarios/{id}` removes it. All responses carry the summary block described above.
 - Time series + exports: `GET /predict/scenarios/{id}/timeseries` provides per-period `{ y_pred, by_group, by_subgroup }`. Import a CSV plan via `POST /predict/scenarios/{id}/import` (columns: period, variable, mode, value) and export CSV/XLSX with `GET /predict/scenarios/{id}/export?format=csv|xlsx`.
@@ -350,8 +374,22 @@ total_projected_contribution, total_projected_revenue, economics_configured}`. O
   per-channel suggested spend, and "Aplicar al escenario" which writes `{mode: "value",
   value: suggested_spend}` into every period of the active horizon for each channel's
   `proxy_variable` (same `PeriodValue` shape the grid already writes) — no new scenario-update
-  endpoint. Vista avanzada is unchanged. New Investment/Revenue/ROI/ROAS KPI cards render above the
-  toggle when `preview.economics` is present.
+  endpoint. New Investment/Revenue/ROI/ROAS KPI cards render above the toggle when
+  `preview.economics` is present.
+- **Visual redesign (Fase 7.7, frontend-only)**: Planner is now the default `viewMode` (was
+  "Vista avanzada") per the Direction C thesis — the raw grid is opt-in, not the landing state.
+  The grid itself (`ScenarioSheetGlide.tsx`, `@glideapps/glide-data-grid`, canvas-based) now gets a
+  dark-mode `theme` prop (previously always light regardless of app theme) and renders only at
+  `lg`+ (≥1024px, via `hooks/useMediaQuery.ts`); below that, a new `ScenarioSheetTable.tsx` renders
+  the same `variables × periods` grid as a real `<table>` with one labeled `<input>` per cell —
+  same `onMultipliersChange` contract, interchangeable with the Glide grid — since a canvas grid is
+  invisible to screen readers and awkward on touch. The "Projected totals" chart gained a shaded
+  delta band between Base Scenario and Scenario (two stacked, transparent-then-tinted `Area`s under
+  the two `Line`s) plus a `{value}% vs Base Scenario` badge, computed client-side from
+  `preview.total` vs. the sum of the flat-baseline `heroSeries` — no new backend field. KPI tiles,
+  the two `window.confirm()` calls (reset-to-base, delete-scenario), and page strings were migrated
+  to the same primitives/i18n/`useStableCategoricalColor` pattern as Analysis/Modeling (Fase
+  7.5/7.6) — see `docs/DIRECCION-VISUAL.md` and `BITACORA.md`.
 
 ## Admin (companies & memberships)
 
@@ -365,8 +403,12 @@ gaps found while building it.
   `auth.py::require_company_admin` resolves `company_id` from the **URL path**, not `X-Company-Id`, so a company
   admin can't manage a different company by swapping the header.
 - **Companies**: `POST /admin/companies` (`require_platform_admin`) creates a `Company` + its first
-  `admin_compania` `Membership` in one call (`{name, admin_user_id}` → `CompanyOut`). `GET /admin/companies`
-  lists all companies. `PATCH /admin/companies/{id}` (`{name}`) renames. `DELETE /admin/companies/{id}` only
+  `admin_compania` `Membership` in one call (`{name, admin_user_id, currency_code?}` → `CompanyOut`, `currency_code`
+  defaults to `"MXN"` if omitted). `GET /admin/companies` lists all companies. `PATCH /admin/companies/{id}`
+  (`{name, currency_code?}`) updates the name and, when provided, the currency — this is the only place a
+  company's currency can be changed (Fase 7.9: added `Company.currency_code`, ISO 4217, e.g. `"MXN"`/`"USD"`, so
+  monetary figures across the app — investment/revenue totals in Analysis/Predict/Planner — can render with
+  `Intl.NumberFormat({style: "currency"})` instead of a bare number). `DELETE /admin/companies/{id}` only
   succeeds if the company has zero memberships and zero datasets (400 with counts otherwise) — no cascading
   delete across the ~10 other company-scoped tables (Variable/Group/Model/Scenario/...) or Supabase Storage
   objects is implemented, by design: remove members/datasets first, then delete the empty company.
@@ -383,7 +425,10 @@ gaps found while building it.
 - **Client-side platform-admin signal**: `GET /me/memberships` now returns `{is_platform_admin, memberships[]}`
   instead of a bare array (`MyMembershipsOut`) — `is_platform_admin` is computed the same way the backend gates
   `require_platform_admin`, so the frontend never duplicates the allowlist. `AuthBootstrap` stores it in
-  `useGlobalStore` (`isPlatformAdmin: boolean`); `useIsPlatformAdmin()` (`hooks/useCanEdit.ts`) reads it.
+  `useGlobalStore` (`isPlatformAdmin: boolean`); `useIsPlatformAdmin()` (`hooks/useCanEdit.ts`) reads it. Each
+  `MyMembershipOut` row also carries `currency_code` (the membership's company currency) so the frontend can
+  read the active company's currency from the store without an extra request — see `useActiveCurrency()`
+  (`hooks/useActiveCompany.ts`).
 - **UI**: `/admin` (inside the `(app)` route group, so it keeps `Header`/nav). Visible in the Header only when
   `useIsPlatformAdmin()` or `useCanManageUsers()` (existing `admin_compania` check) is true. Platform admins see
   a "Companies" panel (create/rename/delete, backed by the email-lookup for `admin_user_id`); company admins see
@@ -396,12 +441,26 @@ Not one of the 5 pipeline modules — a condensed top-level view for the "decisi
 (see `BITACORA.md` Fase 6), self-contained the same way `/analysis`/`/predict` are (its own
 dataset/model selectors, not the global store's `datasetId`/`modelId`).
 
-- **UI**: `/executive-summary` (inside the `(app)` route group), linked from the Header for every
-  role (this is a consumption mode, not a permission).
+- **UI**: `/executive-summary` (inside the `(app)` route group), linked from the Sidebar for every
+  role (this is a consumption mode, not a permission). Redesigned in Fase 7.4 (Direction C — see
+  `docs/DIRECCION-VISUAL.md`): KPI `StatCard`s with qualitative badges, a date-range filter, a
+  "Contribución por grupo" bar chart (stable per-group color, direct % labels, baseline included as
+  a neutral bar), and a client-side print report (`.no-print`/`.print-only`, same pattern as
+  `/analysis`).
 - **No new read endpoints**: KPIs (`fit R²`/`adj. R²` from `GET /datasets/{id}/models-with-roles`,
-  total contribution + top groups from `GET /analysis/{model_id}/summary`, ROI/ROAS totals from
-  `GET /economics/{model_id}/summary`) reuse exactly the calls `/analysis` already makes — no
+  total contribution + per-group contribution from `GET /analysis/{model_id}/summary`, ROI/ROAS
+  totals from `GET /economics/{model_id}/summary`) reuse exactly the calls `/analysis` already
+  makes, now also passing `start_date`/`end_date` for the page's own date-range filter — no
   aggregation endpoint was added for this page.
-- **"Presupuesto inverso"**: renders `PlannerView` (see Module 5) with `onApply` omitted, so only the
-  budget input, "Optimizar presupuesto" button, and the resulting per-channel allocation show — no
-  "Aplicar al escenario" action, since there's no scenario/flow concept on this page.
+- **No "Presupuesto inverso" here** (removed in Fase 7.4): it duplicated the budget optimizer
+  already available in Predict's Planner mode (see Module 5) with no `onApply`/scenario flow to
+  attach it to on this page, so it added a redundant control rather than a distinct capability.
+  `PlannerView` (`components/predict/PlannerView.tsx`) is Predict-only now.
+- **Excel export (Fase 7.9)**: `GET /analysis/{model_id}/executive-summary/export?start_date=&end_date=` returns
+  an `.xlsx` (via the shared `utils/excel.py::excel_response`) with two sheets — `KPIs` (fit R², total
+  contribution, and — only when the dataset's economic layer is configured — total investment/revenue/ROI/ROAS)
+  and `Groups` (per-group contribution + % of total, same rows as the bar chart). Reuses `summary()`'s and
+  `economics.py::economics_summary()`'s already-cached numbers rather than recomputing them (lazy-imports
+  `economics_summary` inside the endpoint body to avoid a circular import, since `economics.py` imports from
+  `analysis.py` at module load time). The existing print button (`window.print()` + `.no-print`/`.print-only`)
+  remains the PDF path — this only adds the Excel one.

@@ -9,7 +9,8 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Eyebrow } from "@/components/ui/eyebrow";
 import { apiFetch } from "@/lib/api";
-import { formatChartNumber } from "@/lib/chart-format";
+import { formatChartNumber, formatCurrency } from "@/lib/chart-format";
+import { useActiveCurrency } from "@/hooks/useActiveCompany";
 
 export type ChannelAllocation = {
   channel_id: string;
@@ -45,6 +46,7 @@ export default function PlannerView({
   onApply?: (allocations: ChannelAllocation[]) => void;
 }) {
   const t = useTranslations("planner");
+  const currency = useActiveCurrency();
   const [budget, setBudget] = useState<number>(0);
   const [result, setResult] = useState<BudgetOptimizationOut | null>(null);
   const [editedSpend, setEditedSpend] = useState<Record<string, number>>({});
@@ -140,7 +142,7 @@ export default function PlannerView({
                   </p>
                   {allocation.projected_revenue !== null && (
                     <p className="text-xs text-muted">
-                      {t("projectedRevenue", { value: formatChartNumber(allocation.projected_revenue, 1) })}
+                      {t("projectedRevenue", { value: formatCurrency(allocation.projected_revenue, currency, 1) })}
                     </p>
                   )}
                 </Card>

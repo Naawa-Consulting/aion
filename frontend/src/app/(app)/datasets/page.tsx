@@ -3,7 +3,8 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useDropzone } from "react-dropzone";
 import { toast } from "sonner";
-import { Upload, FolderOpen, Trash2, Pencil, Star } from "lucide-react";
+import { useTranslations } from "next-intl";
+import { Upload, FolderOpen, Trash2, Pencil, Star, Database } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardHeader } from "@/components/ui/card";
@@ -13,11 +14,21 @@ import { Progress } from "@/components/ui/progress";
 import { Modal } from "@/components/ui/modal";
 import { Select } from "@/components/ui/select";
 import { ErrorText } from "@/components/ui/error-text";
+import { Eyebrow } from "@/components/ui/eyebrow";
+import { PageHeader } from "@/components/ui/page-header";
+import { StatCard } from "@/components/ui/stat-card";
+import { EmptyState } from "@/components/ui/empty-state";
+import { Skeleton } from "@/components/ui/skeleton";
+import { Disclosure } from "@/components/ui/disclosure";
+import { Tabs } from "@/components/ui/tabs";
+import { Table, TableHeader, TableRow, Th, TableCell } from "@/components/ui/table";
+import { RowActions } from "@/components/ui/row-actions";
 import { useGlobalStore } from "@/lib/store";
 import { formatDate, formatNumber } from "@/lib/format";
 import { useKeyboardShortcut } from "@/hooks/useKeyboardShortcut";
 import { useCanEdit } from "@/hooks/useCanEdit";
 import { apiFetch, ApiError, getAuthHeaders, API_URL } from "@/lib/api";
+import { translateApiError } from "@/lib/error-messages";
 
 type Dataset = {
   id: string;
@@ -77,6 +88,10 @@ type DatasetSummary = {
 };
 
 export default function DatasetsPage() {
+  const t = useTranslations("datasets");
+  const tCommon = useTranslations("common");
+  const tErrors = useTranslations("errors");
+  const readOnlyTitle = tCommon("readOnlyTooltip");
   const [datasets, setDatasets] = useState<Dataset[]>([]);
   const [preview, setPreview] = useState<Preview | null>(null);
   const [loadingPreview, setLoadingPreview] = useState(false);
@@ -93,6 +108,7 @@ export default function DatasetsPage() {
   const [sampleMode, setSampleMode] = useState<"all" | "custom">("all");
   const [customSample, setCustomSample] = useState<number>(0);
   const [sampleUpdating, setSampleUpdating] = useState(false);
+  const [sampleConfirmOpen, setSampleConfirmOpen] = useState(false);
   const [timeCandidates, setTimeCandidates] = useState<TimeCandidate[]>([]);
   const [timeCandidatesLoading, setTimeCandidatesLoading] = useState(false);
   const [timeColumn, setTimeColumn] = useState("");
@@ -150,9 +166,9 @@ export default function DatasetsPage() {
         setDatasetId(data[0].id);
       }
     } catch (err) {
-      toast.error((err as Error)?.message || "Failed to load datasets");
+      toast.error((err as Error)?.message || t("toasts.loadFailed"));
     }
-  }, [datasetId, setDatasetId]);
+  }, [datasetId, setDatasetId, t]);
 
   useEffect(() => {
     // activeCompanyId hydrates asynchronously (AuthBootstrap fetches /me/memberships and
@@ -162,19 +178,22 @@ export default function DatasetsPage() {
     fetchDatasets();
   }, [fetchDatasets, activeCompanyId]);
 
-  const loadPreview = useCallback(async (id: string) => {
-    setLoadingPreview(true);
-    try {
-      const data = await apiFetch<Preview>(`/datasets/${id}/preview?rows=20`);
-      setPreview(data);
-    } catch (error) {
-      console.error(error);
-      toast.error("Failed to load preview");
-      setPreview(null);
-    } finally {
-      setLoadingPreview(false);
-    }
-  }, []);
+  const loadPreview = useCallback(
+    async (id: string) => {
+      setLoadingPreview(true);
+      try {
+        const data = await apiFetch<Preview>(`/datasets/${id}/preview?rows=20`);
+        setPreview(data);
+      } catch (error) {
+        console.error(error);
+        toast.error(t("toasts.previewFailed"));
+        setPreview(null);
+      } finally {
+        setLoadingPreview(false);
+      }
+    },
+    [t]
+  );
 
   const fetchTimeCandidates = useCallback(
     async (id: string) => {
@@ -213,11 +232,11 @@ export default function DatasetsPage() {
         setVersionHistory({ open: true, dataset, loading: false, items: data.versions || [] });
       } catch (error: any) {
         console.error(error);
-        toast.error(error?.message || "Failed to load version history");
+        toast.error(error?.message || t("toasts.versionsFailed"));
         setVersionHistory({ open: false, dataset: undefined, loading: false, items: [] });
       }
     },
-    []
+    [t]
   );
 
   const fetchDatasetSummary = useCallback(
@@ -232,35 +251,38 @@ export default function DatasetsPage() {
         setSummaryVariables(variables);
       } catch (error: any) {
         console.error(error);
-        toast.error(error?.message || "Failed to load dataset summary");
+        toast.error(error?.message || t("toasts.summaryFailed"));
         setSummaryState({ open: false, loading: false });
       }
     },
-    []
+    [t]
   );
 
-  const handleToggleExcluded = useCallback(async (variable: VariableFlag) => {
-    const next = !variable.is_excluded;
-    setTogglingVariableId(variable.id);
-    setSummaryVariables((prev) =>
-      prev.map((v) => (v.id === variable.id ? { ...v, is_excluded: next } : v))
-    );
-    try {
-      await apiFetch(`/variables/${variable.id}/categorization`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ is_excluded: next }),
-      });
-    } catch (error: any) {
-      console.error(error);
-      toast.error(error?.message || "Failed to update variable");
+  const handleToggleExcluded = useCallback(
+    async (variable: VariableFlag) => {
+      const next = !variable.is_excluded;
+      setTogglingVariableId(variable.id);
       setSummaryVariables((prev) =>
-        prev.map((v) => (v.id === variable.id ? { ...v, is_excluded: !next } : v))
+        prev.map((v) => (v.id === variable.id ? { ...v, is_excluded: next } : v))
       );
-    } finally {
-      setTogglingVariableId(null);
-    }
-  }, []);
+      try {
+        await apiFetch(`/variables/${variable.id}/categorization`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ is_excluded: next }),
+        });
+      } catch (error: any) {
+        console.error(error);
+        toast.error(error?.message || t("toasts.variableUpdateFailed"));
+        setSummaryVariables((prev) =>
+          prev.map((v) => (v.id === variable.id ? { ...v, is_excluded: !next } : v))
+        );
+      } finally {
+        setTogglingVariableId(null);
+      }
+    },
+    [t]
+  );
 
   const currentDataset = useMemo(
     () => datasets.find((ds) => ds.id === datasetId) || null,
@@ -298,6 +320,8 @@ export default function DatasetsPage() {
   const canApplySample = Boolean(
     currentDataset && !sampleInvalid && (currentSample ?? null) !== (pendingSample ?? null)
   );
+  const pendingSampleLabel =
+    pendingSample === null ? t("sample.allRowsLabel") : t("sample.rowsLabel", { count: formatNumber(pendingSample, 0) });
 
   const timePreviewValues = useMemo(() => {
     if (!preview || !timeColumn) return [];
@@ -308,22 +332,19 @@ export default function DatasetsPage() {
       .map((value) => String(value));
   }, [preview, timeColumn]);
 
-  const handleApplySample = useCallback(async () => {
+  const requestApplySample = useCallback(() => {
     if (!currentDataset || !canApplySample) return;
     if (sampleMode === "custom" && sampleInvalid) {
-      toast.error("Enter a valid sample size before applying.");
+      toast.error(t("sample.invalidRangeToast"));
       return;
     }
+    setSampleConfirmOpen(true);
+  }, [currentDataset, canApplySample, sampleMode, sampleInvalid, t]);
+
+  const handleApplySample = useCallback(async () => {
+    if (!currentDataset || !canApplySample) return;
     const target = sampleMode === "all" ? null : Math.round(safeCustomSample);
-    const targetLabel =
-      target === null ? "all rows" : `${formatNumber(target, 0)} rows`;
-    if (
-      !window.confirm(
-        `Change working dataset to ${targetLabel}? This will affect transformations, modeling, and analysis results.`
-      )
-    ) {
-      return;
-    }
+    setSampleConfirmOpen(false);
     setSampleUpdating(true);
     try {
       const updated = await apiFetch<Dataset>(`/datasets/${currentDataset.id}/sample_size`, {
@@ -333,10 +354,9 @@ export default function DatasetsPage() {
       });
       setDatasets((prev) => prev.map((ds) => (ds.id === updated.id ? updated : ds)));
       toast.success(
-        `✅ Working dataset updated successfully (${formatNumber(
-          updated.sample_size ?? updated.total_rows ?? updated.n_rows,
-          0
-        )} rows active)`
+        t("toasts.sampleApplied", {
+          rows: formatNumber(updated.sample_size ?? updated.total_rows ?? updated.n_rows, 0),
+        })
       );
       await fetchDatasets();
       if (datasetId === updated.id) {
@@ -344,7 +364,7 @@ export default function DatasetsPage() {
       }
     } catch (error: any) {
       console.error(error);
-      toast.error(error?.message || "Failed to update sample size");
+      toast.error(error?.message || t("toasts.sampleFailed"));
     } finally {
       setTimeout(() => setSampleUpdating(false), 300);
     }
@@ -353,10 +373,10 @@ export default function DatasetsPage() {
     sampleMode,
     safeCustomSample,
     canApplySample,
-    sampleInvalid,
     datasetId,
     fetchDatasets,
     loadPreview,
+    t,
   ]);
 
   const handleSaveTimeVariable = useCallback(async () => {
@@ -374,20 +394,20 @@ export default function DatasetsPage() {
         }),
       });
       setDatasets((prev) => prev.map((ds) => (ds.id === updated.id ? updated : ds)));
-      toast.success("✅ Time variable saved");
+      toast.success(t("toasts.timeSaved"));
       fetchTimeCandidates(updated.id);
     } catch (error: any) {
       console.error(error);
       const detail = error instanceof ApiError ? error.detail : null;
       if (detail?.samples) {
-        toast.error(`${detail.error || "Unparseable time values"}: ${detail.samples.map((s: any) => s.value).join(", ")}`);
+        toast.error(`${translateApiError(error, tErrors)}: ${detail.samples.map((s: any) => s.value).join(", ")}`);
       } else {
-        toast.error(detail?.detail || error?.message || "Failed to save time variable");
+        toast.error(translateApiError(error, tErrors) || t("toasts.timeSaveFailed"));
       }
     } finally {
       setTimeSaving(false);
     }
-  }, [currentDataset, timeColumn, timeCoerce, timeFormat, timeTimezone, fetchTimeCandidates]);
+  }, [currentDataset, timeColumn, timeCoerce, timeFormat, timeTimezone, fetchTimeCandidates, t, tErrors]);
 
   const handleClearTimeVariable = useCallback(async () => {
     if (!currentDataset) return;
@@ -403,15 +423,15 @@ export default function DatasetsPage() {
       setTimeFormat("");
       setTimeTimezone("");
       setTimeCoerce(false);
-      toast.success("Time variable cleared");
+      toast.success(t("toasts.timeCleared"));
       fetchTimeCandidates(updated.id);
     } catch (error: any) {
       console.error(error);
-      toast.error(error?.message || "Failed to clear time variable");
+      toast.error(error?.message || t("toasts.timeClearFailed"));
     } finally {
       setTimeSaving(false);
     }
-  }, [currentDataset, fetchTimeCandidates]);
+  }, [currentDataset, fetchTimeCandidates, t]);
 
   const handleChangeDependentVariable = useCallback(
     async (column: string) => {
@@ -426,16 +446,16 @@ export default function DatasetsPage() {
           body: JSON.stringify({ column: column || null }),
         });
         setDatasets((prev) => prev.map((ds) => (ds.id === updated.id ? updated : ds)));
-        toast.success(column ? "✅ Dependent variable saved" : "Dependent variable cleared");
+        toast.success(column ? t("toasts.dependentSaved") : t("toasts.dependentCleared"));
       } catch (error: any) {
         console.error(error);
-        toast.error(error?.message || "Failed to save dependent variable");
+        toast.error(error?.message || t("toasts.dependentFailed"));
         setDependentVariable(previous);
       } finally {
         setDependentVariableSaving(false);
       }
     },
-    [currentDataset]
+    [currentDataset, t]
   );
 
   const handleUpdateUpload = useCallback((fileList: FileList | null) => {
@@ -445,7 +465,7 @@ export default function DatasetsPage() {
 
   const submitDatasetUpdate = useCallback(async () => {
     if (!updateState.dataset || !updateState.file) {
-      toast.error("Select a file to upload.");
+      toast.error(t("toasts.selectFile"));
       return;
     }
     setUpdateState((state) => ({ ...state, uploading: true, error: null, differences: null }));
@@ -457,7 +477,7 @@ export default function DatasetsPage() {
         method: "POST",
         body: formData,
       });
-      toast.success(`✅ Dataset successfully updated (v${data.new_version})`);
+      toast.success(t("toasts.datasetUpdated", { version: data.new_version }));
       setUpdateState({ open: false, strategy: "strict", uploading: false });
       await fetchDatasets();
       if (datasetId === updateState.dataset.id) {
@@ -468,26 +488,18 @@ export default function DatasetsPage() {
       console.error(error);
       const detail = error instanceof ApiError ? error.detail : null;
       if (detail) {
-        const rawMessage =
-          typeof detail === "string"
-            ? detail
-            : typeof detail?.detail === "string"
-            ? detail.detail
-            : typeof detail?.error === "string"
-            ? detail.error
-            : "Failed to update dataset";
         setUpdateState((state) => ({
           ...state,
           uploading: false,
-          error: rawMessage,
+          error: translateApiError(error, tErrors) || t("toasts.updateFailed"),
           differences: detail?.differences || null,
         }));
       } else {
-        toast.error(error?.message || "Update failed");
+        toast.error(error?.message || t("toasts.updateFailed"));
         setUpdateState((state) => ({ ...state, uploading: false }));
       }
     }
-  }, [updateState, datasetId, fetchDatasets, loadPreview, fetchTimeCandidates]);
+  }, [updateState, datasetId, fetchDatasets, loadPreview, fetchTimeCandidates, t, tErrors]);
 
   const uploadFiles = useCallback(
     (files: File[], force = false) =>
@@ -526,32 +538,32 @@ export default function DatasetsPage() {
     async (files: File[], opts: { force?: boolean } = {}) => {
       if (!files.length) return;
       if (!canEdit) {
-        toast.error("Solo lectura: tu rol es Visualizador");
+        toast.error(readOnlyTitle);
         return;
       }
       setUploading(true);
       try {
         await uploadFiles(files, Boolean(opts.force));
-        toast.success("Datasets uploaded");
+        toast.success(t("toasts.uploaded"));
         await fetchDatasets();
       } catch (error: any) {
         if (error?.status === 409) {
-          const duplicateName = error.detail?.display_name || "dataset";
-          toast.error(`"${duplicateName}" already exists`, {
+          const duplicateName = error.detail?.display_name || t("uploadCard.dropTitle");
+          toast.error(t("toasts.duplicateExists", { name: duplicateName }), {
             action: {
-              label: "Upload anyway",
+              label: t("toasts.uploadAnyway"),
               onClick: () => handleUpload(files, { force: true }),
             },
-            description: "Re-use the existing dataset or force upload",
+            description: t("toasts.duplicateDescription"),
           });
           return;
         }
-        toast.error(error?.detail?.message || "Upload failed");
+        toast.error(error?.detail?.message || t("toasts.uploadFailed"));
       } finally {
         setUploading(false);
       }
     },
-    [fetchDatasets, uploadFiles, canEdit]
+    [fetchDatasets, uploadFiles, canEdit, readOnlyTitle, t]
   );
 
   const onDrop = useCallback(
@@ -575,7 +587,7 @@ export default function DatasetsPage() {
     },
   });
 
-  const handleRename = async () => {
+  const handleRename = useCallback(async () => {
     if (!renameState.dataset) return;
     try {
       await apiFetch(`/datasets/${renameState.dataset.id}/rename`, {
@@ -583,14 +595,14 @@ export default function DatasetsPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ display_name: renameState.value }),
       });
-      toast.success("Dataset renamed");
+      toast.success(t("toasts.renamed"));
       setRenameState({ open: false, value: "" });
       fetchDatasets();
     } catch (error) {
       console.error(error);
-      toast.error("Rename failed");
+      toast.error(t("toasts.renameFailed"));
     }
-  };
+  }, [renameState, fetchDatasets, t]);
 
   useKeyboardShortcut(
     "s",
@@ -609,7 +621,7 @@ export default function DatasetsPage() {
       await apiFetch(`/datasets/${deleteState.dataset.id}?cascade=${deleteState.cascade}`, {
         method: "DELETE",
       });
-      toast.success("Dataset deleted");
+      toast.success(t("toasts.deleted"));
       setDeleteState({ open: false, cascade: true });
       if (datasetId === deleteState.dataset.id) {
         setDatasetId(null);
@@ -618,45 +630,39 @@ export default function DatasetsPage() {
       fetchDatasets();
     } catch (error) {
       console.error(error);
-      const detail = error instanceof ApiError ? error.detail : null;
-      toast.error(detail?.message || (error as Error)?.message || "Delete failed");
+      toast.error(translateApiError(error, tErrors) || t("toasts.deleteFailed"));
     }
   };
 
-  const dtypeSummary = useMemo(() => {
-    if (!currentDataset) return [] as { name: string; dtype: string }[];
-    return currentDataset.columns.slice(0, 12);
-  }, [currentDataset]);
-
   return (
-    <section className="space-y-6">
-      <header className="flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <p className="text-sm text-[var(--color-muted)]">Module 1</p>
-          <h1 className="text-2xl font-semibold tracking-tight">Datasets</h1>
-        </div>
-        <Button
-          onClick={() => document.getElementById("dataset-upload-input")?.click()}
-          disabled={!canEdit}
-          title={!canEdit ? "Solo lectura: tu rol es Visualizador" : undefined}
-        >
-          <Upload className="mr-2 h-4 w-4" /> Upload
-        </Button>
-      </header>
+    <section>
+      <PageHeader
+        title={t("title")}
+        subtitle={t("eyebrow")}
+        actions={
+          <Button
+            onClick={() => document.getElementById("dataset-upload-input")?.click()}
+            disabled={!canEdit}
+            title={!canEdit ? readOnlyTitle : undefined}
+          >
+            <Upload className="mr-2 h-4 w-4" /> {t("upload")}
+          </Button>
+        }
+      />
 
       <div className="grid gap-6 xl:grid-cols-[360px,1fr]">
         <div className="space-y-6">
           <Card className="space-y-4">
-            <CardHeader title="Upload" subtitle="Drag & drop CSV or Excel" />
+            <CardHeader as="h2" title={t("uploadCard.title")} subtitle={t("uploadCard.subtitle")} />
             <div
               {...getRootProps()}
-              className={`rounded-2xl border-2 border-dashed p-6 text-center transition ${
-                isDragActive ? "border-[var(--color-accent)] bg-[var(--color-accent-soft)]" : "border-[var(--color-border)]"
+              className={`rounded-xl border-2 border-dashed p-6 text-center transition ${
+                isDragActive ? "border-accent bg-accent-bg" : "border-line-2"
               } ${uploading ? "opacity-60" : ""}`}
             >
               <input {...getInputProps()} id="dataset-upload-input" />
-              <p className="font-medium text-lg">Drop files here or click to browse</p>
-              <p className="text-sm text-[var(--color-muted)] mt-1">Accepted: CSV, XLSX, XLS, Parquet</p>
+              <p className="font-medium text-md">{t("uploadCard.dropTitle")}</p>
+              <p className="text-sm text-muted mt-1">{t("uploadCard.dropSubtitle")}</p>
               <div className="mt-3 flex justify-center gap-2 text-xs">
                 <Badge>CSV</Badge>
                 <Badge>Excel</Badge>
@@ -665,55 +671,55 @@ export default function DatasetsPage() {
               {uploading && (
                 <div className="mt-4">
                   <Progress value={uploadProgress} />
-                  <p className="text-xs text-[var(--color-muted)] mt-1">Uploading… {uploadProgress}%</p>
+                  <p className="text-xs text-muted mt-1">{t("uploadCard.uploading", { percent: uploadProgress })}</p>
                 </div>
               )}
             </div>
           </Card>
 
           <Card className="space-y-4">
-            <CardHeader title="Datasets" subtitle="Your recent uploads" />
+            <CardHeader as="h2" title={t("listCard.title")} subtitle={t("listCard.subtitle")} />
             <div className="space-y-3 max-h-[480px] overflow-y-auto pr-2">
               {datasets.length === 0 && (
-                <p className="text-sm text-[var(--color-muted)]">No datasets yet. Upload to get started.</p>
+                <EmptyState icon={Database} title={t("listCard.emptyTitle")} description={t("listCard.emptyDescription")} />
               )}
               {datasets.map((ds) => {
                 const isActive = datasetId === ds.id;
                 return (
                   <div
                     key={ds.id}
-                    className={`rounded-2xl border p-4 transition cursor-pointer ${
-                      isActive ? "border-[var(--color-accent)] bg-[var(--color-accent-soft)]" : "border-[var(--color-border)]"
+                    className={`rounded-xl border p-4 transition cursor-pointer ${
+                      isActive ? "border-accent bg-accent-bg" : "border-line"
                     }`}
                     onClick={() => setDatasetId(ds.id)}
                   >
                     <div className="flex items-center justify-between mb-2">
                       <div>
-                        <p className="font-semibold">{ds.display_name}</p>
-                        <p className="text-xs text-[var(--color-muted)]">{ds.file_name}</p>
-                        <p className="text-xs text-[var(--color-muted)]">Version {ds.version ?? 1}</p>
+                        <p className="font-semibold text-ink">{ds.display_name}</p>
+                        <p className="text-xs text-muted">{ds.file_name}</p>
+                        <p className="text-xs text-muted">{t("listCard.version", { version: ds.version ?? 1 })}</p>
                       </div>
-                      {isActive && <Badge>Active</Badge>}
+                      {isActive && <Badge variant="accent">{t("listCard.active")}</Badge>}
                     </div>
-                    <dl className="grid grid-cols-2 gap-2 text-xs text-[var(--color-muted)]">
+                    <dl className="grid grid-cols-2 gap-2 text-xs text-muted">
                       <div>
-                        <dt>Rows</dt>
-                        <dd className="text-sm text-[var(--color-foreground)]">{formatNumber(ds.n_rows, 0)}</dd>
+                        <dt>{t("stats.rows")}</dt>
+                        <dd className="text-sm text-ink tabular-nums">{formatNumber(ds.n_rows, 0)}</dd>
                       </div>
                       <div>
-                        <dt>Columns</dt>
-                        <dd className="text-sm text-[var(--color-foreground)]">{ds.n_cols}</dd>
+                        <dt>{t("stats.columns")}</dt>
+                        <dd className="text-sm text-ink tabular-nums">{ds.n_cols}</dd>
                       </div>
                       <div>
-                        <dt>Created</dt>
+                        <dt>{t("stats.created")}</dt>
                         <dd>{formatDate(ds.created_at)}</dd>
                       </div>
                       <div>
-                        <dt>Last used</dt>
+                        <dt>{t("stats.lastUsed")}</dt>
                         <dd>{formatDate(ds.last_used_at)}</dd>
                       </div>
                     </dl>
-                    <div className="mt-3 flex flex-wrap gap-2 text-xs">
+                    <RowActions className="mt-3 flex-wrap gap-x-4 gap-y-2 text-xs">
                       <Button
                         variant="secondary"
                         size="sm"
@@ -723,7 +729,7 @@ export default function DatasetsPage() {
                           loadPreview(ds.id);
                         }}
                       >
-                        <FolderOpen className="mr-1 h-3 w-3" /> Open
+                        <FolderOpen className="mr-1 h-3 w-3" /> {t("actions.open")}
                       </Button>
                       <Button
                         variant="ghost"
@@ -733,7 +739,7 @@ export default function DatasetsPage() {
                           setRenameState({ open: true, dataset: ds, value: ds.display_name });
                         }}
                       >
-                        <Pencil className="mr-1 h-3 w-3" /> Rename
+                        <Pencil className="mr-1 h-3 w-3" /> {t("actions.rename")}
                       </Button>
                       <Button
                         variant="ghost"
@@ -751,17 +757,18 @@ export default function DatasetsPage() {
                           });
                         }}
                       >
-                        <Upload className="mr-1 h-3 w-3" /> Update File
+                        <Upload className="mr-1 h-3 w-3" /> {t("actions.updateFile")}
                       </Button>
                       <Button
                         variant="ghost"
                         size="sm"
+                        className="!text-bad hover:!bg-bad-bg"
                         onClick={(event) => {
                           event.stopPropagation();
                           setDeleteState({ open: true, dataset: ds, cascade: true });
                         }}
                       >
-                        <Trash2 className="mr-1 h-3 w-3" /> Delete
+                        <Trash2 className="mr-1 h-3 w-3" /> {t("actions.delete")}
                       </Button>
                       {!isActive && (
                         <Button
@@ -770,13 +777,13 @@ export default function DatasetsPage() {
                           onClick={(event) => {
                             event.stopPropagation();
                             setDatasetId(ds.id);
-                            toast.success(`${ds.display_name} is now active`);
+                            toast.success(t("toasts.setActive", { name: ds.display_name }));
                           }}
                         >
-                          <Star className="mr-1 h-3 w-3" /> Set Active
+                          <Star className="mr-1 h-3 w-3" /> {t("actions.setActive")}
                         </Button>
                       )}
-                    </div>
+                    </RowActions>
                   </div>
                 );
               })}
@@ -788,29 +795,33 @@ export default function DatasetsPage() {
           {currentDataset ? (
             <div className="relative space-y-4">
               <div
-                className={`absolute inset-0 rounded-2xl bg-[var(--color-bg)]/70 backdrop-blur-sm transition-opacity duration-300 z-10 ${
+                className={`absolute inset-0 rounded-xl bg-plane/70 backdrop-blur-sm transition-opacity duration-300 z-10 ${
                   sampleUpdating ? "opacity-100 pointer-events-auto" : "opacity-0 pointer-events-none"
                 }`}
               />
-              <CardHeader title={currentDataset.display_name} subtitle={currentDataset.file_name} />
-              <div className="grid sm:grid-cols-4 gap-3 text-center">
-                <Stat label="Rows" value={formatNumber(totalRows, 0)} />
-                <Stat label="Columns" value={currentDataset.n_cols} />
-                <Stat label="Created" value={formatDate(currentDataset.created_at)} />
-                <Stat label="Last used" value={formatDate(currentDataset.last_used_at)} />
+              <CardHeader as="h2" title={currentDataset.display_name} subtitle={currentDataset.file_name} />
+              <div className="grid sm:grid-cols-4 gap-3">
+                <StatCard size="lg" label={t("stats.rows")} value={formatNumber(totalRows, 0)} />
+                <StatCard size="lg" label={t("stats.columns")} value={String(currentDataset.n_cols)} />
+                <StatCard size="lg" label={t("stats.created")} value={formatDate(currentDataset.created_at)} />
+                <StatCard size="lg" label={t("stats.lastUsed")} value={formatDate(currentDataset.last_used_at)} />
               </div>
-              <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-[var(--color-muted)]">
+              <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted">
                 <p>
-                  Version {currentDataset.version ?? 1} · Updated {formatDate(currentDataset.last_used_at)} ·{" "}
-                  {formatNumber(totalRows, 0)} rows, {currentDataset.n_cols} columns
+                  {t("detail.versionSummary", {
+                    version: currentDataset.version ?? 1,
+                    updated: formatDate(currentDataset.last_used_at),
+                    rows: formatNumber(totalRows, 0),
+                    columns: currentDataset.n_cols,
+                  })}
                 </p>
-                <div className="flex gap-2">
+                <RowActions>
                   <Button
                     variant="ghost"
                     size="sm"
                     onClick={() => currentDataset && fetchDatasetSummary(currentDataset)}
                   >
-                    View details
+                    {t("detail.viewDetails")}
                   </Button>
                   <Button
                     variant="ghost"
@@ -818,279 +829,304 @@ export default function DatasetsPage() {
                     onClick={() => currentDataset && fetchVersionHistory(currentDataset)}
                     disabled={versionHistory.loading && versionHistory.dataset?.id === currentDataset.id}
                   >
-                    Version history
+                    {t("detail.versionHistory")}
                   </Button>
-                </div>
+                </RowActions>
               </div>
-              <div className="rounded-2xl border border-[var(--color-border)] p-4 space-y-3">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <p className="font-medium">Time variable</p>
-                    <p className="text-xs text-[var(--color-muted)]">Used across Transform, Modeling, Analysis, and Predict.</p>
-                  </div>
-                  {timeCandidatesLoading && <span className="text-xs text-[var(--color-muted)]">Detecting…</span>}
-                </div>
-                <Select value={timeColumn} onChange={(event) => setTimeColumn(event.target.value)}>
-                  <option value="">Select column</option>
-                  {timeCandidates.length > 0 && (
-                    <optgroup label="Suggested">
-                      {timeCandidates.map((candidate) => (
-                        <option key={`candidate-${candidate.name}`} value={candidate.name}>
-                          {candidate.name} {candidate.parseable ? "" : " (needs coercion)"}
-                        </option>
-                      ))}
-                    </optgroup>
-                  )}
-                  {currentDataset?.columns && (
-                    <optgroup label="All columns">
-                      {currentDataset.columns.map((col) => (
-                        <option key={`col-${col.name}`} value={col.name}>
-                          {col.name}
-                        </option>
-                      ))}
-                    </optgroup>
-                  )}
-                </Select>
-                <div className="space-y-2 rounded-xl border border-dashed border-[var(--color-border)] p-3 text-xs">
-                  <label className="flex items-center gap-2 text-sm">
-                    <input type="checkbox" checked={timeCoerce} onChange={(event) => setTimeCoerce(event.target.checked)} />
-                    Coerce to datetime
-                  </label>
-                  <div className="flex flex-wrap gap-3">
-                    <label className="flex flex-col gap-1 flex-1 min-w-[160px]">
-                      <span>Custom format</span>
-                      <input
-                        type="text"
-                        placeholder="%Y-%m-%d"
-                        className="rounded-lg border border-[var(--color-border)] bg-transparent px-3 py-2 text-sm"
-                        value={timeFormat}
-                        onChange={(event) => setTimeFormat(event.target.value)}
-                      />
-                    </label>
-                    <label className="flex flex-col gap-1 flex-1 min-w-[160px]">
-                      <span>Timezone</span>
-                      <input
-                        type="text"
-                        placeholder="UTC"
-                        className="rounded-lg border border-[var(--color-border)] bg-transparent px-3 py-2 text-sm"
-                        value={timeTimezone}
-                        onChange={(event) => setTimeTimezone(event.target.value)}
-                      />
-                    </label>
-                  </div>
-                  {timePreviewValues.length > 0 && (
-                    <p className="text-[var(--color-muted)]">
-                      Sample values: {timePreviewValues.join(", ")}
-                    </p>
-                  )}
-                </div>
-                <div className="flex gap-2">
-                  <Button
-                    size="sm"
-                    onClick={handleSaveTimeVariable}
-                    disabled={!canEdit || !currentDataset || timeSaving}
-                    title={!canEdit ? "Solo lectura: tu rol es Visualizador" : undefined}
-                  >
-                    {timeSaving ? "Saving..." : "Save time variable"}
-                  </Button>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={handleClearTimeVariable}
-                    disabled={!canEdit || !currentDataset?.time_variable || timeSaving}
-                    title={!canEdit ? "Solo lectura: tu rol es Visualizador" : undefined}
-                  >
-                    Clear selection
-                  </Button>
-                </div>
-              </div>
-              <div className="rounded-2xl border border-[var(--color-border)] p-4 space-y-3">
-                <div>
-                  <p className="font-medium">Dependent variable</p>
-                  <p className="text-xs text-[var(--color-muted)]">
-                    Used in Transform to show correlation against this column while previewing transformations.
-                  </p>
-                </div>
-                <Select
-                  value={dependentVariable}
-                  onChange={(event) => handleChangeDependentVariable(event.target.value)}
-                  disabled={!canEdit || !currentDataset || dependentVariableSaving}
-                >
-                  <option value="">None selected</option>
-                  {currentDataset?.columns.map((col) => (
-                    <option key={`dep-${col.name}`} value={col.name}>
-                      {col.name}
-                    </option>
-                  ))}
-                </Select>
-              </div>
-              <div className="rounded-2xl border border-[var(--color-border)] p-4 space-y-2">
-                <div className="flex flex-wrap items-center gap-3">
-                  <p className="text-sm font-medium">Working Sample Size</p>
+
+              <Disclosure
+                as="h3"
+                title={t("timeVariable.title")}
+                subtitle={
+                  currentDataset.time_variable
+                    ? t("timeVariable.currentValue", { column: currentDataset.time_variable })
+                    : t("timeVariable.description")
+                }
+                defaultOpen={!currentDataset.time_variable}
+                className="rounded-xl border border-line p-4"
+              >
+                <div className="space-y-3 pt-2">
+                  {timeCandidatesLoading && <p className="text-xs text-muted">{t("timeVariable.detecting")}</p>}
                   <Select
-                    wrapperClassName="w-auto"
-                    value={sampleMode}
-                    onChange={(event) => {
-                      const nextMode = event.target.value as "all" | "custom";
-                      setSampleMode(nextMode);
-                      if (nextMode === "custom" && sampleMode !== "custom") {
-                        const fallbackValue =
-                          currentDataset.sample_size ?? (safeCustomSample || sampleMin || 10);
-                        setCustomSample(fallbackValue || sampleMin || 10);
-                      }
-                    }}
+                    aria-label={t("timeVariable.title")}
+                    value={timeColumn}
+                    onChange={(event) => setTimeColumn(event.target.value)}
                   >
-                    <option value="all">All rows</option>
-                    <option value="custom">Custom…</option>
+                    <option value="">{t("timeVariable.selectPlaceholder")}</option>
+                    {timeCandidates.length > 0 && (
+                      <optgroup label={t("timeVariable.suggestedGroup")}>
+                        {timeCandidates.map((candidate) => (
+                          <option key={`candidate-${candidate.name}`} value={candidate.name}>
+                            {candidate.name} {candidate.parseable ? "" : ` (${t("timeVariable.needsCoercion")})`}
+                          </option>
+                        ))}
+                      </optgroup>
+                    )}
+                    {currentDataset?.columns && (
+                      <optgroup label={t("timeVariable.allColumnsGroup")}>
+                        {currentDataset.columns.map((col) => (
+                          <option key={`col-${col.name}`} value={col.name}>
+                            {col.name}
+                          </option>
+                        ))}
+                      </optgroup>
+                    )}
                   </Select>
-                  {sampleMode === "custom" && (
-                    <input
-                      type="number"
-                      min={sampleMin}
-                      max={totalRows}
-                      className={`w-24 rounded-xl border px-3 py-2 text-sm transition-all duration-200 ${
-                        sampleInvalid ? "border-[var(--color-danger)]" : "border-[var(--color-border)]"
-                      } bg-transparent`}
-                      value={customSample}
-                      onChange={(event) => setCustomSample(Number(event.target.value) || 0)}
-                    />
-                  )}
-                  <Button
-                    size="sm"
-                    onClick={handleApplySample}
-                    disabled={!canEdit || !canApplySample || sampleUpdating}
-                    title={!canEdit ? "Solo lectura: tu rol es Visualizador" : undefined}
-                  >
-                    Apply
-                  </Button>
+                  <div className="space-y-2 rounded-lg border border-dashed border-line-2 p-3 text-xs">
+                    <label className="flex items-center gap-2 text-sm text-ink">
+                      <input type="checkbox" checked={timeCoerce} onChange={(event) => setTimeCoerce(event.target.checked)} />
+                      {t("timeVariable.coerceLabel")}
+                    </label>
+                    <div className="flex flex-wrap gap-3">
+                      <div className="flex flex-col gap-1 flex-1 min-w-[160px]">
+                        <Eyebrow htmlFor="time-format">{t("timeVariable.customFormatLabel")}</Eyebrow>
+                        <Input
+                          id="time-format"
+                          type="text"
+                          placeholder="%Y-%m-%d"
+                          value={timeFormat}
+                          onChange={(event) => setTimeFormat(event.target.value)}
+                        />
+                      </div>
+                      <div className="flex flex-col gap-1 flex-1 min-w-[160px]">
+                        <Eyebrow htmlFor="time-timezone">{t("timeVariable.timezoneLabel")}</Eyebrow>
+                        <Input
+                          id="time-timezone"
+                          type="text"
+                          placeholder="UTC"
+                          value={timeTimezone}
+                          onChange={(event) => setTimeTimezone(event.target.value)}
+                        />
+                      </div>
+                    </div>
+                    {timePreviewValues.length > 0 && (
+                      <p className="text-muted">{t("timeVariable.sampleValues", { values: timePreviewValues.join(", ") })}</p>
+                    )}
+                  </div>
+                  <RowActions>
+                    <Button
+                      size="sm"
+                      onClick={handleSaveTimeVariable}
+                      disabled={!canEdit || !currentDataset || timeSaving}
+                      title={!canEdit ? readOnlyTitle : undefined}
+                    >
+                      {timeSaving ? t("timeVariable.saving") : t("timeVariable.save")}
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={handleClearTimeVariable}
+                      disabled={!canEdit || !currentDataset?.time_variable || timeSaving}
+                      title={!canEdit ? readOnlyTitle : undefined}
+                    >
+                      {t("timeVariable.clear")}
+                    </Button>
+                  </RowActions>
                 </div>
-                {sampleMode === "custom" && sampleInvalid && (
-                  <ErrorText className="text-xs">
-                    Enter a value between {formatNumber(sampleMin, 0)} and {formatNumber(totalRows, 0)} rows.
-                  </ErrorText>
-                )}
-                <p className="text-xs text-[var(--color-muted)]">
-                  {activeRows === totalRows || !totalRows
-                    ? `Currently using all ${formatNumber(totalRows, 0)} rows.`
-                    : `Currently using ${formatNumber(activeRows, 0)} of ${formatNumber(totalRows, 0)} rows (${(
-                        (activeRows / totalRows) *
-                        100
-                      ).toFixed(1)}% of dataset).`}
-                </p>
-              </div>
-              <SchemaTabs preview={preview} loading={loadingPreview} datasetName={currentDataset.display_name} />
+              </Disclosure>
+
+              <Disclosure
+                as="h3"
+                title={t("dependentVariable.title")}
+                subtitle={
+                  currentDataset.dependent_variable
+                    ? t("timeVariable.currentValue", { column: currentDataset.dependent_variable })
+                    : t("dependentVariable.description")
+                }
+                defaultOpen={!currentDataset.dependent_variable}
+                className="rounded-xl border border-line p-4"
+              >
+                <div className="space-y-3 pt-2">
+                  <Select
+                    aria-label={t("dependentVariable.title")}
+                    value={dependentVariable}
+                    onChange={(event) => handleChangeDependentVariable(event.target.value)}
+                    disabled={!canEdit || !currentDataset || dependentVariableSaving}
+                  >
+                    <option value="">{t("dependentVariable.none")}</option>
+                    {currentDataset?.columns.map((col) => (
+                      <option key={`dep-${col.name}`} value={col.name}>
+                        {col.name}
+                      </option>
+                    ))}
+                  </Select>
+                </div>
+              </Disclosure>
+
+              <Disclosure
+                as="h3"
+                title={t("sample.title")}
+                subtitle={
+                  activeRows === totalRows || !totalRows
+                    ? t("sample.currentAll", { total: formatNumber(totalRows, 0) })
+                    : t("sample.currentPartial", {
+                        active: formatNumber(activeRows, 0),
+                        total: formatNumber(totalRows, 0),
+                        percent: ((activeRows / totalRows) * 100).toFixed(1),
+                      })
+                }
+                defaultOpen={sampleMode === "custom"}
+                className="rounded-xl border border-line p-4"
+              >
+                <div className="space-y-2 pt-2">
+                  <div className="flex flex-wrap items-center gap-3">
+                    <Select
+                      wrapperClassName="w-auto"
+                      aria-label={t("sample.title")}
+                      value={sampleMode}
+                      onChange={(event) => {
+                        const nextMode = event.target.value as "all" | "custom";
+                        setSampleMode(nextMode);
+                        if (nextMode === "custom" && sampleMode !== "custom") {
+                          const fallbackValue =
+                            currentDataset.sample_size ?? (safeCustomSample || sampleMin || 10);
+                          setCustomSample(fallbackValue || sampleMin || 10);
+                        }
+                      }}
+                    >
+                      <option value="all">{t("sample.allRows")}</option>
+                      <option value="custom">{t("sample.custom")}</option>
+                    </Select>
+                    {sampleMode === "custom" && (
+                      <Input
+                        aria-label={t("sample.custom")}
+                        type="number"
+                        min={sampleMin}
+                        max={totalRows}
+                        className={`w-24 ${sampleInvalid ? "!border-bad" : ""}`}
+                        value={customSample}
+                        onChange={(event) => setCustomSample(Number(event.target.value) || 0)}
+                      />
+                    )}
+                    <Button
+                      size="sm"
+                      onClick={requestApplySample}
+                      disabled={!canEdit || !canApplySample || sampleUpdating}
+                      title={!canEdit ? readOnlyTitle : undefined}
+                    >
+                      {t("sample.apply")}
+                    </Button>
+                  </div>
+                  {sampleMode === "custom" && sampleInvalid && (
+                    <ErrorText className="text-xs">
+                      {t("sample.invalidRange", { min: formatNumber(sampleMin, 0), max: formatNumber(totalRows, 0) })}
+                    </ErrorText>
+                  )}
+                </div>
+              </Disclosure>
+
+              <SchemaTabs preview={preview} loading={loadingPreview} t={t} />
             </div>
           ) : (
-            <div className="min-h-[320px] flex flex-col items-center justify-center text-center text-[var(--color-muted)]">
-              <FolderOpen className="h-10 w-10 mb-3" />
-              <p>Select a dataset to view details</p>
-            </div>
+            <EmptyState
+              icon={FolderOpen}
+              title={t("detail.emptySelectionTitle")}
+              className="min-h-[320px]"
+            />
           )}
         </Card>
       </div>
 
-      <Modal
-        open={summaryState.open}
-        onClose={closeSummary}
-        title="Dataset summary"
-      >
+      <Modal open={summaryState.open} onClose={closeSummary} title={t("summaryModal.title")}>
         {summaryState.loading ? (
-          <p className="text-sm text-[var(--color-muted)]">Loading summary…</p>
+          <div className="space-y-2">
+            <Skeleton className="h-6 w-full" />
+            <Skeleton className="h-6 w-full" />
+            <Skeleton className="h-24 w-full" />
+          </div>
         ) : summaryState.data ? (
           <div className="space-y-4 max-h-[70vh] overflow-auto">
             <div className="grid md:grid-cols-2 gap-4 text-sm">
-              <div className="rounded-xl border border-[var(--color-border)] p-3">
-                <p className="text-xs text-[var(--color-muted)]">Dataset</p>
-                <p className="font-semibold">{summaryState.data.name}</p>
-                <p className="text-xs text-[var(--color-muted)]">Version {summaryState.data.version}</p>
+              <div className="rounded-lg border border-line p-3">
+                <p className="text-xs text-muted">{t("summaryModal.dataset")}</p>
+                <p className="font-semibold text-ink">{summaryState.data.name}</p>
+                <p className="text-xs text-muted">{t("versionModal.version", { version: summaryState.data.version })}</p>
               </div>
-              <div className="rounded-xl border border-[var(--color-border)] p-3">
-                <p className="text-xs text-[var(--color-muted)]">File type</p>
-                <p className="font-semibold">{summaryState.data.file_type?.toUpperCase() || "PARQUET"}</p>
+              <div className="rounded-lg border border-line p-3">
+                <p className="text-xs text-muted">{t("summaryModal.fileType")}</p>
+                <p className="font-semibold text-ink">{summaryState.data.file_type?.toUpperCase() || "PARQUET"}</p>
               </div>
-              <div className="rounded-xl border border-[var(--color-border)] p-3">
-                <p className="text-xs text-[var(--color-muted)]">Created</p>
-                <p className="font-semibold">{formatDate(summaryState.data.created)}</p>
+              <div className="rounded-lg border border-line p-3">
+                <p className="text-xs text-muted">{t("stats.created")}</p>
+                <p className="font-semibold text-ink">{formatDate(summaryState.data.created)}</p>
               </div>
-              <div className="rounded-xl border border-[var(--color-border)] p-3">
-                <p className="text-xs text-[var(--color-muted)]">Last used</p>
-                <p className="font-semibold">{formatDate(summaryState.data.last_used)}</p>
+              <div className="rounded-lg border border-line p-3">
+                <p className="text-xs text-muted">{t("stats.lastUsed")}</p>
+                <p className="font-semibold text-ink">{formatDate(summaryState.data.last_used)}</p>
               </div>
-              <div className="rounded-xl border border-[var(--color-border)] p-3">
-                <p className="text-xs text-[var(--color-muted)]">Rows</p>
-                <p className="font-semibold">
+              <div className="rounded-lg border border-line p-3">
+                <p className="text-xs text-muted">{t("stats.rows")}</p>
+                <p className="font-semibold text-ink tabular-nums">
                   {formatNumber(summaryState.data.n_rows, 0)}
                   {summaryState.data.sample_size
-                    ? ` (${summaryState.data.sample_size} active)`
+                    ? ` (${t("summaryModal.active", { count: summaryState.data.sample_size })})`
                     : ""}
                 </p>
               </div>
-              <div className="rounded-xl border border-[var(--color-border)] p-3">
-                <p className="text-xs text-[var(--color-muted)]">Columns</p>
-                <p className="font-semibold">{summaryState.data.n_columns}</p>
+              <div className="rounded-lg border border-line p-3">
+                <p className="text-xs text-muted">{t("stats.columns")}</p>
+                <p className="font-semibold text-ink tabular-nums">{summaryState.data.n_columns}</p>
               </div>
             </div>
-            <div className="rounded-2xl border border-[var(--color-border)] shadow-sm">
-              <div className="px-4 py-3 border-b border-[var(--color-border)]">
-                <p className="font-medium text-sm">Data quality</p>
+            <div className="rounded-xl border border-line">
+              <div className="px-4 py-3 border-b border-line">
+                <p className="font-medium text-sm text-ink">{t("summaryModal.dataQuality")}</p>
               </div>
               <div className="max-h-[45vh] overflow-auto">
-                <table className="w-full text-sm">
-                  <thead className="sticky top-0 bg-[var(--color-bg)] text-xs uppercase tracking-wide text-[var(--color-muted)]">
-                    <tr>
-                      <th className="px-4 py-2 text-left">Column</th>
-                      <th className="px-4 py-2 text-left">Type</th>
-                      <th className="px-4 py-2 text-left">% Missing</th>
-                      <th className="px-4 py-2 text-left">Unique</th>
-                      <th className="px-4 py-2 text-left">Min / Max</th>
-                      <th className="px-4 py-2 text-left">Preview</th>
-                      <th className="px-4 py-2 text-left">Hide</th>
-                    </tr>
-                  </thead>
+                <Table wrapperClassName="rounded-none border-0">
+                  <TableHeader className="sticky top-0">
+                    <TableRow>
+                      <Th>{t("schema.column")}</Th>
+                      <Th>{t("schema.type")}</Th>
+                      <Th>{t("summaryModal.missingPct")}</Th>
+                      <Th>{t("summaryModal.unique")}</Th>
+                      <Th>{t("summaryModal.minMax")}</Th>
+                      <Th>{t("schema.preview")}</Th>
+                      <Th>{t("summaryModal.hide")}</Th>
+                    </TableRow>
+                  </TableHeader>
                   <tbody>
-                {summaryState.data.columns.map((col) => {
-                  const variable = summaryVariables.find((v) => v.name === col.name);
-                  return (
-                  <tr
-                    key={col.name}
-                    className="border-t border-[var(--color-border)]/70"
-                  >
-                        <td className="px-4 py-3 font-medium">{col.name}</td>
-                        <td className="px-4 py-3 text-[var(--color-muted)]">{col.dtype}</td>
-                        <td className="px-4 py-3 text-[var(--color-muted)]">{col.missing_pct}%</td>
-                        <td className="px-4 py-3 text-[var(--color-muted)]">{col.unique}</td>
-                        <td className="px-4 py-3 text-[var(--color-muted)]">
-                          {col.min !== null && col.min !== undefined ? col.min : "–"} /{" "}
-                          {col.max !== null && col.max !== undefined ? col.max : "–"}
-                        </td>
-                        <td className="px-4 py-3 text-[var(--color-muted)] truncate">
-                          {col.samples?.length ? col.samples.join(", ") : "–"}
-                        </td>
-                        <td className="px-4 py-3">
-                          {variable && (
-                            <input
-                              type="checkbox"
-                              checked={variable.is_excluded}
-                              disabled={!canEdit || togglingVariableId === variable.id}
-                              onChange={() => handleToggleExcluded(variable)}
-                              title="Hide this variable from Transform/Modeling selectors"
-                            />
-                          )}
-                        </td>
-                      </tr>
-                  );
+                    {summaryState.data.columns.map((col) => {
+                      const variable = summaryVariables.find((v) => v.name === col.name);
+                      return (
+                        <TableRow key={col.name}>
+                          <TableCell className="font-medium">{col.name}</TableCell>
+                          <TableCell className="text-muted">{col.dtype}</TableCell>
+                          <TableCell className="text-muted">{col.missing_pct}%</TableCell>
+                          <TableCell className="text-muted">{col.unique}</TableCell>
+                          <TableCell className="text-muted">
+                            {col.min !== null && col.min !== undefined ? col.min : "–"} /{" "}
+                            {col.max !== null && col.max !== undefined ? col.max : "–"}
+                          </TableCell>
+                          <TableCell className="text-muted truncate max-w-[220px]">
+                            {col.samples?.length ? col.samples.join(", ") : "–"}
+                          </TableCell>
+                          <TableCell>
+                            {variable && (
+                              <input
+                                type="checkbox"
+                                checked={variable.is_excluded}
+                                disabled={!canEdit || togglingVariableId === variable.id}
+                                onChange={() => handleToggleExcluded(variable)}
+                                aria-label={t("summaryModal.hideAria", { name: col.name })}
+                                title={t("summaryModal.hideTooltip")}
+                              />
+                            )}
+                          </TableCell>
+                        </TableRow>
+                      );
                     })}
                   </tbody>
-                </table>
+                </Table>
               </div>
             </div>
           </div>
         ) : (
-          <p className="text-sm text-[var(--color-muted)]">No summary available.</p>
+          <p className="text-sm text-muted">{t("summaryModal.none")}</p>
         )}
         <div className="mt-4 flex justify-end">
           <Button variant="ghost" onClick={closeSummary}>
-            Close
+            {tCommon("close")}
           </Button>
         </div>
       </Modal>
@@ -1098,42 +1134,48 @@ export default function DatasetsPage() {
       <Modal
         open={updateState.open}
         onClose={dismissUpdateModal}
-        title={updateState.dataset ? `Replace dataset “${updateState.dataset.display_name}”` : "Replace dataset"}
+        title={updateState.dataset ? t("updateModal.titleNamed", { name: updateState.dataset.display_name }) : t("updateModal.title")}
       >
-        <p className="text-sm text-[var(--color-muted)] mb-3">
-          Upload a new file to replace the existing one. Make sure the schema (column names and types) is the same.
-        </p>
+        <p className="text-sm text-muted mb-3">{t("updateModal.description")}</p>
+        <Eyebrow htmlFor="dataset-update-file">{t("updateModal.fileLabel")}</Eyebrow>
         <input
+          id="dataset-update-file"
           type="file"
           accept=".csv,.xlsx,.xls,.parquet"
           onChange={(event) => handleUpdateUpload(event.target.files)}
-          className="w-full rounded-lg border border-dashed border-[var(--color-border)] px-3 py-2 text-sm"
+          className="mt-1 w-full rounded-lg border border-dashed border-line-2 px-3 py-2 text-sm"
         />
-        <label className="mt-3 flex flex-col gap-1 text-sm">
-          Replace strategy
+        <div className="mt-3">
+          <Eyebrow htmlFor="dataset-update-strategy">{t("updateModal.replaceStrategy")}</Eyebrow>
           <Select
+            id="dataset-update-strategy"
+            className="mt-1"
             value={updateState.strategy}
             onChange={(event) =>
               setUpdateState((state) => ({ ...state, strategy: event.target.value as "strict" | "force" }))
             }
           >
-            <option value="strict">Strict (schema must match)</option>
-            <option value="force">Force (allow added/removed columns)</option>
+            <option value="strict">{t("updateModal.strict")}</option>
+            <option value="force">{t("updateModal.force")}</option>
           </Select>
-        </label>
+        </div>
         {updateState.error && (
-          <div className="mt-3 rounded-lg border border-[var(--color-danger)]/50 bg-[var(--color-danger-soft)] p-3 text-sm text-[var(--color-danger)]">
+          <div className="mt-3 rounded-lg border border-bad/50 bg-bad-bg p-3 text-sm text-bad">
             {updateState.error}
           </div>
         )}
         {updateState.differences && (
-          <div className="mt-3 rounded-lg border border-[var(--color-border)] p-3 text-sm">
-            <p className="font-medium mb-1">Schema differences</p>
+          <div className="mt-3 rounded-lg border border-line p-3 text-sm">
+            <p className="font-medium mb-1 text-ink">{t("updateModal.differencesTitle")}</p>
             {["added", "removed", "dtype_mismatch"].map((key) => {
               const list = (updateState.differences as any)[key] as string[];
               if (!list?.length) return null;
               const label =
-                key === "added" ? "Added" : key === "removed" ? "Removed" : "Type changes";
+                key === "added"
+                  ? t("updateModal.differences.added")
+                  : key === "removed"
+                  ? t("updateModal.differences.removed")
+                  : t("updateModal.differences.typeChanges");
               return (
                 <p key={key}>
                   <span className="font-semibold">{label}:</span> {list.join(", ")}
@@ -1144,14 +1186,14 @@ export default function DatasetsPage() {
         )}
         <div className="mt-4 flex justify-end gap-2">
           <Button variant="ghost" onClick={dismissUpdateModal}>
-            Cancel
+            {tCommon("cancel")}
           </Button>
           <Button
             onClick={submitDatasetUpdate}
             disabled={!canEdit || !updateState.file || updateState.uploading}
-            title={!canEdit ? "Solo lectura: tu rol es Visualizador" : undefined}
+            title={!canEdit ? readOnlyTitle : undefined}
           >
-            {updateState.uploading ? "Uploading new version..." : "Upload & Replace"}
+            {updateState.uploading ? t("updateModal.uploading") : t("updateModal.uploadReplace")}
           </Button>
         </div>
       </Modal>
@@ -1159,25 +1201,32 @@ export default function DatasetsPage() {
       <Modal
         open={versionHistory.open}
         onClose={closeVersionHistory}
-        title={versionHistory.dataset ? `${versionHistory.dataset.display_name} · Versions` : "Version history"}
+        title={
+          versionHistory.dataset
+            ? t("versionModal.titleNamed", { name: versionHistory.dataset.display_name })
+            : t("versionModal.title")
+        }
       >
         {versionHistory.loading ? (
-          <p className="text-sm text-[var(--color-muted)]">Loading version history…</p>
+          <div className="space-y-2">
+            <Skeleton className="h-10 w-full" />
+            <Skeleton className="h-10 w-full" />
+          </div>
         ) : versionHistory.items.length ? (
           <ul className="space-y-2 text-sm">
             {versionHistory.items.map((item) => (
-              <li key={item.version} className="rounded-lg border border-[var(--color-border)] p-2 flex items-center justify-between">
-                <span>Version {item.version}</span>
-                <span className="text-[var(--color-muted)]">{formatDate(item.created_at)}</span>
+              <li key={item.version} className="rounded-lg border border-line p-2 flex items-center justify-between">
+                <span className="text-ink">{t("versionModal.version", { version: item.version })}</span>
+                <span className="text-muted">{formatDate(item.created_at)}</span>
               </li>
             ))}
           </ul>
         ) : (
-          <p className="text-sm text-[var(--color-muted)]">No version history available.</p>
+          <p className="text-sm text-muted">{t("versionModal.none")}</p>
         )}
         <div className="mt-4 flex justify-end">
           <Button variant="ghost" onClick={closeVersionHistory}>
-            Close
+            {tCommon("close")}
           </Button>
         </div>
       </Modal>
@@ -1185,22 +1234,26 @@ export default function DatasetsPage() {
       <Modal
         open={renameState.open}
         onClose={() => setRenameState({ open: false, value: "" })}
-        title="Rename dataset"
+        title={t("renameModal.title")}
       >
+        <Eyebrow htmlFor="dataset-rename-input">{t("renameModal.label")}</Eyebrow>
         <Input
+          id="dataset-rename-input"
+          className="mt-1"
           value={renameState.value}
           onChange={(event) => setRenameState((state) => ({ ...state, value: event.target.value }))}
-          placeholder="Display name"
           autoFocus
         />
         <div className="mt-4 flex justify-end gap-2">
-          <Button variant="ghost" onClick={() => setRenameState({ open: false, value: "" })}>Cancel</Button>
+          <Button variant="ghost" onClick={() => setRenameState({ open: false, value: "" })}>
+            {tCommon("cancel")}
+          </Button>
           <Button
             onClick={handleRename}
             disabled={!canEdit || !renameState.value.trim()}
-            title={!canEdit ? "Solo lectura: tu rol es Visualizador" : undefined}
+            title={!canEdit ? readOnlyTitle : undefined}
           >
-            Save
+            {tCommon("save")}
           </Button>
         </div>
       </Modal>
@@ -1208,54 +1261,60 @@ export default function DatasetsPage() {
       <Modal
         open={deleteState.open}
         onClose={() => setDeleteState({ open: false, cascade: true })}
-        title="Delete dataset"
+        title={t("deleteModal.title")}
       >
         {deleteState.dataset && (
           <div className="space-y-4 text-sm">
-            <p>
-              This will delete <strong>{deleteState.dataset.display_name}</strong>
-              {" "}and {deleteState.cascade ? "all dependent transforms/models." : "if no dependencies remain."}
+            <p className="text-ink">
+              {t(deleteState.cascade ? "deleteModal.bodyCascade" : "deleteModal.bodyNoCascade", {
+                name: deleteState.dataset.display_name,
+              })}
             </p>
-            <div className="rounded-xl border border-[var(--color-border)] p-3 text-xs">
-              <p className="mb-2 font-semibold">Dependencies</p>
-              <ul className="space-y-1">
-                <li>Variables: {deleteState.dataset.dependencies.variables}</li>
-                <li>Models: {deleteState.dataset.dependencies.models}</li>
-                <li>Scenarios: {deleteState.dataset.dependencies.scenarios}</li>
+            <div className="rounded-lg border border-line p-3 text-xs">
+              <p className="mb-2 font-semibold text-ink">{t("deleteModal.dependencies")}</p>
+              <ul className="space-y-1 text-muted">
+                <li>{t("deleteModal.variables", { count: deleteState.dataset.dependencies.variables })}</li>
+                <li>{t("deleteModal.models", { count: deleteState.dataset.dependencies.models })}</li>
+                <li>{t("deleteModal.scenarios", { count: deleteState.dataset.dependencies.scenarios })}</li>
               </ul>
             </div>
-            <label className="flex items-center gap-2 text-xs">
+            <label className="flex items-center gap-2 text-xs text-ink">
               <input
                 type="checkbox"
                 checked={deleteState.cascade}
                 onChange={(event) => setDeleteState((state) => ({ ...state, cascade: event.target.checked }))}
               />
-              Delete dependent items (recommended)
+              {t("deleteModal.cascadeLabel")}
             </label>
             <div className="flex justify-end gap-2">
-              <Button variant="ghost" onClick={() => setDeleteState({ open: false, cascade: true })}>Cancel</Button>
+              <Button variant="ghost" onClick={() => setDeleteState({ open: false, cascade: true })}>
+                {tCommon("cancel")}
+              </Button>
               <Button
                 variant="danger"
                 onClick={handleDelete}
                 disabled={!canEdit}
-                title={!canEdit ? "Solo lectura: tu rol es Visualizador" : undefined}
+                title={!canEdit ? readOnlyTitle : undefined}
               >
-                Delete
+                {tCommon("delete")}
               </Button>
             </div>
           </div>
         )}
       </Modal>
-    </section>
-  );
-}
 
-function Stat({ label, value }: { label: string; value: React.ReactNode }) {
-  return (
-    <div className="rounded-2xl border border-[var(--color-border)] p-3">
-      <p className="text-xs text-[var(--color-muted)]">{label}</p>
-      <p className="text-base font-semibold">{value}</p>
-    </div>
+      <Modal open={sampleConfirmOpen} onClose={() => setSampleConfirmOpen(false)} title={t("sample.confirmTitle")}>
+        <p className="text-sm text-ink">{t("sample.confirmBody", { target: pendingSampleLabel })}</p>
+        <div className="mt-4 flex justify-end gap-2">
+          <Button variant="ghost" onClick={() => setSampleConfirmOpen(false)}>
+            {tCommon("cancel")}
+          </Button>
+          <Button onClick={handleApplySample} disabled={sampleUpdating}>
+            {tCommon("confirm")}
+          </Button>
+        </div>
+      </Modal>
+    </section>
   );
 }
 
@@ -1271,12 +1330,13 @@ function safeParseJSON(payload: string | null) {
 function SchemaTabs({
   preview,
   loading,
+  t,
 }: {
   preview: Preview | null;
   loading: boolean;
-  datasetName?: string;
+  t: ReturnType<typeof useTranslations>;
 }) {
-  const [tab, setTab] = useState<"schema" | "preview">("schema");
+  const [tab, setTab] = useState("schema");
   const schemaRows =
     preview?.columns?.map((column) => {
       const samples = (preview.rows || [])
@@ -1288,83 +1348,79 @@ function SchemaTabs({
     }) || [];
 
   return (
-    <div className="rounded-2xl border border-[var(--color-border)] shadow-sm overflow-hidden">
-      <div className="flex border-b border-[var(--color-border)] text-sm">
-        {["schema", "preview"].map((key) => (
-          <button
-            key={key}
-            className={`flex-1 px-4 py-2 transition ${
-              tab === key ? "bg-[var(--color-bg)] font-medium" : "text-[var(--color-muted)]"
-            }`}
-            onClick={() => setTab(key as any)}
-          >
-            {key === "schema" ? "Schema Overview" : "Table Preview"}
-          </button>
-        ))}
-      </div>
-      {tab === "schema" ? (
-        schemaRows.length ? (
-          <div className="max-h-[360px] overflow-auto">
-            <table className="w-full text-sm">
-              <thead className="sticky top-0 bg-[var(--color-bg)]">
-                <tr className="text-xs uppercase tracking-wide text-[var(--color-muted)]">
-                  <th className="px-4 py-2 text-left">Column</th>
-                  <th className="px-4 py-2 text-left">Type</th>
-                  <th className="px-4 py-2 text-left">Preview</th>
-                </tr>
-              </thead>
+    <Tabs
+      active={tab}
+      onChange={setTab}
+      items={[
+        {
+          id: "schema",
+          label: t("schema.schemaTab"),
+          content: schemaRows.length ? (
+            <Table wrapperClassName="max-h-[360px] overflow-auto">
+              <TableHeader className="sticky top-0">
+                <TableRow>
+                  <Th>{t("schema.column")}</Th>
+                  <Th>{t("schema.type")}</Th>
+                  <Th>{t("schema.preview")}</Th>
+                </TableRow>
+              </TableHeader>
               <tbody>
                 {schemaRows.map((row) => (
-                  <tr
-                    key={row.name}
-                    className="border-t border-[var(--color-border)]/70 transition hover:bg-[var(--color-border)]/20"
-                  >
-                    <td className="px-4 py-3 font-medium">{row.name}</td>
-                    <td className="px-4 py-3 text-[var(--color-muted)]">{row.type}</td>
-                    <td className="px-4 py-3 text-[var(--color-muted)]">
-                      {row.samples.length ? row.samples.join(", ") : "—"}
-                    </td>
-                  </tr>
+                  <TableRow key={row.name}>
+                    <TableCell className="font-medium">{row.name}</TableCell>
+                    <TableCell className="text-muted">{row.type}</TableCell>
+                    <TableCell className="text-muted">{row.samples.length ? row.samples.join(", ") : "—"}</TableCell>
+                  </TableRow>
                 ))}
               </tbody>
-            </table>
-          </div>
-        ) : (
-          <div className="p-6 text-center text-sm text-[var(--color-muted)]">
-            {loading ? "Loading schema…" : "No schema available"}
-          </div>
-        )
-      ) : preview && preview.columns.length ? (
-        <div className="max-h-[360px] overflow-auto">
-          <table className="min-w-full text-sm">
-            <thead className="bg-[var(--color-bg)]/80">
-              <tr>
-                {preview.columns.map((col) => (
-                  <th key={col} className="px-3 py-2 text-left text-xs font-medium text-[var(--color-muted)] uppercase tracking-wide">
-                    {col}
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {preview.rows.map((row, idx) => (
-                <tr key={idx} className="odd:bg-transparent even:bg-[var(--color-border)]/20">
-                  {preview.columns.map((col) => (
-                    <td key={`${idx}-${col}`} className="px-3 py-2 whitespace-nowrap">
-                      {String(row[col] ?? "")}
-                    </td>
+            </Table>
+          ) : loading ? (
+            <div className="space-y-2 p-4">
+              <Skeleton className="h-6 w-full" />
+              <Skeleton className="h-6 w-full" />
+              <Skeleton className="h-6 w-full" />
+            </div>
+          ) : (
+            <div className="p-6 text-center text-sm text-muted">{t("schema.noSchema")}</div>
+          ),
+        },
+        {
+          id: "preview",
+          label: t("schema.previewTab"),
+          content:
+            preview && preview.columns.length ? (
+              <Table wrapperClassName="max-h-[360px] overflow-auto">
+                <TableHeader className="sticky top-0">
+                  <TableRow>
+                    {preview.columns.map((col) => (
+                      <Th key={col}>{col}</Th>
+                    ))}
+                  </TableRow>
+                </TableHeader>
+                <tbody>
+                  {preview.rows.map((row, idx) => (
+                    <TableRow key={idx} className="odd:bg-transparent even:bg-surface-2">
+                      {preview.columns.map((col) => (
+                        <TableCell key={`${idx}-${col}`} className="whitespace-nowrap">
+                          {String(row[col] ?? "")}
+                        </TableCell>
+                      ))}
+                    </TableRow>
                   ))}
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      ) : (
-        <div className="p-6 text-center text-sm text-[var(--color-muted)]">
-          {loading ? "Loading preview…" : "No preview available"}
-        </div>
-      )}
-    </div>
+                </tbody>
+              </Table>
+            ) : loading ? (
+              <div className="space-y-2 p-4">
+                <Skeleton className="h-6 w-full" />
+                <Skeleton className="h-6 w-full" />
+                <Skeleton className="h-6 w-full" />
+              </div>
+            ) : (
+              <div className="p-6 text-center text-sm text-muted">{t("schema.noPreview")}</div>
+            ),
+        },
+      ]}
+    />
   );
 }
 

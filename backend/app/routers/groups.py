@@ -3,12 +3,13 @@ from __future__ import annotations
 import uuid
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy import func
 from sqlmodel import Session, select, delete
 
 from ..auth import CurrentMembership, get_current_membership, require_write_access
 from ..db import get_session
+from ..errors import api_error
 from ..models import Group, Subgroup, Dataset, Variable
 from ..services.analysis import clear_analysis_cache
 from ..tenancy import get_scoped
@@ -129,13 +130,13 @@ def assign_variable(
         )
     ).first()
     if not var:
-        raise HTTPException(status_code=404, detail="Variable not found")
+        raise api_error(404, "VARIABLE_NOT_FOUND", "Variable not found")
 
     group = get_scoped(session, Group, body.group_id, membership.company_id) if body.group_id else None
     subgroup = get_scoped(session, Subgroup, body.subgroup_id, membership.company_id) if body.subgroup_id else None
 
     if subgroup and group and subgroup.group_id != group.id:
-        raise HTTPException(status_code=400, detail="Subgroup does not belong to group")
+        raise api_error(400, "SUBGROUP_GROUP_MISMATCH", "Subgroup does not belong to group")
     if subgroup and not group:
         group = get_scoped(session, Group, subgroup.group_id, membership.company_id)
 
@@ -157,7 +158,7 @@ def rename_group(
     if body.name is not None:
         new_name = body.name.strip()
         if not new_name:
-            raise HTTPException(status_code=400, detail={"error": "Name cannot be empty"})
+            raise api_error(400, "GROUP_NAME_EMPTY", "Name cannot be empty")
         conflict = session.exec(
             select(Group).where(
                 Group.company_id == membership.company_id,
@@ -166,7 +167,7 @@ def rename_group(
             )
         ).first()
         if conflict:
-            raise HTTPException(status_code=400, detail={"error": "Group name already exists"})
+            raise api_error(400, "GROUP_NAME_CONFLICT", "Group name already exists")
         group.name = new_name
     if body.apply_media_transform is not None:
         group.apply_media_transform = body.apply_media_transform
@@ -206,7 +207,7 @@ def rename_subgroup(
     if body.name is not None:
         new_name = body.name.strip()
         if not new_name:
-            raise HTTPException(status_code=400, detail={"error": "Name cannot be empty"})
+            raise api_error(400, "GROUP_NAME_EMPTY", "Name cannot be empty")
         conflict = session.exec(
             select(Subgroup).where(
                 Subgroup.group_id == subgroup.group_id,
@@ -216,7 +217,7 @@ def rename_subgroup(
             )
         ).first()
         if conflict:
-            raise HTTPException(status_code=400, detail={"error": "Subgroup name already exists in this group"})
+            raise api_error(400, "SUBGROUP_NAME_CONFLICT", "Subgroup name already exists in this group")
         subgroup.name = new_name
     if body.apply_media_transform is not None:
         subgroup.apply_media_transform = body.apply_media_transform

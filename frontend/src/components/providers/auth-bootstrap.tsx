@@ -5,7 +5,12 @@ import { getSupabaseBrowserClient } from "@/lib/supabase/client";
 import { apiFetch } from "@/lib/api";
 import { useGlobalStore, type Membership } from "@/lib/store";
 
-type MyMembership = { company_id: string; company_name: string; role: Membership["role"] };
+type MyMembership = {
+  company_id: string;
+  company_name: string;
+  currency_code: string;
+  role: Membership["role"];
+};
 type MyMembershipsResponse = { is_platform_admin: boolean; memberships: MyMembership[] };
 
 async function hydrateMemberships() {
@@ -14,7 +19,12 @@ async function hydrateMemberships() {
       skipCompanyHeader: true,
     });
     useGlobalStore.getState().setMemberships(
-      memberships.map((r) => ({ companyId: r.company_id, companyName: r.company_name, role: r.role })),
+      memberships.map((r) => ({
+        companyId: r.company_id,
+        companyName: r.company_name,
+        currencyCode: r.currency_code,
+        role: r.role,
+      })),
       is_platform_admin
     );
   } catch {

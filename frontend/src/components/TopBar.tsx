@@ -3,19 +3,24 @@
 import React, { useEffect, useState } from "react";
 import { useTheme } from "next-themes";
 import { useTranslations } from "next-intl";
-import { Menu, Moon, Sun, Languages } from "lucide-react";
+import { Menu, Moon, Sun } from "lucide-react";
 import { CompanySwitcher } from "@/components/company-switcher";
 import { UserMenu } from "@/components/user-menu";
 import { IconButton } from "@/components/ui/icon-button";
 import { useLocaleToggle } from "@/components/providers/locale-provider";
-import type { PipelineContext } from "@/hooks/usePipelineContext";
 
 const ThemeToggle = () => {
   const { resolvedTheme, setTheme } = useTheme();
-  const isDark = resolvedTheme === "dark";
+  // `resolvedTheme` is undefined on the server (and on the client's first render, before
+  // next-themes reads localStorage) — rendering off it directly causes a real hydration
+  // mismatch whenever the stored preference is "dark" (SSR always assumes light). Render a
+  // theme-agnostic placeholder until mounted, then swap to the real icon.
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => setMounted(true), []);
+  const isDark = mounted && resolvedTheme === "dark";
   return (
     <IconButton aria-label="Toggle theme" onClick={() => setTheme(isDark ? "light" : "dark")}>
-      {isDark ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
+      {mounted ? isDark ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" /> : <Moon className="h-4 w-4 opacity-0" />}
     </IconButton>
   );
 };
@@ -26,44 +31,14 @@ const LanguageToggle = () => {
     <IconButton
       aria-label={locale === "es" ? "Switch to English" : "Cambiar a español"}
       onClick={() => setLocale(locale === "es" ? "en" : "es")}
+      className="text-xs font-semibold"
     >
-      <Languages className="h-4 w-4" />
+      {locale.toUpperCase()}
     </IconButton>
   );
 };
 
-// Barra de contexto persistente: hoy Datasets/Transform/Modeling/Analysis reimplementan el
-// selector de dataset/modelo activos en 3 posiciones distintas. `usePipelineContext` ya resuelve
-// el nombre a partir de los ids que `lib/store.ts` persiste — esto solo lo expone.
-function ContextBar({ pipelineContext }: { pipelineContext: PipelineContext }) {
-  const t = useTranslations("context");
-  const { datasetName, modelName } = pipelineContext;
-
-  if (!datasetName) return null;
-
-  return (
-    <div className="hidden min-w-0 items-center gap-4 text-sm sm:flex">
-      <span className="min-w-0 truncate">
-        <span className="text-muted">{t("dataset")}: </span>
-        <span className="text-ink">{datasetName}</span>
-      </span>
-      {modelName && (
-        <span className="min-w-0 truncate">
-          <span className="text-muted">{t("model")}: </span>
-          <span className="text-ink">{modelName}</span>
-        </span>
-      )}
-    </div>
-  );
-}
-
-export function TopBar({
-  onMenuClick,
-  pipelineContext,
-}: {
-  onMenuClick: () => void;
-  pipelineContext: PipelineContext;
-}) {
+export function TopBar({ onMenuClick }: { onMenuClick: () => void }) {
   const [shrunken, setShrunken] = useState(false);
   const tSidebar = useTranslations("sidebar");
 
@@ -92,9 +67,7 @@ export function TopBar({
       <IconButton aria-label={tSidebar("openMenu")} onClick={onMenuClick} className="md:hidden">
         <Menu className="h-4 w-4" />
       </IconButton>
-      <div className="flex min-w-0 flex-1 items-center">
-        <ContextBar pipelineContext={pipelineContext} />
-      </div>
+      <div className="min-w-0 flex-1" />
       <div className="flex items-center gap-3">
         <CompanySwitcher />
         <LanguageToggle />

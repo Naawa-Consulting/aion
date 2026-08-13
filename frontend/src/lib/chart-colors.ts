@@ -1,3 +1,5 @@
+import { useRef } from "react";
+
 // Categorical palette validated for CVD-safe adjacent pairs in both light/dark
 // (see .claude skill "dataviz" / references/palette.md). Order is the safety
 // mechanism — never reassign by index or cycle past slot 8.
@@ -58,4 +60,26 @@ export function assignCategoricalColors(orderedNames: string[], isDark: boolean)
     map[name] = chartColor(index, isDark);
   });
   return map;
+}
+
+/**
+ * Sticky group→color assignment across re-fetches (date range/filter changes) — fixes the
+ * repaint bug `assignCategoricalColors` has when re-sorting a *filtered* list: dropping one
+ * name shifts every later name's index. Here the index, once assigned, never changes; a
+ * name that drops out of view and comes back later gets its original color back. Reset the
+ * registry (pass a new `resetKey`, e.g. the selected model id) when the identity of "what a
+ * name refers to" changes, not on every data refresh.
+ */
+export function useStableCategoricalColor(resetKey: unknown) {
+  const registryRef = useRef<Map<string, number>>(new Map());
+  const resetKeyRef = useRef(resetKey);
+  if (resetKeyRef.current !== resetKey) {
+    registryRef.current = new Map();
+    resetKeyRef.current = resetKey;
+  }
+  return function colorFor(name: string, isDark: boolean): string {
+    const registry = registryRef.current;
+    if (!registry.has(name)) registry.set(name, registry.size);
+    return chartColor(registry.get(name)!, isDark);
+  };
 }

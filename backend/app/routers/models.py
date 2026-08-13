@@ -15,6 +15,7 @@ from statsmodels.stats.stattools import durbin_watson
 
 from ..auth import CurrentMembership, get_current_membership, require_write_access
 from ..db import get_session
+from ..errors import api_error
 from ..models import Dataset, Model, ModelMetrics, ModelTransform, Scenario, Variable, Group, Subgroup
 from ..services.analysis import invalidate_cache_for_model
 from ..services.media_transform import half_life
@@ -51,7 +52,7 @@ def _load_df(ds: Dataset) -> pd.DataFrame:
         return load_dataset_frame(ds)
     except Exception as e:
         if isinstance(e, ValueError):
-            raise HTTPException(status_code=400, detail=str(e))
+            raise api_error(400, "DATASET_LOAD_ERROR", str(e))
         raise HTTPException(status_code=500, detail=f"Failed to read dataset: {e}")
 
 
@@ -68,7 +69,7 @@ def correlations(
     ds = get_scoped(session, Dataset, dataset_id, membership.company_id)
     df = _load_df(ds)
     if y not in df.columns:
-        raise HTTPException(status_code=400, detail="Dependent variable not in dataset")
+        raise api_error(400, "DEPENDENT_VARIABLE_NOT_IN_DATASET", "Dependent variable not in dataset")
 
     vars_data = session.exec(
         select(Variable).where(Variable.dataset_id == dataset_id, Variable.company_id == membership.company_id)
@@ -110,7 +111,7 @@ def correlations(
 
     numeric_df = df.select_dtypes(include=[np.number])
     if y not in numeric_df.columns:
-        raise HTTPException(status_code=400, detail="Dependent variable must be numeric")
+        raise api_error(400, "DEPENDENT_VARIABLE_NOT_NUMERIC", "Dependent variable must be numeric")
 
     derived_lookup = {var.name: var.is_derived for var in vars_data}
 
@@ -118,9 +119,9 @@ def correlations(
     if model_id:
         model = get_scoped(session, Model, model_id, membership.company_id)
         if model.dataset_id != dataset_id:
-            raise HTTPException(status_code=400, detail="Model does not belong to this dataset")
+            raise api_error(400, "MODEL_DATASET_MISMATCH", "Model does not belong to this dataset")
         if model.y_var != y:
-            raise HTTPException(status_code=400, detail="Model target does not match requested y")
+            raise api_error(400, "MODEL_TARGET_MISMATCH", "Model target does not match requested y")
         x_vars = json.loads(model.x_vars_json)
         transform_params = load_transform_params(session, model.id, membership.company_id)
         work, y_arr, X, _ = _build_matrix(
@@ -189,7 +190,7 @@ def _build_matrix(
     try:
         work, X, used_params = build_design_matrix(df, y_var, x_vars, media_flags, transform_params=transform_params)
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise api_error(400, "MODEL_BUILD_ERROR", str(e))
     y = work[y_var].to_numpy()
     return work, y, X, used_params
 
@@ -454,7 +455,7 @@ def duplicate_model(
     original = get_scoped(session, Model, model_id, membership.company_id)
     metrics = session.get(ModelMetrics, original.id)
     if not metrics:
-        raise HTTPException(status_code=400, detail="Original model metrics missing")
+        raise api_error(400, "MODEL_METRICS_MISSING", "Original model metrics missing")
     new_name = _generate_unique_name(session, original.dataset_id, membership.company_id, f"{original.name} - copy")
     new_model = Model(
         id=str(uuid.uuid4()),
@@ -554,7 +555,7 @@ def delete_model(
 
 def _apply_role(session: Session, model: Model, role: str, company_id: str):
     if role not in ROLE_CHOICES:
-        raise HTTPException(status_code=400, detail="Invalid role")
+        raise api_error(400, "INVALID_ROLE", "Invalid role")
     # Clear hero/challenger slots
     dataset_models = session.exec(
         select(Model).where(Model.dataset_id == model.dataset_id, Model.company_id == company_id)
@@ -746,7 +747,7 @@ def model_predictions(
         return PredictionsResponse(index=index, y_true=y.tolist(), y_pred=y_hat.tolist(), residuals=residuals.tolist())
 
     if time_series is None or not time_column_used:
-        raise HTTPException(status_code=400, detail="No datetime column available; provide time_col")
+        raise api_error(400, "TIME_COLUMN_REQUIRED", "No datetime column available; provide time_col")
     ts = time_series
 
     series = pd.DataFrame(
