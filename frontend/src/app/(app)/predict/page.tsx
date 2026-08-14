@@ -413,12 +413,20 @@ export default function PredictPage() {
   );
   const handleApplyAllocations = useCallback(
     (allocations: ChannelAllocation[]) => {
+      const periodCount = editablePeriods.length;
       setAdjustments((prev) => {
         const next = cloneAdjustments(prev);
         editablePeriods.forEach((period) => {
           if (!next[period]) next[period] = {};
           allocations.forEach((allocation) => {
-            next[period][allocation.proxy_variable] = { mode: "value", value: allocation.suggested_spend };
+            // suggested_spend is the optimizer's steady-state total across the whole horizon, in
+            // dollars. The scenario applies the same absolute value to every period, so divide by
+            // the period count first (else the horizon total ends up periodCount× the requested
+            // budget) and by dollar_rate second (the scenario's raw model-variable value is in the
+            // variable's native units — impressions, GRPs, ... — not dollars).
+            const perPeriodSpend = allocation.suggested_spend / periodCount;
+            const units = perPeriodSpend / allocation.dollar_rate;
+            next[period][allocation.proxy_variable] = { mode: "value", value: units };
           });
         });
         return next;

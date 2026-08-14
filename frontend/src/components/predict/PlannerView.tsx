@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { useTranslations } from "next-intl";
 
@@ -17,6 +17,10 @@ export type ChannelAllocation = {
   name: string;
   proxy_variable: string;
   suggested_spend: number;
+  // Dollars per unit of proxy_variable. `suggested_spend` is in dollars, but the scenario/model
+  // pipeline works in the variable's native units — divide by this before writing an allocation
+  // into a scenario's adjustments (see predict/page.tsx::handleApplyAllocations).
+  dollar_rate: number;
   projected_contribution: number;
   projected_revenue: number | null;
 };
@@ -37,6 +41,35 @@ const EXCLUSION_KEYS: Record<string, string> = {
   no_transform_params: "noTransformParams",
   no_dollar_rate: "noDollarRate",
 };
+
+// Native <input type="number"> can't show thousands separators and renders the raw float
+// (many decimals) untouched, which is what made suggested spend look wrong to users even when
+// the underlying value was fine. This mirrors ScenarioSheetGlide's formatNumericDisplay: a plain
+// text input that displays a formatted, 2-decimal value and only re-parses on blur (formatting
+// on every keystroke would fight the cursor while typing).
+function SpendInput({ value, onChange }: { value: number; onChange: (next: number) => void }) {
+  const [text, setText] = useState(() => formatChartNumber(value, 2));
+
+  useEffect(() => {
+    setText(formatChartNumber(value, 2));
+  }, [value]);
+
+  return (
+    <Input
+      type="text"
+      inputMode="decimal"
+      className="mt-1"
+      value={text}
+      onChange={(event) => setText(event.target.value)}
+      onBlur={() => {
+        const parsed = Number(text.replace(/,/g, ""));
+        const next = Number.isFinite(parsed) ? Math.max(parsed, 0) : 0;
+        onChange(next);
+        setText(formatChartNumber(next, 2));
+      }}
+    />
+  );
+}
 
 export default function PlannerView({
   modelId,
@@ -124,15 +157,12 @@ export default function PlannerView({
                   <CardHeader title={allocation.name} subtitle={allocation.proxy_variable} />
                   <label className="flex flex-col gap-1">
                     <Eyebrow>{t("suggestedSpend")}</Eyebrow>
-                    <Input
-                      type="number"
-                      min={0}
-                      className="mt-1"
+                    <SpendInput
                       value={editedSpend[allocation.proxy_variable] ?? allocation.suggested_spend}
-                      onChange={(event) =>
+                      onChange={(next) =>
                         setEditedSpend((prev) => ({
                           ...prev,
-                          [allocation.proxy_variable]: Number(event.target.value) || 0,
+                          [allocation.proxy_variable]: next,
                         }))
                       }
                     />

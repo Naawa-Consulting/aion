@@ -311,12 +311,17 @@ continuous view now. `economics-section.tsx`'s old responsibilities moved as fol
 ### Budget optimizer (Fase 6 — shared by Predict's Planner mode and Resumen Ejecutivo)
 
 `POST /economics/{model_id}/optimize-budget` with `{budget: float}` → `{allocations: [{channel_id,
-name, proxy_variable, suggested_spend, projected_contribution, projected_revenue}], excluded_channels:
+name, proxy_variable, suggested_spend, dollar_rate, projected_contribution, projected_revenue}], excluded_channels:
 [{channel_id, name, reason: "not_modeled"|"no_transform_params"|"no_dollar_rate"}], total_budget,
 total_projected_contribution, total_projected_revenue, economics_configured}`. One engine
 (`backend/app/services/budget_optimizer.py`), two frontend consumers (Predict's Planner mode,
 `/executive-summary`'s "presupuesto inverso") — see `BITACORA.md` Fase 6 for the design decisions
-(v1 scope: single objective, no per-channel bounds).
+(v1 scope: single objective, no per-channel bounds). `suggested_spend` is in dollars (steady-state
+total across the whole horizon); `dollar_rate` (dollars per unit of `proxy_variable`) is exposed so
+callers can convert to the model variable's native units before writing an allocation into a
+scenario — see Planner mode below (added 2026-08-13 after a real unit-mismatch bug: writing
+`suggested_spend` directly into a scenario's raw model-variable value inflated the projected
+Investment KPI by orders of magnitude).
 
 - **Steady-state, not a per-period plan**: allocates one constant spend per channel for the whole
   horizon, by simulating `STEADY_STATE_PERIODS=500` steps of constant spend through the existing
@@ -371,10 +376,14 @@ total_projected_contribution, total_projected_revenue, economics_configured}`. O
 - **Modo Planner (Fase 6)**: `/predict` gained a Planner/"Vista avanzada" toggle next to the scenario
   builder. Planner mode renders `components/predict/PlannerView.tsx` instead of the raw grid: a
   budget input + "Optimizar presupuesto" button calling the budget optimizer above, editable
-  per-channel suggested spend, and "Aplicar al escenario" which writes `{mode: "value",
-  value: suggested_spend}` into every period of the active horizon for each channel's
-  `proxy_variable` (same `PeriodValue` shape the grid already writes) — no new scenario-update
-  endpoint. New Investment/Revenue/ROI/ROAS KPI cards render above the toggle when
+  per-channel suggested spend, and "Aplicar al escenario" which writes `{mode: "value", value}`
+  into every period of the active horizon for each channel's `proxy_variable` (same `PeriodValue`
+  shape the grid already writes) — no new scenario-update endpoint. `value` is
+  `suggested_spend / periodCount / dollar_rate`, not `suggested_spend` directly: `suggested_spend`
+  is a dollar figure for the whole horizon, while a scenario's raw variable value is per-period and
+  in the variable's native units, so it's divided by the period count first (else the horizon total
+  would be `periodCount × budget`) and by `dollar_rate` second (else it isn't in the variable's
+  native units at all). New Investment/Revenue/ROI/ROAS KPI cards render above the toggle when
   `preview.economics` is present.
 - **Visual redesign (Fase 7.7, frontend-only)**: Planner is now the default `viewMode` (was
   "Vista avanzada") per the Direction C thesis — the raw grid is opt-in, not the landing state.

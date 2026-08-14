@@ -598,6 +598,10 @@ class ChannelAllocation(BaseModel):
     name: str
     proxy_variable: str
     suggested_spend: float
+    dollar_rate: float
+    """Dollars per unit of `proxy_variable` (see resolve_channel_dollar_rate) — callers applying
+    `suggested_spend` (dollars) to a scenario's raw model-variable value must divide by this first,
+    since the model/scenario pipeline works in the variable's native units, not dollars."""
     projected_contribution: float
     projected_revenue: Optional[float] = None
 

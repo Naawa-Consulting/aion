@@ -72,6 +72,7 @@ def optimize_budget(channels: list[OptimizableChannel], budget: float) -> dict:
                     "name": c.name,
                     "proxy_variable": c.proxy_variable,
                     "suggested_spend": 0.0,
+                    "dollar_rate": c.dollar_rate,
                     "projected_contribution": 0.0,
                     "projected_revenue": 0.0 if c.conversion_rate is not None else None,
                 }
@@ -118,6 +119,19 @@ def optimize_budget(channels: list[OptimizableChannel], budget: float) -> dict:
                 best_value = value
                 best_spend = result.x
 
+    # Defensive invariant: SLSQP's box bounds/equality constraint are satisfied only up to its
+    # internal tolerance, and on some (rare, not reliably reproducible) parameter combinations the
+    # returned solution has been observed to grossly violate them. Clip to the bounds actually
+    # passed to the solver, then rescale proportionally so allocations always sum to exactly
+    # `budget` — a budget allocation that doesn't add up to the requested budget is never a valid
+    # answer regardless of what the optimizer internally reports.
+    clipped = [min(max(float(s), 0.0), budget) for s in best_spend]
+    clipped_total = sum(clipped)
+    if clipped_total > 0:
+        best_spend = [s * budget / clipped_total for s in clipped]
+    else:
+        best_spend = [budget / n] * n
+
     allocations = []
     total_contribution = 0.0
     total_revenue: Optional[float] = 0.0
@@ -138,6 +152,7 @@ def optimize_budget(channels: list[OptimizableChannel], budget: float) -> dict:
                 "name": channel.name,
                 "proxy_variable": channel.proxy_variable,
                 "suggested_spend": spend,
+                "dollar_rate": channel.dollar_rate,
                 "projected_contribution": contribution,
                 "projected_revenue": revenue,
             }
