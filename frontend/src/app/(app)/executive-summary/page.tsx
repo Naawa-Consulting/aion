@@ -258,23 +258,52 @@ export default function ExecutiveSummaryPage() {
   const chartGroups = [...nonBaselineGroups].sort((a, b) => Math.abs(b.contribution) - Math.abs(a.contribution));
   const yVar = summary?.model?.y_var ?? "";
 
-  const chartData = chartGroups.map((g) => {
-    const key = g.group_name || g.group_id || "";
-    return {
+  // Waterfall build-up: baseline anchors at 0, each group steps the running total
+  // (up or down), and a closing Total bar spans 0 → the final cumulative percent
+  // (always 100% by construction, since `percent` is each row's share of
+  // `total_contribution` — see backend `analysis.py::percent`).
+  type WaterfallDatum = {
+    key: string;
+    name: string;
+    base: number;
+    range: number;
+    contribution: number;
+    percent: number;
+    color: string;
+    isTotal?: boolean;
+  };
+  const waterfallData: WaterfallDatum[] = [];
+  let cumulative = 0;
+  const pushStep = (key: string, name: string, contribution: number, percent: number, color: string) => {
+    const start = cumulative;
+    cumulative += percent;
+    waterfallData.push({
       key,
-      name: g.group_name || key,
-      contribution: g.contribution,
-      percent: g.percent,
-      color: colorMap[key],
-    };
-  });
+      name,
+      base: Math.min(start, cumulative),
+      range: Math.abs(cumulative - start),
+      contribution,
+      percent,
+      color,
+    });
+  };
   if (baselineGroup) {
-    chartData.push({
-      key: "baseline",
-      name: baselineGroup.group_name || "Baseline",
-      contribution: baselineGroup.contribution,
-      percent: baselineGroup.percent,
-      color: mutedColor,
+    pushStep("baseline", baselineGroup.group_name || "Baseline", baselineGroup.contribution, baselineGroup.percent, mutedColor);
+  }
+  chartGroups.forEach((g) => {
+    const key = g.group_name || g.group_id || "";
+    pushStep(key, g.group_name || key, g.contribution, g.percent, colorMap[key]);
+  });
+  if (groups.length > 0) {
+    waterfallData.push({
+      key: "total",
+      name: t("groups.totalLabel"),
+      base: Math.min(0, cumulative),
+      range: Math.abs(cumulative),
+      contribution: summary?.total_contribution ?? 0,
+      percent: cumulative,
+      color: inkColor,
+      isTotal: true,
     });
   }
 
@@ -492,23 +521,22 @@ export default function ExecutiveSummaryPage() {
                 <CardHeader as="h2" title={t("groups.title")} subtitle={t("groups.subtitle", { yVar: yVarOrFallback })} />
                 {loading ? (
                   <Skeleton className="h-chart-md" />
-                ) : chartData.length ? (
+                ) : waterfallData.length ? (
                   <>
                     <div className="h-chart-md">
                       <ResponsiveContainer width="100%" height="100%">
-                        <BarChart data={chartData} layout="vertical" margin={{ left: 8, right: 48 }}>
-                          <CartesianGrid horizontal={false} stroke={lineColor} />
+                        <BarChart data={waterfallData} margin={{ top: 24, bottom: 8 }}>
+                          <CartesianGrid vertical={false} stroke={lineColor} />
                           <XAxis
-                            type="number"
-                            tickFormatter={(v) => formatChartPercent(v, 0)}
+                            type="category"
+                            dataKey="name"
                             tick={{ fill: mutedColor, fontSize: 12 }}
                             axisLine={{ stroke: lineColor }}
                             tickLine={false}
                           />
                           <YAxis
-                            type="category"
-                            dataKey="name"
-                            width={120}
+                            type="number"
+                            tickFormatter={(v) => formatChartPercent(v, 0)}
                             tick={{ fill: mutedColor, fontSize: 12 }}
                             axisLine={{ stroke: lineColor }}
                             tickLine={false}
@@ -517,7 +545,7 @@ export default function ExecutiveSummaryPage() {
                             cursor={{ fill: lineColor, opacity: 0.4 }}
                             content={({ active, payload }) => {
                               if (!active || !payload?.length) return null;
-                              const d = payload[0].payload as (typeof chartData)[number];
+                              const d = payload[0].payload as (typeof waterfallData)[number];
                               return (
                                 <div
                                   className="rounded-lg border px-3 py-2 text-xs shadow-[var(--shadow-soft)]"
@@ -528,21 +556,42 @@ export default function ExecutiveSummaryPage() {
                                     {t("groups.tooltipValue")}: {formatChartNumber(d.contribution, 1)}
                                   </p>
                                   <p className="text-muted">
-                                    {t("groups.tooltipPercent")}: {formatChartPercent(d.percent, 1)}
+                                    {d.isTotal ? t("groups.tooltipPercent") : t("groups.tooltipDelta")}:{" "}
+                                    {formatChartPercent(d.percent, 1)}
                                   </p>
                                 </div>
                               );
                             }}
                           />
-                          <Bar dataKey="percent" radius={[0, 4, 4, 0]} barSize={22}>
-                            {chartData.map((d) => (
+                          {/* Invisible foundation bar: positions the visible "range" segment at the
+                              right cumulative offset so each step floats instead of starting at 0. */}
+                          <Bar dataKey="base" stackId="waterfall" fill="transparent" isAnimationActive={false} />
+                          <Bar dataKey="range" stackId="waterfall" radius={[4, 4, 0, 0]} barSize={40}>
+                            {waterfallData.map((d) => (
                               <Cell key={d.key} fill={d.color} />
                             ))}
                             <LabelList
                               dataKey="percent"
-                              position="right"
-                              formatter={(v: number) => formatChartPercent(v, 1)}
-                              style={{ fill: inkColor, fontSize: 12, fontWeight: 500 }}
+                              content={(props: any) => {
+                                const { x, y, width, height, value, index } = props;
+                                const d = waterfallData[index as number];
+                                if (!d || typeof value !== "number") return null;
+                                const positive = value >= 0;
+                                const labelY = positive ? y - 6 : y + height + 14;
+                                const text = `${!d.isTotal && value > 0 ? "+" : ""}${formatChartPercent(value, 1)}`;
+                                return (
+                                  <text
+                                    x={x + width / 2}
+                                    y={labelY}
+                                    textAnchor="middle"
+                                    fontSize={12}
+                                    fontWeight={500}
+                                    fill={inkColor}
+                                  >
+                                    {text}
+                                  </text>
+                                );
+                              }}
                             />
                           </Bar>
                         </BarChart>

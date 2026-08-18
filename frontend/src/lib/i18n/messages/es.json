@@ -151,7 +151,9 @@
       "empty": "Sin datos de contribución todavía.",
       "baselineHint": "Baseline: estacionalidad y tendencia — no es un canal en el que se pueda invertir.",
       "tooltipValue": "Contribución",
-      "tooltipPercent": "% del total"
+      "tooltipPercent": "% del total",
+      "tooltipDelta": "Aporte al total",
+      "totalLabel": "Total"
     }
   },
   "modeling": {

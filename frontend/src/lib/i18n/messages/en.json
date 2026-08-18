@@ -151,7 +151,9 @@
       "empty": "No contribution data yet.",
       "baselineHint": "Baseline: seasonality and trend — not a channel you can invest in.",
       "tooltipValue": "Contribution",
-      "tooltipPercent": "% of total"
+      "tooltipPercent": "% of total",
+      "tooltipDelta": "Step contribution",
+      "totalLabel": "Total"
     }
   },
   "modeling": {
