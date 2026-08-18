@@ -1,7 +1,8 @@
 "use client";
 
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
+import { useRouter, useSearchParams } from "next/navigation";
 import type { ReactNode } from "react";
 import type { TooltipProps } from "recharts";
 import {
@@ -27,6 +28,7 @@ import { Card, CardHeader } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { FilterBar, FilterField } from "@/components/ui/filter-bar";
 import { apiFetch, ApiError } from "@/lib/api";
+import { translateApiError } from "@/lib/error-messages";
 import { ErrorText } from "@/components/ui/error-text";
 import { Select } from "@/components/ui/select";
 import { Input } from "@/components/ui/input";
@@ -198,16 +200,40 @@ function InfoTooltip({ label, content }: { label: string; content: string }) {
 }
 
 export default function AnalysisPage() {
+  // useSearchParams (A10-R2, deep links) opts this tree out of static rendering unless wrapped
+  // in Suspense — same pattern as app/login/page.tsx.
+  return (
+    <Suspense fallback={null}>
+      <AnalysisPageContent />
+    </Suspense>
+  );
+}
+
+function AnalysisPageContent() {
   const t = useTranslations("analysis");
   const tCommon = useTranslations("common");
+  const tErrors = useTranslations("errors");
   const { resolvedTheme } = useTheme();
   const isDarkTheme = resolvedTheme === "dark";
   const mutedColor = isDarkTheme ? "#81858e" : "#6d7178";
   const lineColor = isDarkTheme ? "#262a2f" : "#e5e6ea";
   const surfaceColor = isDarkTheme ? "#16181b" : "#ffffff";
   const inkColor = isDarkTheme ? "#f2f3f5" : "#17181c";
-  const { activeCompanyId } = useGlobalStore();
+  const {
+    activeCompanyId,
+    datasetId: storedDatasetId,
+    setDatasetId: setStoredDatasetId,
+    modelId: storedModelId,
+    setModelId: setStoredModelId,
+  } = useGlobalStore();
   const currency = useActiveCurrency();
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  // Capturado una sola vez al montar (A10-R2, deep links) — searchParams devuelve una instancia
+  // nueva en cada render, así que leerlo directo en efectos posteriores reabriría el link cada
+  // vez que este componente re-sincroniza la URL a sí mismo.
+  const initialParamsRef = useRef(searchParams);
+  const urlDateRangeAppliedRef = useRef(false);
 
   const [datasets, setDatasets] = useState<Dataset[]>([]);
   const [selectedDataset, setSelectedDataset] = useState("");
@@ -217,7 +243,10 @@ export default function AnalysisPage() {
   const [stacked, setStacked] = useState<StackedData | null>(null);
   const [timeCol, setTimeCol] = useState(TIME_COLUMN_PLACEHOLDER);
   const [timeColumnDefault, setTimeColumnDefault] = useState<string | null>(null);
-  const [freq, setFreq] = useState<"day" | "week" | "month">("month");
+  const [freq, setFreq] = useState<"day" | "week" | "month">(() => {
+    const urlFreq = initialParamsRef.current.get("freq");
+    return urlFreq === "day" || urlFreq === "week" || urlFreq === "month" ? urlFreq : "month";
+  });
   const [groupBy, setGroupBy] = useState<"group" | "subgroup">("group");
   const [asPercent, setAsPercent] = useState(false);
   const [includeBaseline, setIncludeBaseline] = useState(true);
@@ -243,6 +272,9 @@ export default function AnalysisPage() {
   const [dateBounds, setDateBounds] = useState<DateBounds>({ min: null, max: null });
   const [stackedLoading, setStackedLoading] = useState(false);
   const [stackedError, setStackedError] = useState<string | null>(null);
+  const [exportingSummary, setExportingSummary] = useState(false);
+  const [exportingSummaryTable, setExportingSummaryTable] = useState(false);
+  const [exportingStacked, setExportingStacked] = useState(false);
   const dateRangeInitializedRef = useRef(false);
   const [highlightedKey, setHighlightedKey] = useState<string | null>(null);
   const [chartSeries, setChartSeries] = useState<Record<string, any>[]>([]);
@@ -268,13 +300,21 @@ export default function AnalysisPage() {
     try {
       const data = await apiFetch<Dataset[]>("/datasets");
       setDatasets(data);
-      if (data.length) setSelectedDataset((prev) => prev || data[0].id);
-    } catch {
-      toast.error("Failed to load datasets");
+      if (data.length) {
+        // Deep link (A10-R2) wins over the store selection (A10-R1), which wins over "first".
+        const urlDatasetId = initialParamsRef.current.get("datasetId");
+        const preferred =
+          (urlDatasetId && data.some((d) => d.id === urlDatasetId) && urlDatasetId) ||
+          (storedDatasetId && data.some((d) => d.id === storedDatasetId) && storedDatasetId) ||
+          data[0].id;
+        setSelectedDataset((prev) => prev || preferred);
+      }
+    } catch (err) {
+      toast.error(err instanceof ApiError ? translateApiError(err, tErrors) : t("toasts.loadDatasetsFailed"));
     } finally {
       setInitializing(false);
     }
-  }, []);
+  }, [t, tErrors, storedDatasetId]);
 
   useEffect(() => {
     // activeCompanyId hydrates asynchronously (AuthBootstrap fetches /me/memberships and
@@ -330,16 +370,22 @@ export default function AnalysisPage() {
         setSelectedModel("");
         return;
       }
+      // Deep link (A10-R2) wins over the store selection (A10-R1), which wins over hero/first.
+      const urlModelId = initialParamsRef.current.get("modelId");
+      const preferredValid =
+        (urlModelId && available.some((m) => m.id === urlModelId) && urlModelId) ||
+        (storedModelId && available.some((m) => m.id === storedModelId) && storedModelId) ||
+        null;
       const hero = available.find((m) => m.role === "hero");
-      setSelectedModel(hero ? hero.id : available[0].id);
-    } catch {
-      toast.error("Failed to load models");
+      setSelectedModel(preferredValid || (hero ? hero.id : available[0].id));
+    } catch (err) {
+      toast.error(err instanceof ApiError ? translateApiError(err, tErrors) : t("toasts.loadModelsFailed"));
       setModels([]);
       setSelectedModel("");
     } finally {
       setModelsLoading(false);
     }
-  }, []);
+  }, [t, tErrors, storedModelId]);
 
   const fetchSummary = useCallback(
     async (modelId: string) => {
@@ -355,21 +401,37 @@ export default function AnalysisPage() {
         const data = await apiFetch<Summary>(`/analysis/${modelId}/summary?${params.toString()}`);
         setSummary(data);
       } catch (err) {
-        toast.error((err instanceof ApiError ? err.message : (err as Error)?.message) || "Failed to load summary");
+        toast.error(err instanceof ApiError ? translateApiError(err, tErrors) : t("toasts.loadSummaryFailed"));
         setSummary(null);
         setSummaryError(true);
       } finally {
         setLoading(false);
       }
     },
-    [includeBaseline, asPercent, dateRange.start, dateRange.end]
+    [includeBaseline, asPercent, dateRange.start, dateRange.end, t, tErrors]
   );
 
   useEffect(() => {
     if (selectedDataset) {
-      setDateRange({ start: null, end: null });
-      setDateBounds({ min: null, max: null });
-      dateRangeInitializedRef.current = false;
+      // Deep link (A10-R2): on the very first run, if the URL carries a date range for this
+      // same dataset, seed it and mark it "already initialized" so fetchDatasetMeta's own
+      // full-bounds default doesn't clobber it once the bounds arrive.
+      const urlDatasetId = initialParamsRef.current.get("datasetId");
+      const urlStart = initialParamsRef.current.get("start");
+      const urlEnd = initialParamsRef.current.get("end");
+      const canApplyUrlRange =
+        !urlDateRangeAppliedRef.current &&
+        (urlStart || urlEnd) &&
+        (!urlDatasetId || urlDatasetId === selectedDataset);
+      urlDateRangeAppliedRef.current = true;
+      if (canApplyUrlRange) {
+        setDateRange({ start: urlStart || null, end: urlEnd || null });
+        dateRangeInitializedRef.current = true;
+      } else {
+        setDateRange({ start: null, end: null });
+        setDateBounds({ min: null, max: null });
+        dateRangeInitializedRef.current = false;
+      }
       setStacked(null);
       setStackedError(null);
       fetchModels(selectedDataset);
@@ -384,6 +446,21 @@ export default function AnalysisPage() {
       setSummary(null);
     }
   }, [selectedModel, fetchSummary]);
+
+  // Deep links (A10-R2): keep the URL in sync with the current selection so a shared/copied
+  // link reopens Analysis with the same dataset, model, date range, and granularity. Skipped
+  // until the initial load settles, so it never overwrites a deep link with empty defaults
+  // before fetchDatasets/fetchModels have resolved the URL-provided ids.
+  useEffect(() => {
+    if (initializing || modelsLoading || !selectedDataset || !selectedModel) return;
+    const params = new URLSearchParams();
+    params.set("datasetId", selectedDataset);
+    params.set("modelId", selectedModel);
+    if (dateRange.start) params.set("start", dateRange.start);
+    if (dateRange.end) params.set("end", dateRange.end);
+    params.set("freq", freq);
+    router.replace(`/analysis?${params.toString()}`, { scroll: false });
+  }, [initializing, modelsLoading, selectedDataset, selectedModel, dateRange.start, dateRange.end, freq, router]);
 
   const fetchEconomics = useCallback(
     async (modelId: string) => {
@@ -438,13 +515,11 @@ export default function AnalysisPage() {
       setStacked(data);
     } catch (err) {
       setStacked(null);
-      setStackedError(
-        (err instanceof ApiError ? err.message : (err as Error)?.message) || t("timeseries.error")
-      );
+      setStackedError(err instanceof ApiError ? translateApiError(err, tErrors) : t("timeseries.error"));
     } finally {
       setStackedLoading(false);
     }
-  }, [selectedModel, timeCol, freq, groupBy, includeBaseline, asPercent, dateRange.start, dateRange.end, t]);
+  }, [selectedModel, timeCol, freq, groupBy, includeBaseline, asPercent, dateRange.start, dateRange.end, t, tErrors]);
 
   const stackDeps = [selectedModel, timeCol, freq, groupBy, includeBaseline, asPercent, dateRange.start, dateRange.end];
 
@@ -480,19 +555,22 @@ export default function AnalysisPage() {
     });
     if (dateRange.start) params.set("start_date", dateRange.start);
     if (dateRange.end) params.set("end_date", dateRange.end);
+    setExportingSummary(true);
     try {
       const blob = await apiFetch<Blob>(`/analysis/${selectedModel}/export/summary.xlsx?${params.toString()}`, {
         responseType: "blob",
       });
       downloadBlob(blob, "analysis-summary.xlsx");
     } catch (err) {
-      toast.error((err instanceof ApiError ? err.message : (err as Error)?.message) || "Failed to export summary");
+      toast.error(err instanceof ApiError ? translateApiError(err, tErrors) : t("toasts.exportSummaryFailed"));
+    } finally {
+      setExportingSummary(false);
     }
   };
 
   const downloadSummaryTable = async () => {
     if (!selectedDataset || !selectedModel) {
-      toast.error("Select a dataset and model first");
+      toast.error(t("toasts.selectDatasetAndModel"));
       return;
     }
     const payload: Record<string, unknown> = {
@@ -503,6 +581,7 @@ export default function AnalysisPage() {
     };
     if (dateRange.start) payload.start_date = dateRange.start;
     if (dateRange.end) payload.end_date = dateRange.end;
+    setExportingSummaryTable(true);
     try {
       const blob = await apiFetch<Blob>("/analysis/summary/export", {
         method: "POST",
@@ -512,7 +591,9 @@ export default function AnalysisPage() {
       });
       downloadBlob(blob, "summary-table.xlsx");
     } catch (err) {
-      toast.error((err instanceof ApiError ? err.message : (err as Error)?.message) || "Failed to export summary table");
+      toast.error(err instanceof ApiError ? translateApiError(err, tErrors) : t("toasts.exportSummaryTableFailed"));
+    } finally {
+      setExportingSummaryTable(false);
     }
   };
 
@@ -527,13 +608,16 @@ export default function AnalysisPage() {
     });
     if (dateRange.start) params.set("start_date", dateRange.start);
     if (dateRange.end) params.set("end_date", dateRange.end);
+    setExportingStacked(true);
     try {
       const blob = await apiFetch<Blob>(`/analysis/${selectedModel}/export/stacked.xlsx?${params.toString()}`, {
         responseType: "blob",
       });
       downloadBlob(blob, "stacked.xlsx");
     } catch (err) {
-      toast.error((err instanceof ApiError ? err.message : (err as Error)?.message) || "Failed to export stacked data");
+      toast.error(err instanceof ApiError ? translateApiError(err, tErrors) : t("toasts.exportStackedFailed"));
+    } finally {
+      setExportingStacked(false);
     }
   };
 
@@ -565,13 +649,11 @@ export default function AnalysisPage() {
       setEconomicsStacked(data);
     } catch (err) {
       setEconomicsStacked(null);
-      setEconomicsStackedError(
-        (err instanceof ApiError ? err.message : (err as Error)?.message) || t("economics.error")
-      );
+      setEconomicsStackedError(err instanceof ApiError ? translateApiError(err, tErrors) : t("economics.error"));
     } finally {
       setEconomicsStackedLoading(false);
     }
-  }, [selectedModel, readyForStacked, timeCol, freq, dateRange.start, dateRange.end, t]);
+  }, [selectedModel, readyForStacked, timeCol, freq, dateRange.start, dateRange.end, t, tErrors]);
 
   useEffect(() => {
     const handle = setTimeout(() => {
@@ -843,7 +925,7 @@ export default function AnalysisPage() {
                 <option value="variable">{t("table.viewVariable")}</option>
               </Select>
             </div>
-            <Button variant="ghost" onClick={downloadSummaryTable} disabled={!summary}>
+            <Button variant="ghost" onClick={downloadSummaryTable} disabled={!summary} loading={exportingSummaryTable}>
               {t("table.export")}
             </Button>
           </div>
@@ -951,7 +1033,13 @@ export default function AnalysisPage() {
                 </ToggleChip>
               </div>
             </div>
-            <Button variant="ghost" onClick={downloadStacked} disabled={!stacked || stackedLoading} className="ml-auto">
+            <Button
+              variant="ghost"
+              onClick={downloadStacked}
+              disabled={!stacked || stackedLoading}
+              loading={exportingStacked}
+              className="ml-auto"
+            >
               {t("timeseries.export")}
             </Button>
           </div>
@@ -1198,7 +1286,13 @@ export default function AnalysisPage() {
         <>
           <FilterBar className="no-print">
             <FilterField label={t("filters.dataset")} className="w-[240px]">
-              <Select value={selectedDataset} onChange={(e) => setSelectedDataset(e.target.value)}>
+              <Select
+                value={selectedDataset}
+                onChange={(e) => {
+                  setSelectedDataset(e.target.value);
+                  setStoredDatasetId(e.target.value);
+                }}
+              >
                 {datasets.map((ds) => (
                   <option key={ds.id} value={ds.id}>
                     {ds.display_name}
@@ -1207,7 +1301,13 @@ export default function AnalysisPage() {
               </Select>
             </FilterField>
             <FilterField label={t("filters.model")} className="w-[260px]">
-              <Select value={selectedModel} onChange={(e) => setSelectedModel(e.target.value)}>
+              <Select
+                value={selectedModel}
+                onChange={(e) => {
+                  setSelectedModel(e.target.value);
+                  setStoredModelId(e.target.value);
+                }}
+              >
                 {models.map((m) => (
                   <option key={m.id} value={m.id}>
                     {m.role && MODEL_ROLE_LABEL[m.role as ModelRole] ? `${m.name} [${MODEL_ROLE_LABEL[m.role as ModelRole]}]` : m.name}
@@ -1243,7 +1343,7 @@ export default function AnalysisPage() {
               </FilterField>
             )}
             <div className="ml-auto flex items-end">
-              <Button onClick={downloadSummary} disabled={!summary}>
+              <Button onClick={downloadSummary} disabled={!summary} loading={exportingSummary}>
                 {t("table.export")}
               </Button>
             </div>
@@ -1264,7 +1364,10 @@ export default function AnalysisPage() {
             <>
               {economics && economics.channels.length > 0 && !economics.economics_configured && (
                 <div className="rounded-xl bg-warn-bg px-4 py-3 text-sm text-warn no-print">
-                  {t("economicsNotConfigured")}
+                  {t("economicsNotConfigured")}{" "}
+                  <Link href="/transform" className="font-medium underline">
+                    {t("economicsNotConfiguredLink")}
+                  </Link>
                 </div>
               )}
 

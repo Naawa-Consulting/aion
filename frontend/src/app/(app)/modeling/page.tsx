@@ -186,7 +186,8 @@ export default function ModelingPage() {
   const tCommon = useTranslations("common");
   const tErrors = useTranslations("errors");
   const canEdit = useCanEdit();
-  const { activeCompanyId } = useGlobalStore();
+  const { activeCompanyId, datasetId: storedDatasetId, setDatasetId: setStoredDatasetId, startLongOperation, endLongOperation } =
+    useGlobalStore();
   const { resolvedTheme } = useTheme();
   const isDarkTheme = resolvedTheme === "dark";
   const mutedColor = isDarkTheme ? "#81858e" : "#6d7178";
@@ -201,6 +202,7 @@ export default function ModelingPage() {
   const [modelName, setModelName] = useState("");
   const [applyMediaTransforms, setApplyMediaTransforms] = useState(true);
   const [corr, setCorr] = useState<CorrelationItem[]>([]);
+  const [corrLoading, setCorrLoading] = useState(false);
   const [corrSearch, setCorrSearch] = useState("");
   const [models, setModels] = useState<Model[]>([]);
   const [editingModelId, setEditingModelId] = useState<string | null>(null);
@@ -278,14 +280,17 @@ export default function ModelingPage() {
       const data = await apiFetch<Dataset[]>("/datasets");
       setDatasets(data);
       if (data.length) {
-        setSelectedDataset((prev) => (prev ? prev : data[0].id));
+        // Prefer the dataset selected elsewhere in the app (A10-R1) — only fall back to the
+        // first dataset if there's no valid stored selection, mirroring datasets/page.tsx.
+        const preferred = storedDatasetId && data.some((d) => d.id === storedDatasetId) ? storedDatasetId : data[0].id;
+        setSelectedDataset((prev) => (prev ? prev : preferred));
       }
     } catch (err) {
-      toast.error((err as Error)?.message || "Failed to load datasets");
+      toast.error(err instanceof ApiError ? translateApiError(err, tErrors) : t("toasts.loadDatasetsFailed"));
     } finally {
       setInitializing(false);
     }
-  }, []);
+  }, [t, tErrors, storedDatasetId]);
 
   useEffect(() => {
     // activeCompanyId hydrates asynchronously (AuthBootstrap fetches /me/memberships and
@@ -305,9 +310,9 @@ export default function ModelingPage() {
         setYVar((prev) => (prev ? prev : numeric.name));
       }
     } catch (err) {
-      toast.error((err as Error)?.message || "Failed to load variables");
+      toast.error(err instanceof ApiError ? translateApiError(err, tErrors) : t("toasts.loadVariablesFailed"));
     }
-  }, []);
+  }, [t, tErrors]);
 
   const fetchModels = useCallback(async (datasetId: string) => {
     setModelsLoading(true);
@@ -322,11 +327,11 @@ export default function ModelingPage() {
         }
       }
     } catch (err) {
-      toast.error((err as Error)?.message || "Failed to load models");
+      toast.error(err instanceof ApiError ? translateApiError(err, tErrors) : t("toasts.loadModelsFailed"));
     } finally {
       setModelsLoading(false);
     }
-  }, []);
+  }, [t, tErrors]);
 
   useEffect(() => {
     if (selectedDataset) {
@@ -336,6 +341,7 @@ export default function ModelingPage() {
   }, [selectedDataset, fetchVariables, fetchModels]);
 
   const fetchCorrelations = async (datasetId: string, y: string, modelId?: string | null) => {
+    setCorrLoading(true);
     try {
       const params = new URLSearchParams({ dataset_id: datasetId, y: y });
       if (modelId) {
@@ -344,7 +350,9 @@ export default function ModelingPage() {
       const data = await apiFetch<{ items: CorrelationItem[] }>(`/models/correlations?${params.toString()}`);
       setCorr(data.items);
     } catch (err) {
-      toast.error((err as Error)?.message || "Failed to compute correlations");
+      toast.error(err instanceof ApiError ? translateApiError(err, tErrors) : t("toasts.correlationsFailed"));
+    } finally {
+      setCorrLoading(false);
     }
   };
 
@@ -371,7 +379,7 @@ export default function ModelingPage() {
       const blob = await apiFetch<Blob>(`/models/${modelId}/export/summary.xlsx`, { responseType: "blob" });
       downloadBlob(blob, "model-summary.xlsx");
     } catch (err) {
-      toast.error((err instanceof ApiError ? err.message : (err as Error)?.message) || "Failed to export summary");
+      toast.error(err instanceof ApiError ? translateApiError(err, tErrors) : t("toasts.exportFailed"));
     }
   };
 
@@ -402,10 +410,11 @@ export default function ModelingPage() {
 
   const handleSubmit = async () => {
     if (!selectedDataset || !yVar || xSelected.length === 0 || !modelName.trim()) {
-      toast.error("Provide a name, target, and predictors");
+      toast.error(t("toasts.missingFields"));
       return;
     }
     setLoading(true);
+    startLongOperation(t("overlay.fitting"));
     try {
       if (editingModelId) {
         await apiFetch(`/models/${editingModelId}`, {
@@ -417,7 +426,7 @@ export default function ModelingPage() {
             apply_media_transforms: applyMediaTransforms,
           }),
         });
-        toast.success("Model updated");
+        toast.success(t("toasts.modelUpdated"));
       } else {
         await apiFetch("/models", {
           method: "POST",
@@ -430,7 +439,7 @@ export default function ModelingPage() {
             apply_media_transforms: applyMediaTransforms,
           }),
         });
-        toast.success("Model created");
+        toast.success(t("toasts.modelCreated"));
       }
       await fetchModels(selectedDataset);
       resetForm();
@@ -438,6 +447,7 @@ export default function ModelingPage() {
       toast.error(translateApiError(err, tErrors));
     } finally {
       setLoading(false);
+      endLongOperation();
     }
   };
 
@@ -470,7 +480,7 @@ export default function ModelingPage() {
     setDeleteLoading(true);
     try {
       await apiFetch(`/models/${deleteTarget.id}`, { method: "DELETE" });
-      toast.success("Model deleted");
+      toast.success(t("toasts.modelDeleted"));
       setDeleteTarget(null);
       await fetchModels(selectedDataset);
     } catch (err) {
@@ -485,7 +495,7 @@ export default function ModelingPage() {
     setDuplicateLoadingId(model.id);
     try {
       await apiFetch(`/models/${model.id}/duplicate`, { method: "POST" });
-      toast.success("Model duplicated");
+      toast.success(t("toasts.modelDuplicated"));
       await fetchModels(selectedDataset);
     } catch (err) {
       toast.error(translateApiError(err, tErrors));
@@ -497,14 +507,16 @@ export default function ModelingPage() {
   const handleBestModel = async (model: Model) => {
     if (!selectedDataset) return;
     setBestLoadingId(model.id);
+    startLongOperation(t("overlay.searchingBest"));
     try {
       await apiFetch(`/models/${model.id}/best_stepwise`, { method: "POST" });
-      toast.success("Best model created");
+      toast.success(t("toasts.bestModelCreated"));
       await fetchModels(selectedDataset);
     } catch (err) {
       toast.error(translateApiError(err, tErrors));
     } finally {
       setBestLoadingId(null);
+      endLongOperation();
     }
   };
 
@@ -515,7 +527,7 @@ export default function ModelingPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ role }),
       });
-      toast.success(`Marked as ${role}`);
+      toast.success(t("toasts.roleUpdated"));
       fetchModels(selectedDataset);
     } catch (err) {
       toast.error(translateApiError(err, tErrors));
@@ -856,7 +868,10 @@ export default function ModelingPage() {
             </div>
             <div className="h-[420px] overflow-y-auto pr-2">
               <div className="space-y-2">
-                {visibleCorrelations.map((item) => (
+                {corrLoading && !corr.length
+                  ? Array.from({ length: 6 }).map((_, i) => <Skeleton key={i} className="h-9 w-full" />)
+                  : null}
+                {(!corrLoading || corr.length > 0) && visibleCorrelations.map((item) => (
                   <label key={item.name} className="flex items-center justify-between gap-4 text-sm">
                     <div className="min-w-0">
                       <p className="truncate text-ink">{item.name}</p>
@@ -872,7 +887,7 @@ export default function ModelingPage() {
                     <input type="checkbox" checked={xSelected.includes(item.name)} onChange={() => handleToggleX(item.name)} />
                   </label>
                 ))}
-                {!visibleCorrelations.length && <p className="text-sm text-muted">{t("builder.noMatches")}</p>}
+                {!corrLoading && !visibleCorrelations.length && <p className="text-sm text-muted">{t("builder.noMatches")}</p>}
               </div>
             </div>
           </Card>
@@ -947,7 +962,8 @@ export default function ModelingPage() {
               )}
               <Button
                 onClick={handleSubmit}
-                disabled={!canEdit || loading}
+                disabled={!canEdit}
+                loading={loading}
                 title={!canEdit ? tCommon("readOnlyTooltip") : undefined}
               >
                 {loading ? t("builder.saving") : editingModelId ? t("builder.submitUpdate") : t("builder.submitCreate")}
@@ -1325,6 +1341,7 @@ export default function ModelingPage() {
                 value={selectedDataset}
                 onChange={(e) => {
                   setSelectedDataset(e.target.value);
+                  setStoredDatasetId(e.target.value);
                   resetForm();
                 }}
               >

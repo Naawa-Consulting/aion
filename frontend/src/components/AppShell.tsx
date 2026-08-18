@@ -3,6 +3,7 @@
 import React, { useState } from "react";
 import { Sidebar } from "@/components/Sidebar";
 import { TopBar } from "@/components/TopBar";
+import { GlobalLoadingOverlay } from "@/components/ui/global-loading-overlay";
 import { usePipelineContext } from "@/hooks/usePipelineContext";
 
 export function AppShell({ children }: { children: React.ReactNode }) {
@@ -23,6 +24,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         <TopBar onMenuClick={() => setMobileNavOpen(true)} />
         <main className="mx-auto w-full max-w-7xl flex-1 space-y-6 px-6 py-6">{children}</main>
       </div>
+      <GlobalLoadingOverlay />
     </div>
   );
 }

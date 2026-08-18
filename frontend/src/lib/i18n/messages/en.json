@@ -88,7 +88,10 @@
     "openMenu": "Open menu",
     "closeMenu": "Close menu",
     "incompleteDatasets": "Time variable not set",
-    "incompleteModeling": "No hero model yet"
+    "incompleteTransform": "Variables still uncategorized",
+    "incompleteModeling": "No hero model yet",
+    "incompleteAnalysis": "Set up the model's economics to see ROI/ROAS",
+    "incompletePredict": "No scenarios created yet"
   },
   "executiveSummary": {
     "eyebrow": "Executive view",
@@ -123,6 +126,7 @@
       "retry": "Retry"
     },
     "economicsNotConfigured": "Set a conversion rate and average value in Transform → Conversion settings to calculate ROI/ROAS for this model.",
+    "economicsNotConfiguredLink": "Configure in Transform",
     "kpis": {
       "targetFallback": "the target variable",
       "fit": "Model fit",
@@ -154,6 +158,10 @@
       "tooltipPercent": "% of total",
       "tooltipDelta": "Step contribution",
       "totalLabel": "Total"
+    },
+    "toasts": {
+      "loadDatasetsFailed": "Failed to load datasets",
+      "loadModelsFailed": "Failed to load models"
     }
   },
   "modeling": {
@@ -321,6 +329,24 @@
       "clear": "Clear all",
       "remove": "Remove {name}",
       "empty": "No predictors selected."
+    },
+    "overlay": {
+      "fitting": "Fitting model…",
+      "searchingBest": "Searching for the best subset of predictors…"
+    },
+    "toasts": {
+      "loadDatasetsFailed": "Failed to load datasets",
+      "loadVariablesFailed": "Failed to load variables",
+      "loadModelsFailed": "Failed to load models",
+      "correlationsFailed": "Failed to compute correlations",
+      "exportFailed": "Failed to export summary",
+      "missingFields": "Provide a name, target, and predictors",
+      "modelUpdated": "Model updated",
+      "modelCreated": "Model created",
+      "modelDeleted": "Model deleted",
+      "modelDuplicated": "Model duplicated",
+      "bestModelCreated": "Best model created",
+      "roleUpdated": "Role updated"
     }
   },
   "analysis": {
@@ -350,6 +376,7 @@
       "retry": "Retry"
     },
     "economicsNotConfigured": "Set a conversion rate and average value in Transform → Conversion settings to calculate ROI/ROAS for this model.",
+    "economicsNotConfiguredLink": "Configure in Transform",
     "kpis": {
       "targetFallback": "the target variable",
       "totalContribution": "Total {yVar}",
@@ -441,6 +468,15 @@
       "ceiling": "ceiling",
       "saturationCaption": "{percent} saturated",
       "investmentCaption": "Actual investment: {value} ({name})"
+    },
+    "toasts": {
+      "loadDatasetsFailed": "Failed to load datasets",
+      "loadModelsFailed": "Failed to load models",
+      "loadSummaryFailed": "Failed to load summary",
+      "exportSummaryFailed": "Failed to export summary",
+      "exportSummaryTableFailed": "Failed to export summary table",
+      "exportStackedFailed": "Failed to export stacked data",
+      "selectDatasetAndModel": "Select a dataset and model first"
     }
   },
   "planner": {
@@ -485,6 +521,7 @@
       "retry": "Retry"
     },
     "economicsNotConfigured": "Investment channels aren't fully configured for this model — ROI/ROAS totals may be incomplete.",
+    "economicsNotConfiguredLink": "Configure in Transform",
     "freq": {
       "day": "day",
       "week": "week",
@@ -569,6 +606,23 @@
       "deleteConfirmTitle": "Delete this scenario?",
       "deleteConfirmBody": "\"{name}\" will be permanently deleted. This can't be undone.",
       "deleteConfirmAction": "Delete"
+    },
+    "toasts": {
+      "loadDatasetsFailed": "Failed to load datasets",
+      "loadModelsFailed": "Failed to load models",
+      "previewFailed": "Failed to recalculate the scenario",
+      "loadVariablesFailed": "Failed to load baseline variables",
+      "loadScenariosFailed": "Failed to load scenarios",
+      "selectModelFirst": "Select a model first",
+      "saveFailed": "Unable to save scenario",
+      "deleteFailed": "Unable to delete scenario",
+      "renameFailed": "Unable to rename scenario",
+      "scenarioSaved": "Scenario saved",
+      "scenarioUpdated": "Scenario updated",
+      "scenarioDeleted": "Scenario deleted",
+      "scenarioRenamed": "Scenario renamed",
+      "nothingToExport": "Nothing to export yet",
+      "previewBeforeExport": "Preview the scenario before exporting"
     }
   },
   "datasets": {
@@ -580,7 +634,8 @@
       "subtitle": "Drag & drop CSV or Excel",
       "dropTitle": "Drop files here or click to browse",
       "dropSubtitle": "Accepted: CSV, XLSX, XLS, Parquet",
-      "uploading": "Uploading… {percent}%"
+      "uploading": "Uploading… {percent}%",
+      "uploadingLabel": "Uploading file…"
     },
     "listCard": {
       "title": "Datasets",
@@ -814,6 +869,9 @@
       "mediaTooltip": "Variables in this group/subgroup get adstock (carryover) + Hill saturation applied automatically when used as model predictors",
       "baselineLabel": "Is the Baseline group",
       "baselineTooltip": "Only one group can be the baseline per company. Its variables add to the intercept in Analysis instead of showing as their own line.",
+      "confirmFlagTitle": "Confirm flag change",
+      "confirmMediaBody": "\"{name}\" is a company-wide flag: it retroactively affects every model that uses this group's variables. Apply the change?",
+      "confirmBaselineBody": "\"{name}\" is a company-wide flag: it retroactively affects every model that uses this group's variables, and clears the baseline from any other group that had it. Apply the change?",
       "renameAria": "Rename {name}",
       "deleteAria": "Delete {name}",
       "assigned": "Assigned",
@@ -866,6 +924,21 @@
       "groupDeleteFailed": "Failed to delete group",
       "subgroupDeleted": "Subgroup \"{name}\" deleted. {count} variables now have no subgroup.",
       "subgroupDeleteFailed": "Failed to delete subgroup"
+    },
+    "conversionSettings": {
+      "toasts": {
+        "loadFailed": "Failed to load conversion settings",
+        "saveFailed": "Failed to save conversion settings",
+        "clearFailed": "Failed to clear conversion settings",
+        "saved": "Conversion settings saved",
+        "cleared": "Conversion settings cleared"
+      }
+    },
+    "investmentChannels": {
+      "toasts": {
+        "loadFailed": "Failed to load investment channels",
+        "deleteFailed": "Failed to delete channel"
+      }
     }
   },
   "admin": {

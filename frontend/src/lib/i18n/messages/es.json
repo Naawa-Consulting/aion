@@ -88,7 +88,10 @@
     "openMenu": "Abrir menú",
     "closeMenu": "Cerrar menú",
     "incompleteDatasets": "Falta configurar la variable de tiempo",
-    "incompleteModeling": "Falta un modelo hero"
+    "incompleteTransform": "Faltan variables por categorizar",
+    "incompleteModeling": "Falta un modelo hero",
+    "incompleteAnalysis": "Configura la economía del modelo para ver ROI/ROAS",
+    "incompletePredict": "Aún no hay escenarios creados"
   },
   "executiveSummary": {
     "eyebrow": "Vista ejecutiva",
@@ -123,6 +126,7 @@
       "retry": "Reintentar"
     },
     "economicsNotConfigured": "Configura tasa de conversión y valor promedio en Transform → Conversion settings para calcular ROI/ROAS de este modelo.",
+    "economicsNotConfiguredLink": "Configurar en Transform",
     "kpis": {
       "targetFallback": "la variable objetivo",
       "fit": "Ajuste del modelo",
@@ -154,6 +158,10 @@
       "tooltipPercent": "% del total",
       "tooltipDelta": "Aporte al total",
       "totalLabel": "Total"
+    },
+    "toasts": {
+      "loadDatasetsFailed": "No se pudieron cargar los datasets",
+      "loadModelsFailed": "No se pudieron cargar los modelos"
     }
   },
   "modeling": {
@@ -321,6 +329,24 @@
       "clear": "Limpiar todo",
       "remove": "Quitar {name}",
       "empty": "No hay predictores seleccionados."
+    },
+    "overlay": {
+      "fitting": "Ajustando modelo…",
+      "searchingBest": "Buscando el mejor subconjunto de predictores…"
+    },
+    "toasts": {
+      "loadDatasetsFailed": "No se pudieron cargar los datasets",
+      "loadVariablesFailed": "No se pudieron cargar las variables",
+      "loadModelsFailed": "No se pudieron cargar los modelos",
+      "correlationsFailed": "No se pudieron calcular las correlaciones",
+      "exportFailed": "No se pudo exportar el resumen",
+      "missingFields": "Completa nombre, variable dependiente y predictores",
+      "modelUpdated": "Modelo actualizado",
+      "modelCreated": "Modelo creado",
+      "modelDeleted": "Modelo eliminado",
+      "modelDuplicated": "Modelo duplicado",
+      "bestModelCreated": "Mejor modelo creado",
+      "roleUpdated": "Rol actualizado"
     }
   },
   "analysis": {
@@ -350,6 +376,7 @@
       "retry": "Reintentar"
     },
     "economicsNotConfigured": "Configura tasa de conversión y valor promedio en Transform → Conversion settings para calcular ROI/ROAS de este modelo.",
+    "economicsNotConfiguredLink": "Configurar en Transform",
     "kpis": {
       "targetFallback": "la variable objetivo",
       "totalContribution": "Total {yVar}",
@@ -441,6 +468,15 @@
       "ceiling": "techo",
       "saturationCaption": "{percent} de saturación",
       "investmentCaption": "Inversión real: {value} ({name})"
+    },
+    "toasts": {
+      "loadDatasetsFailed": "No se pudieron cargar los datasets",
+      "loadModelsFailed": "No se pudieron cargar los modelos",
+      "loadSummaryFailed": "No se pudo cargar el resumen",
+      "exportSummaryFailed": "No se pudo exportar el resumen",
+      "exportSummaryTableFailed": "No se pudo exportar la tabla de resumen",
+      "exportStackedFailed": "No se pudieron exportar los datos de la serie de tiempo",
+      "selectDatasetAndModel": "Selecciona un dataset y un modelo primero"
     }
   },
   "planner": {
@@ -485,6 +521,7 @@
       "retry": "Reintentar"
     },
     "economicsNotConfigured": "Los canales de inversión no están completamente configurados para este modelo — los totales de ROI/ROAS pueden estar incompletos.",
+    "economicsNotConfiguredLink": "Configurar en Transform",
     "freq": {
       "day": "día",
       "week": "semana",
@@ -569,6 +606,23 @@
       "deleteConfirmTitle": "¿Eliminar este escenario?",
       "deleteConfirmBody": "\"{name}\" se eliminará de forma permanente. No se puede deshacer.",
       "deleteConfirmAction": "Eliminar"
+    },
+    "toasts": {
+      "loadDatasetsFailed": "No se pudieron cargar los datasets",
+      "loadModelsFailed": "No se pudieron cargar los modelos",
+      "previewFailed": "No se pudo recalcular el escenario",
+      "loadVariablesFailed": "No se pudieron cargar las variables base",
+      "loadScenariosFailed": "No se pudieron cargar los escenarios",
+      "selectModelFirst": "Selecciona un modelo primero",
+      "saveFailed": "No se pudo guardar el escenario",
+      "deleteFailed": "No se pudo eliminar el escenario",
+      "renameFailed": "No se pudo renombrar el escenario",
+      "scenarioSaved": "Escenario guardado",
+      "scenarioUpdated": "Escenario actualizado",
+      "scenarioDeleted": "Escenario eliminado",
+      "scenarioRenamed": "Escenario renombrado",
+      "nothingToExport": "Todavía no hay nada que exportar",
+      "previewBeforeExport": "Previsualiza el escenario antes de exportar"
     }
   },
   "datasets": {
@@ -580,7 +634,8 @@
       "subtitle": "Arrastra un CSV o Excel",
       "dropTitle": "Suelta archivos aquí o haz clic para buscar",
       "dropSubtitle": "Aceptados: CSV, XLSX, XLS, Parquet",
-      "uploading": "Subiendo… {percent}%"
+      "uploading": "Subiendo… {percent}%",
+      "uploadingLabel": "Subiendo archivo…"
     },
     "listCard": {
       "title": "Datasets",
@@ -814,6 +869,9 @@
       "mediaTooltip": "Las variables de este grupo/subgrupo reciben adstock (arrastre) + saturación Hill automáticamente al usarse como predictores del modelo",
       "baselineLabel": "Es el grupo Baseline",
       "baselineTooltip": "Solo un grupo puede ser el baseline por compañía. Sus variables se suman al intercepto en Analysis en vez de mostrarse como línea propia.",
+      "confirmFlagTitle": "Confirmar cambio de flag",
+      "confirmMediaBody": "\"{name}\" es un flag de compañía: afecta retroactivamente a todos los modelos que usan variables de este grupo. ¿Aplicar el cambio?",
+      "confirmBaselineBody": "\"{name}\" es un flag de compañía: afecta retroactivamente a todos los modelos que usan variables de este grupo, y quita el baseline de cualquier otro grupo que lo tuviera. ¿Aplicar el cambio?",
       "renameAria": "Renombrar {name}",
       "deleteAria": "Eliminar {name}",
       "assigned": "Asignadas",
@@ -866,6 +924,21 @@
       "groupDeleteFailed": "No se pudo eliminar el grupo",
       "subgroupDeleted": "Subgrupo \"{name}\" eliminado. {count} variables ahora sin subgrupo.",
       "subgroupDeleteFailed": "No se pudo eliminar el subgrupo"
+    },
+    "conversionSettings": {
+      "toasts": {
+        "loadFailed": "No se pudo cargar la configuración de conversión",
+        "saveFailed": "No se pudo guardar la configuración de conversión",
+        "clearFailed": "No se pudo eliminar la configuración de conversión",
+        "saved": "Configuración de conversión guardada",
+        "cleared": "Configuración de conversión eliminada"
+      }
+    },
+    "investmentChannels": {
+      "toasts": {
+        "loadFailed": "No se pudieron cargar los canales de inversión",
+        "deleteFailed": "No se pudo eliminar el canal"
+      }
     }
   },
   "admin": {

@@ -10,11 +10,20 @@ export type Membership = {
   role: Role;
 };
 
+export type LongOperation = { active: boolean; label: string | null; progress: number | null };
+
 type GlobalState = {
   datasetId: string | null;
   modelId: string | null;
   setDatasetId: (id: string | null) => void;
   setModelId: (id: string | null) => void;
+
+  // Overlay central de proceso largo (Fase 8/Fase 2, G1) — deliberadamente NO persistido (ver
+  // partialize abajo): un reload a medio proceso no debe resucitar un overlay bloqueado.
+  longOperation: LongOperation;
+  startLongOperation: (label: string) => void;
+  updateLongOperationProgress: (progress: number | null) => void;
+  endLongOperation: () => void;
 
   userId: string | null;
   userEmail: string | null;
@@ -38,6 +47,12 @@ export const useGlobalStore = create<GlobalState>()(
       modelId: null,
       setDatasetId: (datasetId) => set({ datasetId }),
       setModelId: (modelId) => set({ modelId }),
+
+      longOperation: { active: false, label: null, progress: null },
+      startLongOperation: (label) => set({ longOperation: { active: true, label, progress: null } }),
+      updateLongOperationProgress: (progress) =>
+        set((state) => ({ longOperation: { ...state.longOperation, progress } })),
+      endLongOperation: () => set({ longOperation: { active: false, label: null, progress: null } }),
 
       userId: null,
       userEmail: null,

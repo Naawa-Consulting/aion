@@ -32,7 +32,7 @@ import { RowActions } from "@/components/ui/row-actions";
 import { IconButton } from "@/components/ui/icon-button";
 import { useGlobalStore } from "@/lib/store";
 import { useKeyboardShortcut } from "@/hooks/useKeyboardShortcut";
-import { apiFetch } from "@/lib/api";
+import { apiFetch, ApiError } from "@/lib/api";
 import { translateApiError } from "@/lib/error-messages";
 import { useCanEdit } from "@/hooks/useCanEdit";
 import { chartColor } from "@/lib/chart-colors";
@@ -125,6 +125,10 @@ export default function TransformPage() {
   const [renamingSubgroupId, setRenamingSubgroupId] = useState<string | null>(null);
   const [groupToDelete, setGroupToDelete] = useState<Group | null>(null);
   const [groupDeleteLoading, setGroupDeleteLoading] = useState(false);
+  // A02-R2: is_baseline/apply_media_transform are company-wide flags that retroactively affect
+  // every model built on this group's variables — confirm before applying, instead of firing on
+  // the checkbox's own onChange.
+  const [pendingGroupFlag, setPendingGroupFlag] = useState<{ group: Group; kind: "media" | "baseline" } | null>(null);
   const [groupDeleteError, setGroupDeleteError] = useState("");
   const [subgroupToDelete, setSubgroupToDelete] = useState<{ group: Group; subgroup: { id: string; name: string } } | null>(
     null
@@ -439,7 +443,7 @@ export default function TransformPage() {
       toast.success(next ? t("toasts.mediaOn", { name: group.name }) : t("toasts.mediaOff", { name: group.name }));
     } catch (error: any) {
       setGroups((prev) => prev.map((g) => (g.id === group.id ? { ...g, apply_media_transform: !next } : g)));
-      toast.error((error as Error)?.message || t("toasts.groupUpdateFailed"));
+      toast.error(error instanceof ApiError ? translateApiError(error, tErrors) : t("toasts.groupUpdateFailed"));
     }
   };
 
@@ -459,7 +463,7 @@ export default function TransformPage() {
       toast.success(next ? t("toasts.baselineOn", { name: group.name }) : t("toasts.baselineOff", { name: group.name }));
     } catch (error: any) {
       setGroups(previous);
-      toast.error((error as Error)?.message || t("toasts.groupUpdateFailed"));
+      toast.error(error instanceof ApiError ? translateApiError(error, tErrors) : t("toasts.groupUpdateFailed"));
     }
   };
 
@@ -487,7 +491,7 @@ export default function TransformPage() {
             : g
         )
       );
-      toast.error((error as Error)?.message || t("toasts.subgroupUpdateFailed"));
+      toast.error(error instanceof ApiError ? translateApiError(error, tErrors) : t("toasts.subgroupUpdateFailed"));
     }
   };
 
@@ -606,7 +610,7 @@ export default function TransformPage() {
       setNewName("");
       toast.success(t("toasts.variableCreated"));
     } catch (err: any) {
-      toast.error((err as Error)?.message || t("toasts.transformFailed"));
+      toast.error(err instanceof ApiError ? translateApiError(err, tErrors) : t("toasts.transformFailed"));
     } finally {
       setLoading(false);
     }
@@ -623,7 +627,7 @@ export default function TransformPage() {
       fetchGroups();
       toast.success(t("toasts.categorized"));
     } catch (err: any) {
-      toast.error((err as Error)?.message || t("toasts.categorizeFailed"));
+      toast.error(err instanceof ApiError ? translateApiError(err, tErrors) : t("toasts.categorizeFailed"));
     }
   };
 
@@ -665,7 +669,7 @@ export default function TransformPage() {
       setBulkGroupId("");
       setBulkSubgroupId("");
     } catch (err: any) {
-      toast.error((err as Error)?.message || t("toasts.bulkCategorizeFailed"));
+      toast.error(err instanceof ApiError ? translateApiError(err, tErrors) : t("toasts.bulkCategorizeFailed"));
     } finally {
       setBulkApplying(false);
     }
@@ -685,7 +689,7 @@ export default function TransformPage() {
       toast.success(exclude ? t("toasts.bulkHidden", { count: updated.length }) : t("toasts.bulkUnhidden", { count: updated.length }));
       setSelectedIds(new Set());
     } catch (err: any) {
-      toast.error((err as Error)?.message || t("toasts.bulkUpdateFailed"));
+      toast.error(err instanceof ApiError ? translateApiError(err, tErrors) : t("toasts.bulkUpdateFailed"));
     } finally {
       setBulkApplying(false);
     }
@@ -697,7 +701,7 @@ export default function TransformPage() {
       setHistory(data);
       setHistoryVar(variable);
     } catch (err: any) {
-      toast.error(err?.message || t("toasts.historyFailed"));
+      toast.error(err instanceof ApiError ? translateApiError(err, tErrors) : t("toasts.historyFailed"));
     }
   };
 
@@ -717,7 +721,7 @@ export default function TransformPage() {
       if (activeDatasetId) fetchVariables(activeDatasetId);
       toast.success(t("toasts.undone", { name: latest.name }));
     } catch (err: any) {
-      toast.error((err as Error)?.message || t("toasts.undoFailed"));
+      toast.error(err instanceof ApiError ? translateApiError(err, tErrors) : t("toasts.undoFailed"));
     }
   };
 
@@ -1076,7 +1080,7 @@ export default function TransformPage() {
                         fetchGroups();
                         toast.success(t("toasts.groupCreated"));
                       } catch (err: any) {
-                        toast.error((err as Error)?.message || t("toasts.groupCreateFailed"));
+                        toast.error(err instanceof ApiError ? translateApiError(err, tErrors) : t("toasts.groupCreateFailed"));
                       }
                     }}
                   >
@@ -1123,7 +1127,7 @@ export default function TransformPage() {
                         fetchGroups();
                         toast.success(t("toasts.subgroupCreated"));
                       } catch (err: any) {
-                        toast.error((err as Error)?.message || t("toasts.subgroupCreateFailed"));
+                        toast.error(err instanceof ApiError ? translateApiError(err, tErrors) : t("toasts.subgroupCreateFailed"));
                       }
                     }}
                   >
@@ -1233,7 +1237,7 @@ export default function TransformPage() {
                         type="checkbox"
                         checked={group.apply_media_transform}
                         disabled={!canEdit}
-                        onChange={() => toggleGroupMediaTransform(group)}
+                        onChange={() => setPendingGroupFlag({ group, kind: "media" })}
                       />
                       {t("groups.mediaLabel")}
                     </label>
@@ -1242,7 +1246,7 @@ export default function TransformPage() {
                         type="checkbox"
                         checked={group.is_baseline}
                         disabled={!canEdit}
-                        onChange={() => toggleGroupBaseline(group)}
+                        onChange={() => setPendingGroupFlag({ group, kind: "baseline" })}
                       />
                       {t("groups.baselineLabel")}
                     </label>
@@ -1379,6 +1383,34 @@ export default function TransformPage() {
           </Button>
           <Button variant="danger" onClick={confirmDeleteGroup} disabled={!canEdit || groupDeleteLoading} title={!canEdit ? readOnlyTitle : undefined}>
             {groupDeleteLoading ? t("groups.deleting") : t("groups.deleteConfirm")}
+          </Button>
+        </div>
+      </Modal>
+
+      <Modal
+        open={!!pendingGroupFlag}
+        onClose={() => setPendingGroupFlag(null)}
+        title={t("groups.confirmFlagTitle")}
+      >
+        <p className="text-sm text-ink">
+          {pendingGroupFlag?.kind === "baseline"
+            ? t("groups.confirmBaselineBody", { name: pendingGroupFlag.group.name })
+            : t("groups.confirmMediaBody", { name: pendingGroupFlag?.group.name ?? "" })}
+        </p>
+        <div className="mt-4 flex justify-end gap-2">
+          <Button variant="ghost" onClick={() => setPendingGroupFlag(null)}>
+            {tCommon("cancel")}
+          </Button>
+          <Button
+            onClick={async () => {
+              if (!pendingGroupFlag) return;
+              const { group, kind } = pendingGroupFlag;
+              setPendingGroupFlag(null);
+              if (kind === "baseline") await toggleGroupBaseline(group);
+              else await toggleGroupMediaTransform(group);
+            }}
+          >
+            {tCommon("confirm")}
           </Button>
         </div>
       </Modal>

@@ -25,9 +25,23 @@ const ADMIN_LINK = { href: "/admin", key: "admin" as const, Icon: ShieldCheck };
 
 const COLLAPSE_KEY = "aion-sidebar-collapsed";
 
+const INCOMPLETE_LABEL_KEY: Record<string, string> = {
+  datasets: "incompleteDatasets",
+  transform: "incompleteTransform",
+  modeling: "incompleteModeling",
+  analysis: "incompleteAnalysis",
+  predict: "incompletePredict",
+};
+
 function incompleteSteps(ctx: PipelineContext): Partial<Record<string, boolean>> {
   if (!ctx.hasDataset) return {};
-  return { datasets: !ctx.hasTimeVariable, modeling: !ctx.hasHeroModel };
+  return {
+    datasets: !ctx.hasTimeVariable,
+    transform: !ctx.hasCategorizedVariable,
+    modeling: !ctx.hasHeroModel,
+    analysis: ctx.hasHeroModel && ctx.economicsIncomplete,
+    predict: ctx.hasHeroModel && !ctx.hasScenario,
+  };
 }
 
 type LinkItemProps = {
@@ -121,7 +135,7 @@ function SidebarNav({
           onNavigate={onNavigate}
           step={item.step}
           incomplete={incomplete[item.key]}
-          incompleteLabel={incomplete[item.key] ? tSidebar(item.key === "datasets" ? "incompleteDatasets" : "incompleteModeling") : undefined}
+          incompleteLabel={incomplete[item.key] ? tSidebar(INCOMPLETE_LABEL_KEY[item.key]) : undefined}
         />
       ))}
       <div className="my-2 border-t border-line" />

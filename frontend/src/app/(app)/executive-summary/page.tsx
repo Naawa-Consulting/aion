@@ -20,7 +20,7 @@ import { EmptyState } from "@/components/ui/empty-state";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tooltip } from "@/components/ui/tooltip";
 import { FilterBar, FilterField } from "@/components/ui/filter-bar";
-import { apiFetch } from "@/lib/api";
+import { apiFetch, ApiError } from "@/lib/api";
 import { EMPTY_VALUE } from "@/lib/format";
 import { formatChartNumber, formatChartPercent } from "@/lib/chart-format";
 import { assignCategoricalColors } from "@/lib/chart-colors";
@@ -138,12 +138,12 @@ export default function ExecutiveSummaryPage() {
       const data = await apiFetch<Dataset[]>("/datasets");
       setDatasets(data);
       if (data.length) setSelectedDataset((prev) => prev || data[0].id);
-    } catch {
-      toast.error("Failed to load datasets");
+    } catch (err) {
+      toast.error(err instanceof ApiError ? translateApiError(err, tErrors) : t("toasts.loadDatasetsFailed"));
     } finally {
       setInitializing(false);
     }
-  }, []);
+  }, [t, tErrors]);
 
   const fetchDatasetMeta = useCallback(async (datasetId: string) => {
     try {
@@ -170,14 +170,14 @@ export default function ExecutiveSummaryPage() {
       setModels(normalized);
       const hero = normalized.find((m) => m.role === "hero");
       setSelectedModel(hero ? hero.id : normalized[0]?.id ?? "");
-    } catch {
-      toast.error("Failed to load models");
+    } catch (err) {
+      toast.error(err instanceof ApiError ? translateApiError(err, tErrors) : t("toasts.loadModelsFailed"));
       setModels([]);
       setSelectedModel("");
     } finally {
       setModelsLoading(false);
     }
-  }, []);
+  }, [t, tErrors]);
 
   const fetchKpis = useCallback(async (modelId: string, range: { start: string | null; end: string | null }) => {
     setLoading(true);
@@ -462,7 +462,10 @@ export default function ExecutiveSummaryPage() {
             <>
               {economics && !economics.economics_configured && (
                 <div className="rounded-xl bg-warn-bg px-4 py-3 text-sm text-warn no-print">
-                  {t("economicsNotConfigured")}
+                  {t("economicsNotConfigured")}{" "}
+                  <Link href="/transform" className="font-medium underline">
+                    {t("economicsNotConfiguredLink")}
+                  </Link>
                 </div>
               )}
 

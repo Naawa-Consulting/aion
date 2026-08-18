@@ -8,9 +8,11 @@ import { Card, CardHeader } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Eyebrow } from "@/components/ui/eyebrow";
-import { apiFetch } from "@/lib/api";
+import { apiFetch, ApiError } from "@/lib/api";
+import { translateApiError } from "@/lib/error-messages";
 import { formatChartNumber, formatCurrency } from "@/lib/chart-format";
 import { useActiveCurrency } from "@/hooks/useActiveCompany";
+import { useGlobalStore } from "@/lib/store";
 
 export type ChannelAllocation = {
   channel_id: string;
@@ -79,7 +81,9 @@ export default function PlannerView({
   onApply?: (allocations: ChannelAllocation[]) => void;
 }) {
   const t = useTranslations("planner");
+  const tErrors = useTranslations("errors");
   const currency = useActiveCurrency();
+  const { startLongOperation, endLongOperation } = useGlobalStore();
   const [budget, setBudget] = useState<number>(0);
   const [result, setResult] = useState<BudgetOptimizationOut | null>(null);
   const [editedSpend, setEditedSpend] = useState<Record<string, number>>({});
@@ -95,6 +99,7 @@ export default function PlannerView({
       return;
     }
     setLoading(true);
+    startLongOperation(t("optimizing"));
     try {
       const data = await apiFetch<BudgetOptimizationOut>(`/economics/${modelId}/optimize-budget`, {
         method: "POST",
@@ -108,10 +113,11 @@ export default function PlannerView({
       if (!data.allocations.length) {
         toast.error(t("noOptimizableChannels"));
       }
-    } catch (error: any) {
-      toast.error(error?.message || t("optimizeFailed"));
+    } catch (error) {
+      toast.error(error instanceof ApiError ? translateApiError(error, tErrors) : t("optimizeFailed"));
     } finally {
       setLoading(false);
+      endLongOperation();
     }
   };
 
@@ -138,7 +144,7 @@ export default function PlannerView({
             onChange={(event) => setBudget(Number(event.target.value) || 0)}
           />
         </label>
-        <Button onClick={handleOptimize} disabled={loading || !modelId}>
+        <Button onClick={handleOptimize} disabled={!modelId} loading={loading}>
           {loading ? t("optimizing") : t("optimize")}
         </Button>
         {onApply && result && result.allocations.length > 0 && (

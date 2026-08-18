@@ -2,13 +2,15 @@
 
 import React, { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
+import { useTranslations } from "next-intl";
 
 import { Card, CardHeader } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
 import { Eyebrow } from "@/components/ui/eyebrow";
-import { apiFetch } from "@/lib/api";
+import { apiFetch, ApiError } from "@/lib/api";
+import { translateApiError } from "@/lib/error-messages";
 
 type SourceMode = "manual" | "dataset_column" | "rate_metric";
 
@@ -112,6 +114,8 @@ export function ConversionSettingsCard({
   datasetColumns: { name: string; dtype: string }[];
   canEdit: boolean;
 }) {
+  const tErrors = useTranslations("errors");
+  const tToasts = useTranslations("transform.conversionSettings.toasts");
   const [conversionRate, setConversionRate] = useState<MetricInput>(emptyMetric());
   const [avgValue, setAvgValue] = useState<MetricInput>(emptyMetric());
   const [configured, setConfigured] = useState(false);
@@ -134,12 +138,12 @@ export function ConversionSettingsCard({
         setAvgValue(emptyMetric());
         setConfigured(false);
       }
-    } catch {
-      toast.error("Failed to load conversion settings");
+    } catch (error) {
+      toast.error(error instanceof ApiError ? translateApiError(error, tErrors) : tToasts("loadFailed"));
     } finally {
       setLoading(false);
     }
-  }, [datasetId]);
+  }, [datasetId, tErrors, tToasts]);
 
   useEffect(() => {
     fetchSettings();
@@ -154,10 +158,10 @@ export function ConversionSettingsCard({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ dataset_id: datasetId, conversion_rate: conversionRate, avg_value: avgValue }),
       });
-      toast.success("✅ Conversion settings saved");
+      toast.success(tToasts("saved"));
       setConfigured(true);
-    } catch (error: any) {
-      toast.error(error?.message || "Failed to save conversion settings");
+    } catch (error) {
+      toast.error(error instanceof ApiError ? translateApiError(error, tErrors) : tToasts("saveFailed"));
     } finally {
       setSaving(false);
     }
@@ -171,9 +175,9 @@ export function ConversionSettingsCard({
       setConversionRate(emptyMetric());
       setAvgValue(emptyMetric());
       setConfigured(false);
-      toast.success("Conversion settings cleared");
-    } catch (error: any) {
-      toast.error(error?.message || "Failed to clear conversion settings");
+      toast.success(tToasts("cleared"));
+    } catch (error) {
+      toast.error(error instanceof ApiError ? translateApiError(error, tErrors) : tToasts("clearFailed"));
     } finally {
       setSaving(false);
     }

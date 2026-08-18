@@ -145,7 +145,9 @@ aportan contexto). Convenciones y arquitectura conceptual completas en `CLAUDE.m
 - `src/components/ui/` — primitivos compartidos (Dirección C, Fase 7.2+): `button`, `card`,
   `badge`, `modal`, `input`, `select`, `filter-bar`, `progress`, `dropdown`, `toggle-chip`,
   `error-text`, `eyebrow`, `icon-button`, `skeleton`, `empty-state`, `page-header`, `stat-card`,
-  `table`, `row-actions`, `tooltip`, `tabs` (Fase 7.5), `disclosure` (Fase 7.5, Resumen/Detalle).
+  `table`, `row-actions`, `tooltip`, `tabs` (Fase 7.5), `disclosure` (Fase 7.5, Resumen/Detalle),
+  `global-loading-overlay` (Fase 8.2, overlay central de proceso largo, alimentado por
+  `lib/store.ts::longOperation`, montado una sola vez en `AppShell.tsx`).
   Preferir reusar estos antes de crear uno nuevo.
 - `src/components/modeling/SelectedPredictorsQuickView.tsx` — resumen de predictores
   seleccionados en Modeling.

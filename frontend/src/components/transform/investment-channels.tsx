@@ -13,7 +13,7 @@ import { Modal } from "@/components/ui/modal";
 import { ErrorText } from "@/components/ui/error-text";
 import { Select } from "@/components/ui/select";
 import { Eyebrow } from "@/components/ui/eyebrow";
-import { apiFetch } from "@/lib/api";
+import { apiFetch, ApiError } from "@/lib/api";
 import { translateApiError } from "@/lib/error-messages";
 
 type SourceMode = "dataset_column" | "rate_metric" | "manual";
@@ -69,6 +69,7 @@ export function InvestmentChannels({
   canEdit: boolean;
 }) {
   const tErrors = useTranslations("errors");
+  const tToasts = useTranslations("transform.investmentChannels.toasts");
   const [channels, setChannels] = useState<InvestmentChannel[]>([]);
   const [loading, setLoading] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
@@ -89,12 +90,12 @@ export function InvestmentChannels({
     try {
       const data = await apiFetch<InvestmentChannel[]>(`/economics/channels?dataset_id=${datasetId}`);
       setChannels(data);
-    } catch {
-      toast.error("Failed to load investment channels");
+    } catch (error) {
+      toast.error(error instanceof ApiError ? translateApiError(error, tErrors) : tToasts("loadFailed"));
     } finally {
       setLoading(false);
     }
-  }, [datasetId]);
+  }, [datasetId, tErrors, tToasts]);
 
   useEffect(() => {
     fetchChannels();
@@ -227,7 +228,7 @@ export function InvestmentChannels({
       closeModal();
       fetchChannels();
     } catch (error: any) {
-      setFormError(translateApiError(error, tErrors) || "Failed to save channel");
+      setFormError(translateApiError(error, tErrors));
     } finally {
       setSaving(false);
     }
@@ -242,7 +243,7 @@ export function InvestmentChannels({
       setDeleteTarget(null);
       fetchChannels();
     } catch (error: any) {
-      toast.error((error as Error)?.message || "Failed to delete channel");
+      toast.error(error instanceof ApiError ? translateApiError(error, tErrors) : tToasts("deleteFailed"));
     } finally {
       setDeleteLoading(false);
     }

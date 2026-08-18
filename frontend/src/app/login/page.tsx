@@ -16,16 +16,23 @@ import { IconButton } from "@/components/ui/icon-button";
 import { useLocaleToggle } from "@/components/providers/locale-provider";
 import { getSupabaseBrowserClient } from "@/lib/supabase/client";
 import { apiFetch } from "@/lib/api";
-import type { Role } from "@/lib/store";
+import { useGlobalStore, type Role } from "@/lib/store";
 
-type MyMembershipsResponse = { is_platform_admin: boolean; memberships: { role: Role }[] };
+type MyMembershipsResponse = { is_platform_admin: boolean; memberships: { company_id: string; role: Role }[] };
 
 // Sin redirectTo explícito (deep-link a una ruta protegida), el destino por defecto depende del
 // rol: un visualizador aterriza en el resumen ejecutivo, el resto en el arranque del pipeline.
+// El rol se resuelve contra la compañía activa persistida (misma fuente que useActiveRole/
+// setMemberships en lib/store.ts), no contra memberships[0] — un usuario con compañías en dos
+// roles distintos podría, si no, aterrizar en la vista equivocada para la compañía que en
+// realidad va a quedar activa tras AuthBootstrap.
 async function defaultLandingPath(): Promise<string> {
   try {
     const { memberships } = await apiFetch<MyMembershipsResponse>("/me/memberships", { skipCompanyHeader: true });
-    if (memberships[0]?.role === "visualizador") return "/executive-summary";
+    const persistedCompanyId = useGlobalStore.getState().activeCompanyId;
+    const active =
+      memberships.find((m) => m.company_id === persistedCompanyId) ?? memberships[0];
+    if (active?.role === "visualizador") return "/executive-summary";
   } catch {
     // Sin memberships resolubles (p. ej. platform_admin sin compañía todavía) — cae al default.
   }

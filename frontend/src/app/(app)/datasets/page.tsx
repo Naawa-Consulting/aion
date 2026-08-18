@@ -103,7 +103,8 @@ export default function DatasetsPage() {
   const [deleteState, setDeleteState] = useState<{ open: boolean; dataset?: Dataset; cascade: boolean }>(
     { open: false, cascade: true }
   );
-  const { datasetId, setDatasetId, activeCompanyId } = useGlobalStore();
+  const { datasetId, setDatasetId, activeCompanyId, startLongOperation, updateLongOperationProgress, endLongOperation } =
+    useGlobalStore();
   const canEdit = useCanEdit();
   const [sampleMode, setSampleMode] = useState<"all" | "custom">("all");
   const [customSample, setCustomSample] = useState<number>(0);
@@ -235,11 +236,11 @@ export default function DatasetsPage() {
         setVersionHistory({ open: true, dataset, loading: false, items: data.versions || [] });
       } catch (error: any) {
         console.error(error);
-        toast.error(error?.message || t("toasts.versionsFailed"));
+        toast.error(error instanceof ApiError ? translateApiError(error, tErrors) : t("toasts.versionsFailed"));
         setVersionHistory({ open: false, dataset: undefined, loading: false, items: [] });
       }
     },
-    [t]
+    [t, tErrors]
   );
 
   const fetchDatasetSummary = useCallback(
@@ -254,11 +255,11 @@ export default function DatasetsPage() {
         setSummaryVariables(variables);
       } catch (error: any) {
         console.error(error);
-        toast.error(error?.message || t("toasts.summaryFailed"));
+        toast.error(error instanceof ApiError ? translateApiError(error, tErrors) : t("toasts.summaryFailed"));
         setSummaryState({ open: false, loading: false });
       }
     },
-    [t]
+    [t, tErrors]
   );
 
   const handleToggleExcluded = useCallback(
@@ -276,7 +277,7 @@ export default function DatasetsPage() {
         });
       } catch (error: any) {
         console.error(error);
-        toast.error(error?.message || t("toasts.variableUpdateFailed"));
+        toast.error(error instanceof ApiError ? translateApiError(error, tErrors) : t("toasts.variableUpdateFailed"));
         setSummaryVariables((prev) =>
           prev.map((v) => (v.id === variable.id ? { ...v, is_excluded: !next } : v))
         );
@@ -284,7 +285,7 @@ export default function DatasetsPage() {
         setTogglingVariableId(null);
       }
     },
-    [t]
+    [t, tErrors]
   );
 
   const currentDataset = useMemo(
@@ -367,7 +368,7 @@ export default function DatasetsPage() {
       }
     } catch (error: any) {
       console.error(error);
-      toast.error(error?.message || t("toasts.sampleFailed"));
+      toast.error(error instanceof ApiError ? translateApiError(error, tErrors) : t("toasts.sampleFailed"));
     } finally {
       setTimeout(() => setSampleUpdating(false), 300);
     }
@@ -380,6 +381,7 @@ export default function DatasetsPage() {
     fetchDatasets,
     loadPreview,
     t,
+    tErrors,
   ]);
 
   const handleSaveTimeVariable = useCallback(async () => {
@@ -430,11 +432,11 @@ export default function DatasetsPage() {
       fetchTimeCandidates(updated.id);
     } catch (error: any) {
       console.error(error);
-      toast.error(error?.message || t("toasts.timeClearFailed"));
+      toast.error(error instanceof ApiError ? translateApiError(error, tErrors) : t("toasts.timeClearFailed"));
     } finally {
       setTimeSaving(false);
     }
-  }, [currentDataset, fetchTimeCandidates, t]);
+  }, [currentDataset, fetchTimeCandidates, t, tErrors]);
 
   const handleChangeDependentVariable = useCallback(
     async (column: string) => {
@@ -452,13 +454,13 @@ export default function DatasetsPage() {
         toast.success(column ? t("toasts.dependentSaved") : t("toasts.dependentCleared"));
       } catch (error: any) {
         console.error(error);
-        toast.error(error?.message || t("toasts.dependentFailed"));
+        toast.error(error instanceof ApiError ? translateApiError(error, tErrors) : t("toasts.dependentFailed"));
         setDependentVariable(previous);
       } finally {
         setDependentVariableSaving(false);
       }
     },
-    [currentDataset, t]
+    [currentDataset, t, tErrors]
   );
 
   const handleUpdateUpload = useCallback((fileList: FileList | null) => {
@@ -498,7 +500,7 @@ export default function DatasetsPage() {
           differences: detail?.differences || null,
         }));
       } else {
-        toast.error(error?.message || t("toasts.updateFailed"));
+        toast.error(error instanceof ApiError ? translateApiError(error, tErrors) : t("toasts.updateFailed"));
         setUpdateState((state) => ({ ...state, uploading: false }));
       }
     }
@@ -512,7 +514,9 @@ export default function DatasetsPage() {
         const xhr = new XMLHttpRequest();
         xhr.upload.onprogress = (event) => {
           if (event.lengthComputable) {
-            setUploadProgress(Math.round((event.loaded / event.total) * 100));
+            const percent = Math.round((event.loaded / event.total) * 100);
+            setUploadProgress(percent);
+            updateLongOperationProgress(percent);
           }
         };
         xhr.onload = () => {
@@ -534,7 +538,7 @@ export default function DatasetsPage() {
           xhr.send(form);
         })();
       }),
-    []
+    [updateLongOperationProgress]
   );
 
   const handleUpload = useCallback(
@@ -545,6 +549,7 @@ export default function DatasetsPage() {
         return;
       }
       setUploading(true);
+      startLongOperation(t("uploadCard.uploadingLabel"));
       try {
         await uploadFiles(files, Boolean(opts.force));
         toast.success(t("toasts.uploaded"));
@@ -564,9 +569,10 @@ export default function DatasetsPage() {
         toast.error(error?.detail?.message || t("toasts.uploadFailed"));
       } finally {
         setUploading(false);
+        endLongOperation();
       }
     },
-    [fetchDatasets, uploadFiles, canEdit, readOnlyTitle, t]
+    [fetchDatasets, uploadFiles, canEdit, readOnlyTitle, t, startLongOperation, endLongOperation]
   );
 
   const onDrop = useCallback(

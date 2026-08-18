@@ -37,7 +37,7 @@ import { Modal } from "@/components/ui/modal";
 import ScenarioSheetGlide, { type MultipliersMap } from "@/components/predict/ScenarioSheetGlide";
 import ScenarioSheetTable from "@/components/predict/ScenarioSheetTable";
 import PlannerView, { type ChannelAllocation } from "@/components/predict/PlannerView";
-import { apiFetch } from "@/lib/api";
+import { apiFetch, ApiError } from "@/lib/api";
 import { translateApiError } from "@/lib/error-messages";
 import { useCanEdit } from "@/hooks/useCanEdit";
 import { useMediaQuery } from "@/hooks/useMediaQuery";
@@ -164,7 +164,15 @@ export default function PredictPage() {
   const tCommon = useTranslations("common");
   const tErrors = useTranslations("errors");
   const canEdit = useCanEdit();
-  const { activeCompanyId } = useGlobalStore();
+  const {
+    activeCompanyId,
+    datasetId: storedDatasetId,
+    setDatasetId: setStoredDatasetId,
+    modelId: storedModelId,
+    setModelId: setStoredModelId,
+    startLongOperation,
+    endLongOperation,
+  } = useGlobalStore();
   const currency = useActiveCurrency();
   const { resolvedTheme } = useTheme();
   const isDarkTheme = resolvedTheme === "dark";
@@ -258,14 +266,16 @@ export default function PredictPage() {
       const data = await apiFetch<Dataset[]>("/datasets");
       setDatasets(data);
       if (data.length) {
-        setSelectedDataset((prev) => (prev ? prev : data[0].id));
+        // Prefer the dataset selected elsewhere in the app (A10-R1) over "first in the list".
+        const preferred = storedDatasetId && data.some((d) => d.id === storedDatasetId) ? storedDatasetId : data[0].id;
+        setSelectedDataset((prev) => (prev ? prev : preferred));
       }
-    } catch {
-      toast.error("Failed to load datasets");
+    } catch (err) {
+      toast.error(err instanceof ApiError ? translateApiError(err, tErrors) : t("toasts.loadDatasetsFailed"));
     } finally {
       setInitializing(false);
     }
-  }, []);
+  }, [t, tErrors, storedDatasetId]);
 
   const fetchModels = useCallback(async (datasetId: string) => {
     setModelsLoading(true);
@@ -280,14 +290,17 @@ export default function PredictPage() {
         y_var: m.y_var,
       }));
       setModels(normalized);
+      // Prefer the model selected elsewhere in the app (A10-R1), falling back to hero/first.
+      const preferredValid = storedModelId && normalized.some((m) => m.id === storedModelId) ? storedModelId : null;
       const hero = normalized.find((m) => m.role === "hero" || m.is_hero) || normalized[0];
-      if (hero) setSelectedModel(hero.id);
-    } catch {
-      toast.error("Failed to load models");
+      const next = preferredValid || hero?.id;
+      if (next) setSelectedModel(next);
+    } catch (err) {
+      toast.error(err instanceof ApiError ? translateApiError(err, tErrors) : t("toasts.loadModelsFailed"));
     } finally {
       setModelsLoading(false);
     }
-  }, []);
+  }, [t, tErrors, storedModelId]);
 
   const requestScenarioSummary = useCallback(
     async (customAdjustments: Record<string, Record<string, PeriodValue>>, signal?: AbortSignal) => {
@@ -326,19 +339,21 @@ export default function PredictPage() {
     const controller = new AbortController();
     previewAbortRef.current = controller;
     setPreviewLoading(true);
+    startLongOperation(t("params.previewing"));
     try {
       const data = await requestScenarioSummary(adjustments, controller.signal);
       setPreview(data);
     } catch (error: any) {
       if (error?.name === "AbortError") return;
-      toast.error(error?.message || "Preview failed");
+      toast.error(error instanceof ApiError ? translateApiError(error, tErrors) : t("toasts.previewFailed"));
     } finally {
       if (previewAbortRef.current === controller) {
         setPreviewLoading(false);
         previewAbortRef.current = null;
+        endLongOperation();
       }
     }
-  }, [selectedModel, adjustments, requestScenarioSummary]);
+  }, [selectedModel, adjustments, requestScenarioSummary, t, tErrors, startLongOperation, endLongOperation]);
 
   const fetchBaselineVariables = useCallback(
     async (modelId: string) => {
@@ -351,23 +366,26 @@ export default function PredictPage() {
         });
         setVariables(data.variables || []);
         fetchPreview();
-      } catch {
+      } catch (err) {
         setVariables([]);
         setVariablesError(true);
-        toast.error("Failed to load baseline variables");
+        toast.error(err instanceof ApiError ? translateApiError(err, tErrors) : t("toasts.loadVariablesFailed"));
       }
     },
-    [fetchPreview]
+    [fetchPreview, t, tErrors]
   );
 
-  const fetchScenarios = useCallback(async (modelId: string) => {
-    try {
-      const data = await apiFetch<Scenario[]>(`/predict/scenarios?model_id=${modelId}`);
-      setScenarios(data);
-    } catch {
-      toast.error("Failed to load scenarios");
-    }
-  }, []);
+  const fetchScenarios = useCallback(
+    async (modelId: string) => {
+      try {
+        const data = await apiFetch<Scenario[]>(`/predict/scenarios?model_id=${modelId}`);
+        setScenarios(data);
+      } catch (err) {
+        toast.error(err instanceof ApiError ? translateApiError(err, tErrors) : t("toasts.loadScenariosFailed"));
+      }
+    },
+    [t, tErrors]
+  );
 
   useEffect(() => {
     // activeCompanyId hydrates asynchronously (AuthBootstrap fetches /me/memberships and
@@ -477,7 +495,7 @@ export default function PredictPage() {
 
   const handleSaveScenario = async () => {
     if (!selectedModel) {
-      toast.error("Select a model first");
+      toast.error(t("toasts.selectModelFirst"));
       return;
     }
     if (!currentScenarioId && scenarios.length >= SCENARIO_LIMIT) {
@@ -512,10 +530,10 @@ export default function PredictPage() {
       setCurrentScenarioId(data.id);
       setRenamingScenarioId(null);
       setRenameValue("");
-      toast.success(currentScenarioId ? "Scenario updated" : "Scenario saved");
+      toast.success(currentScenarioId ? t("toasts.scenarioUpdated") : t("toasts.scenarioSaved"));
       await fetchScenarios(selectedModel);
-    } catch (error: any) {
-      toast.error(error?.message || "Unable to save scenario");
+    } catch (error) {
+      toast.error(error instanceof ApiError ? translateApiError(error, tErrors) : t("toasts.saveFailed"));
     } finally {
       setSaving(false);
     }
@@ -538,7 +556,7 @@ export default function PredictPage() {
     setDeleteLoading(true);
     try {
       await apiFetch<void>(`/predict/scenarios/${deleteTarget.id}`, { method: "DELETE" });
-      toast.success("Scenario deleted");
+      toast.success(t("toasts.scenarioDeleted"));
       if (currentScenarioId === deleteTarget.id) {
         setCurrentScenarioId(null);
       }
@@ -548,8 +566,8 @@ export default function PredictPage() {
       }
       if (selectedModel) await fetchScenarios(selectedModel);
       setDeleteTarget(null);
-    } catch (error: any) {
-      toast.error(error?.message || "Unable to delete scenario");
+    } catch (error) {
+      toast.error(error instanceof ApiError ? translateApiError(error, tErrors) : t("toasts.deleteFailed"));
     } finally {
       setDeleteLoading(false);
     }
@@ -579,18 +597,18 @@ export default function PredictPage() {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ name: trimmed }),
         });
-        toast.success("Scenario renamed");
+        toast.success(t("toasts.scenarioRenamed"));
         if (currentScenarioId === scenarioId) {
           setScenarioName(trimmed);
         }
         await fetchScenarios(selectedModel);
-      } catch (error: any) {
-        toast.error(error?.message || "Unable to rename scenario");
+      } catch (error) {
+        toast.error(error instanceof ApiError ? translateApiError(error, tErrors) : t("toasts.renameFailed"));
       } finally {
         cancelRename();
       }
     },
-    [selectedModel, currentScenarioId, fetchScenarios, cancelRename]
+    [selectedModel, currentScenarioId, fetchScenarios, cancelRename, t, tErrors]
   );
 
   const handleRenameBlur = (scenario: Scenario) => {
@@ -830,11 +848,11 @@ export default function PredictPage() {
   );
   const handleExportAssumptions = useCallback(async () => {
     if (!selectedModel) {
-      toast.error("Select a model first");
+      toast.error(t("toasts.selectModelFirst"));
       return;
     }
     if (!variables.length || !editablePeriods.length) {
-      toast.error("Nothing to export yet");
+      toast.error(t("toasts.nothingToExport"));
       return;
     }
     setAssumptionsExporting(true);
@@ -857,7 +875,7 @@ export default function PredictPage() {
       const filename = buildExportFilename(scenarioName || dependentLabel || "scenario", "assumptions");
       downloadBlob(blob, filename);
     } catch (error) {
-      toast.error(translateApiError(error, tErrors) || "Failed to export assumptions");
+      toast.error(translateApiError(error, tErrors));
     } finally {
       setAssumptionsExporting(false);
     }
@@ -872,11 +890,12 @@ export default function PredictPage() {
     editMode,
     scenarioName,
     dependentLabel,
+    t,
     tErrors,
   ]);
   const handleExportTimeseries = useCallback(async () => {
     if (!selectedModel || !chartData.length) {
-      toast.error("Preview the scenario before exporting");
+      toast.error(t("toasts.previewBeforeExport"));
       return;
     }
     setTotalsExporting(true);
@@ -899,7 +918,7 @@ export default function PredictPage() {
       const filename = buildExportFilename(scenarioName || dependentLabel || "scenario", "projected");
       downloadBlob(blob, filename);
     } catch (error) {
-      toast.error(translateApiError(error, tErrors) || "Failed to export totals");
+      toast.error(translateApiError(error, tErrors));
     } finally {
       setTotalsExporting(false);
     }
@@ -912,6 +931,7 @@ export default function PredictPage() {
     adjustments,
     scenarioName,
     dependentLabel,
+    t,
     tErrors,
   ]);
 
@@ -941,7 +961,13 @@ export default function PredictPage() {
         <>
           <FilterBar>
             <FilterField label={t("filters.dataset")} className="w-[240px]">
-              <Select value={selectedDataset} onChange={(e) => setSelectedDataset(e.target.value)}>
+              <Select
+                value={selectedDataset}
+                onChange={(e) => {
+                  setSelectedDataset(e.target.value);
+                  setStoredDatasetId(e.target.value);
+                }}
+              >
                 {datasets.map((ds) => (
                   <option key={ds.id} value={ds.id}>
                     {ds.display_name}
@@ -950,7 +976,14 @@ export default function PredictPage() {
               </Select>
             </FilterField>
             <FilterField label={t("filters.model")} className="w-[240px]">
-              <Select value={selectedModel} onChange={(e) => setSelectedModel(e.target.value)} disabled={!models.length}>
+              <Select
+                value={selectedModel}
+                onChange={(e) => {
+                  setSelectedModel(e.target.value);
+                  setStoredModelId(e.target.value);
+                }}
+                disabled={!models.length}
+              >
                 {models.map((m) => (
                   <option key={m.id} value={m.id}>
                     {m.name}
@@ -972,7 +1005,10 @@ export default function PredictPage() {
             <>
               {economics && !economics.economics_configured && (
                 <div className="rounded-xl bg-warn-bg px-4 py-3 text-sm text-warn no-print">
-                  {t("economicsNotConfigured")}
+                  {t("economicsNotConfigured")}{" "}
+                  <Link href="/transform" className="font-medium underline">
+                    {t("economicsNotConfiguredLink")}
+                  </Link>
                 </div>
               )}
 
@@ -1038,7 +1074,7 @@ export default function PredictPage() {
                   </div>
                 </div>
                 <div className="flex flex-wrap gap-3">
-                  <Button onClick={fetchPreview} disabled={previewLoading || !selectedModel}>
+                  <Button onClick={fetchPreview} disabled={!selectedModel} loading={previewLoading}>
                     {previewLoading ? t("params.previewing") : t("params.preview")}
                   </Button>
                   <Button
