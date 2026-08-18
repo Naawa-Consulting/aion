@@ -31,7 +31,8 @@ fallback, just not localized).
 - Delete endpoint: `DELETE /datasets/{id}?cascade=true|false` removes dataset + dependents (variables, models, scenarios) when `cascade=true`. If dependencies exist and `cascade=false`, the API returns a 400 with counts so the UI can warn the user.
 - Preview endpoint updates `last_used_at` for "recent" order and continues to serve first 20 rows with dtype chips.
 - Working sample selector: dataset detail now exposes a “Working Sample Size” control (All rows vs. Custom). Selection calls `PATCH /datasets/{id}/sample_size` (with `{ sample_size: null|number }`), persists on the dataset, and every downstream module (Transform/Modeling/Analysis/Predict) automatically restricts computations to the first `sample_size` rows. Responses now include `sample_size` and `total_rows` so the UI can display “Currently using X of Y rows” and show a confirmation/loading overlay before applying the change.
-- Time variable selector: choose a temporal column inside the dataset detail card. `GET /datasets/{id}/time_candidates` suggests columns; `PATCH /datasets/{id}/time_variable` saves `{ column, coerce, time_format, timezone }` (or clears when `column=null`). All analytics endpoints now load data via the helper that enforces sample size + datetime parsing, so temporal features (lag/decay, stacked charts, scenario horizons) stay consistent.
+- Time variable selector: choose a temporal column inside the dataset detail card. `GET /datasets/{id}/time_candidates` suggests columns; `PATCH /datasets/{id}/time_variable` saves `{ column, coerce, time_format, timezone, frequency? }` (or clears when `column=null`). All analytics endpoints now load data via the helper that enforces sample size + datetime parsing, so temporal features (lag/decay, stacked charts, scenario horizons) stay consistent.
+- **Dataset frequency (Fase 8, D1)**: `Dataset.frequency` (`"daily"|"weekly"|"monthly"|null`) is metadata only for now — it doesn't re-aggregate the dataset or change model fitting. Set automatically on `PATCH /datasets/{id}/time_variable` from the modal delta between consecutive sorted timestamps of the chosen column (`≤3 days → daily`, `≤10 → weekly`, else `monthly`), or pass `frequency` explicitly in the same request to override the inference. Returned on `DatasetOut.frequency` and `TimeCandidateResponse.current.frequency`. No UI yet (backend-only phase) — a future Predict phase (P1) uses it as the default/floor for scenario granularity.
 - Replace dataset file: new “Update File” action opens a modal that uploads a CSV/XLSX via `POST /datasets/{id}/update` (strict vs. force schema modes). Each replacement writes `/data/{dataset_id}/v{n}.parquet`, bumps the dataset’s `version`, and archives the previous file so `GET /datasets/{id}/versions` can list history. Schema differences return 400 with added/removed columns, and a success toast announces the new version.
 - Dependent variable: `Dataset.dependent_variable` (nullable string, a column name) is set via `PATCH /datasets/{id}/dependent_variable` with `{ column: string|null }` (400 if the column doesn't exist) and returned on `DatasetOut`. UI: a "Dependent variable" `Select` on the dataset detail card (right after the Time variable card), auto-saving on change; `POST /variables/transform/preview` (Module 2) reads it to add correlation-vs-dependent to its preview response.
 - Hide variable from Datasets: the dataset summary modal's column table ("View details") now fetches `GET /variables?dataset_id=...&include_excluded=true` alongside `GET /datasets/{id}/summary` and joins by column name, adding a "Hide" checkbox column that calls `PATCH /variables/{id}/categorization` with `{ is_excluded }` only (see Module 2 — this is exactly the omit-vs-null-safe shape that lets a page with no group/subgroup context toggle just this one field).
@@ -91,6 +92,16 @@ fallback, just not localized).
   `/transform`'s "Groups & Subgroups" card (mirrors the `apply_media_transform` checkbox); checking it clears the
   flag on any other group in local state immediately (not just on the next fetch), matching the backend's
   one-per-company exclusivity.
+- **Seasonal flag (Fase 8, T6/D3)**: `Group`/`Subgroup` now also carry `is_seasonal: bool` (default
+  `false`). Same resolution order as the media flag (Subgroup wins, falls back to Group, else
+  `false`) via `services/model_fit.py::resolve_seasonal_flags`. Accepted on `POST /groups`,
+  `POST /groups/subgroups`, `PATCH /groups/{id}`, `PATCH /groups/subgroups/{id}` (all optional,
+  independently settable like `apply_media_transform`), returned on `GroupOut`/`SubgroupOut`. Only
+  a seasonal-flagged variable gets its Predict projections bucketed by calendar pattern
+  (`routers/predict.py::_calendar_bucketed_means`) instead of a flat historical mean — see Module 5.
+  No UI yet (backend-only phase); defaulting to `false` means every forecast reverts to flat-mean
+  projections until a group is explicitly flagged (a deliberate, user-confirmed choice — see
+  BITACORA — since this phase ships no toggle to opt back in yet).
 
 ## Module 3
 
@@ -161,6 +172,25 @@ state.
 
 Frontend: `/modeling`'s Hero coefficient table badges media variables and shows their fitted
 decay/half-life/K/S inline. The Hill-curve chart itself moved to `/analysis` in Fase 3 (see Module 4).
+
+### Per-model grid search config (Fase 8, M1) and best/runner-up scores (A09-R7)
+
+- `Model.media_grid_json` (nullable) overrides the module-default search space in
+  `services/model_fit.py` (`DECAYS`/`SHAPES`/`LAGS`/`K_QUANTILES`) for that model only. Set via
+  `media_grid` on `CreateModelRequest`/`UpdateModelRequest` (`MediaGridConfig`: optional
+  `decays`/`shapes`/`lags`/`k_quantiles` lists — any field left out falls back to that field's
+  default). `PATCH /models/{id}` treats setting `media_grid` (even to an all-default config) as a
+  refit trigger, same as changing `x_vars`/`apply_media_transforms`. `resolve_media_grid(model)`
+  resolves the effective grid (defaults when unset/malformed/empty), exposed read-only on
+  `ModelOut.media_grid` + `ModelOut.media_grid_combinations` (the configured search-space size —
+  actual per-channel combos also depend on the channel's own nonzero-value quantiles). No UI yet
+  (backend-only phase) — a model created/updated without `media_grid` behaves exactly as before.
+- `search_media_hparams` now also tracks the runner-up (2nd-best) corr² score alongside the
+  winner, both persisted on `ModelTransform` (`best_score`/`runner_up_score`, both nullable —
+  `null` when a channel is all-zero and never actually searched). Exposed per-coefficient via
+  `GET /models/{id}/summary`'s `CoefficientItem.best_score`/`runner_up_score`. Not used for
+  anything yet — stored so a later phase can flag an optimum as "stable" (clear margin over the
+  runner-up) vs. "ambiguous" (near tie) without needing to re-run the search retroactively.
 
 ## Module 4
 
@@ -354,17 +384,18 @@ Investment KPI by orders of magnitude).
 - Preview endpoint: `POST /predict/scenarios/preview` with `{ model_id, horizon, start_date, freq, adjustments }` returns `{ periods, total, average_per_period, groups, subgroups, series }` for instant UI feedback.
 - Scenario CRUD: `POST /predict/scenarios` saves a scenario, `GET /predict/scenarios?model_id=...` lists them, `GET /predict/scenarios/{id}` fetches one, `PATCH /predict/scenarios/{id}` renames/updates adjustments, and `DELETE /predict/scenarios/{id}` removes it. All responses carry the summary block described above.
 - Time series + exports: `GET /predict/scenarios/{id}/timeseries` provides per-period `{ y_pred, by_group, by_subgroup }`. Import a CSV plan via `POST /predict/scenarios/{id}/import` (columns: period, variable, mode, value) and export CSV/XLSX with `GET /predict/scenarios/{id}/export?format=csv|xlsx`.
-- **Calendar-aware defaults (Fase 3)**: every unadjusted future period used to default to a single flat
-  historical mean per variable, for both control variables and (before adstock/Hill) media variables. Both
-  `_compute_plan` (backs preview/create/update/timeseries) and `_scenario_matrix` (backs the assumptions export)
-  now default from `_calendar_bucketed_means`: the historical mean of that variable **at the same calendar
+- **Calendar-aware defaults (Fase 3, narrowed to opt-in in Fase 8/T6)**: every unadjusted future period
+  defaults from `_calendar_bucketed_means`: the historical mean of that variable **at the same calendar
   position** — month-of-year for `freq=month`, ISO week for `freq=week`, `(month, day)` for `freq=day` — falling
   back to the flat mean when a future period's bucket has no historical rows (e.g. a horizon that outruns a
-  year of history). Applied uniformly to every variable, not just ones flagged "seasonal" — there's no such
-  flag on `Variable` today, and a non-seasonal variable's bucketed mean converges close to its flat mean anyway,
-  so this never makes results worse, only more accurate for genuinely seasonal ones. `/predict/{model_id}/simulate`
-  (the flat, non-period multiplier preview used by `_compute_contributions`) is intentionally untouched — it has
-  no period/calendar concept to be seasonal about.
+  year of history), or when the variable isn't flagged seasonal at all (see below). Both `_compute_plan` (backs
+  preview/create/update/timeseries) and `_scenario_matrix` (backs the assumptions export) resolve
+  `resolve_seasonal_flags` for the model's `X.columns` before calling `_calendar_bucketed_means`, so only
+  `Group`/`Subgroup.is_seasonal=true` variables get calendar-bucketed — everything else uses the flat mean.
+  Fase 3 originally applied this to every variable unconditionally (no such flag existed yet); Fase 8 made it
+  explicit (D3) since blindly calendar-bucketing every control variable was itself judged a defect, not a
+  feature. `/predict/{model_id}/simulate` (the flat, non-period multiplier preview used by
+  `_compute_contributions`) is intentionally untouched — it has no period/calendar concept to be seasonal about.
 - **ROI/ROAS on the projected scenario (Fase 6)**: `_compute_plan` now also captures per-variable
   raw-value and contribution series across the horizon (`variable_raw_series`/
   `variable_contribution_series`, alongside the existing group/subgroup aggregation — no change to

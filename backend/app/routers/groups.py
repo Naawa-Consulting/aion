@@ -61,8 +61,12 @@ def list_groups(
             name=g.name,
             apply_media_transform=g.apply_media_transform,
             is_baseline=g.is_baseline,
+            is_seasonal=g.is_seasonal,
             subgroups=[
-                SubgroupOut(id=sg.id, name=sg.name, group_id=sg.group_id, apply_media_transform=sg.apply_media_transform)
+                SubgroupOut(
+                    id=sg.id, name=sg.name, group_id=sg.group_id,
+                    apply_media_transform=sg.apply_media_transform, is_seasonal=sg.is_seasonal,
+                )
                 for sg in sg_by_gid.get(g.id, [])
             ]
         ))
@@ -83,6 +87,7 @@ def create_group(
         name=body.name,
         apply_media_transform=body.apply_media_transform,
         is_baseline=body.is_baseline,
+        is_seasonal=body.is_seasonal,
     )
     session.add(g)
     session.commit()
@@ -91,6 +96,7 @@ def create_group(
         name=g.name,
         apply_media_transform=g.apply_media_transform,
         is_baseline=g.is_baseline,
+        is_seasonal=g.is_seasonal,
         subgroups=[],
     )
 
@@ -108,10 +114,14 @@ def create_subgroup(
         group_id=g.id,
         name=body.name,
         apply_media_transform=body.apply_media_transform,
+        is_seasonal=body.is_seasonal,
     )
     session.add(sg)
     session.commit()
-    return SubgroupOut(id=sg.id, group_id=sg.group_id, name=sg.name, apply_media_transform=sg.apply_media_transform)
+    return SubgroupOut(
+        id=sg.id, group_id=sg.group_id, name=sg.name,
+        apply_media_transform=sg.apply_media_transform, is_seasonal=sg.is_seasonal,
+    )
 
 
 @router.post("/assign")
@@ -171,6 +181,8 @@ def rename_group(
         group.name = new_name
     if body.apply_media_transform is not None:
         group.apply_media_transform = body.apply_media_transform
+    if body.is_seasonal is not None:
+        group.is_seasonal = body.is_seasonal
     baseline_changed = body.is_baseline is not None and body.is_baseline != group.is_baseline
     if body.is_baseline is not None:
         if body.is_baseline:
@@ -189,8 +201,12 @@ def rename_group(
         name=group.name,
         apply_media_transform=group.apply_media_transform,
         is_baseline=group.is_baseline,
+        is_seasonal=group.is_seasonal,
         subgroups=[
-            SubgroupOut(id=sg.id, name=sg.name, group_id=sg.group_id, apply_media_transform=sg.apply_media_transform)
+            SubgroupOut(
+                id=sg.id, name=sg.name, group_id=sg.group_id,
+                apply_media_transform=sg.apply_media_transform, is_seasonal=sg.is_seasonal,
+            )
             for sg in subgroups
         ],
     )
@@ -221,6 +237,8 @@ def rename_subgroup(
         subgroup.name = new_name
     if body.apply_media_transform is not None:
         subgroup.apply_media_transform = body.apply_media_transform
+    if body.is_seasonal is not None:
+        subgroup.is_seasonal = body.is_seasonal
     session.add(subgroup)
     session.commit()
     session.refresh(subgroup)
@@ -229,6 +247,7 @@ def rename_subgroup(
         group_id=subgroup.group_id,
         name=subgroup.name,
         apply_media_transform=subgroup.apply_media_transform,
+        is_seasonal=subgroup.is_seasonal,
     )
 
 

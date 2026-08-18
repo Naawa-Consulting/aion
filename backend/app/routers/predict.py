@@ -22,7 +22,7 @@ from ..routers.analysis import _fit_from_model, _group_maps
 from ..routers.economics import _load_channels, _load_conversion_settings
 from ..services.economics import parse_channel_config, resolve_channel_dollar_rate, resolve_conversion_scalars
 from ..services.media_transform import apply_media_transform
-from ..services.model_fit import load_transform_params
+from ..services.model_fit import load_transform_params, resolve_seasonal_flags
 from ..tenancy import get_scoped
 from ..utils.excel import excel_response
 from ..schemas import (
@@ -202,13 +202,19 @@ def _calendar_key(value: date, freq: str):
 
 
 def _calendar_bucketed_means(
-    work: pd.DataFrame, hist_dates: "pd.Series | None", columns: list[str], freq: str
+    work: pd.DataFrame,
+    hist_dates: "pd.Series | None",
+    columns: list[str],
+    freq: str,
+    seasonal_names: "set[str] | None" = None,
 ) -> dict[str, dict]:
-    """Per-column historical mean bucketed by `_calendar_key`. Applied uniformly to every
-    variable (media and control) — there's no per-variable "is this seasonal" flag today, and a
-    non-seasonal variable's bucketed mean just converges close to its flat mean anyway, so this
-    never makes things worse. Callers must fall back to the flat mean when a bucket is missing
-    (short history, or a horizon that outruns a year of data)."""
+    """Per-column historical mean bucketed by `_calendar_key`, computed only for variables
+    flagged seasonal (D3/T6: `Group.is_seasonal`/`Subgroup.is_seasonal`, resolved by
+    `resolve_seasonal_flags` at the call site). `seasonal_names=None` buckets every column
+    (used nowhere anymore, kept as the conservative default for this helper). Every caller
+    already falls back to the flat mean when a bucket is missing (a name simply absent from the
+    returned dict) — short history, a horizon that outruns a year of data, or here, a
+    non-seasonal variable."""
     if hist_dates is None:
         return {}
     valid = hist_dates.notna()
@@ -216,7 +222,8 @@ def _calendar_bucketed_means(
         return {}
     keys = hist_dates[valid].apply(lambda d: _calendar_key(d.date() if hasattr(d, "date") else d, freq))
     buckets: dict[str, dict] = {}
-    for name in columns:
+    target_columns = [c for c in columns if seasonal_names is None or c in seasonal_names]
+    for name in target_columns:
         series = pd.to_numeric(work[name], errors="coerce").fillna(0.0)
         grouped = series[valid].groupby(keys).mean()
         buckets[name] = {k: float(v) for k, v in grouped.items()}
@@ -417,7 +424,9 @@ def _compute_plan(
         if time_field and time_field in raw_df.columns
         else None
     )
-    calendar_buckets = _calendar_bucketed_means(work, hist_dates, list(X.columns), freq)
+    seasonal_flags = resolve_seasonal_flags(session, ds.id, company_id, list(X.columns))
+    seasonal_names = {name for name, flag in seasonal_flags.items() if flag}
+    calendar_buckets = _calendar_bucketed_means(work, hist_dates, list(X.columns), freq, seasonal_names)
 
     intercept = float(params.get("const", 0.0))
     period_dates = _period_sequence(start_date, horizon, freq)
@@ -607,7 +616,9 @@ def _scenario_matrix(
         if time_field and time_field in raw_df.columns
         else None
     )
-    calendar_buckets = _calendar_bucketed_means(work, hist_dates, list(X.columns), freq)
+    seasonal_flags = resolve_seasonal_flags(session, ds.id, company_id, list(X.columns))
+    seasonal_names = {name for name, flag in seasonal_flags.items() if flag}
+    calendar_buckets = _calendar_bucketed_means(work, hist_dates, list(X.columns), freq, seasonal_names)
 
     period_dates = _period_sequence(start_date, horizon, freq)
     labels = [_label_for_period(period, freq) for period in period_dates]

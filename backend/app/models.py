@@ -44,6 +44,7 @@ class Dataset(SQLModel, table=True):
     time_variable: str | None = Field(default=None, nullable=True)
     time_format: str | None = Field(default=None, nullable=True)
     time_timezone: str | None = Field(default=None, nullable=True)
+    frequency: str | None = Field(default=None, nullable=True)  # "daily"|"weekly"|"monthly"; metadata only
     previous_version_id: str | None = Field(default=None, nullable=True)
     version: int = Field(default=1, nullable=False)
     dependent_variable: str | None = Field(default=None, nullable=True)  # Variable.name
@@ -73,6 +74,7 @@ class Group(SQLModel, table=True):
     name: str
     apply_media_transform: bool = Field(default=False, nullable=False)
     is_baseline: bool = Field(default=False, nullable=False)
+    is_seasonal: bool = Field(default=False, nullable=False)
     created_at: datetime = Field(default_factory=datetime.utcnow, nullable=False)
 
 
@@ -82,6 +84,7 @@ class Subgroup(SQLModel, table=True):
     group_id: str = Field(index=True)
     name: str
     apply_media_transform: bool = Field(default=False, nullable=False)
+    is_seasonal: bool = Field(default=False, nullable=False)
     created_at: datetime = Field(default_factory=datetime.utcnow, nullable=False)
 
 
@@ -105,6 +108,7 @@ class Model(SQLModel, table=True):
     is_hero: bool = False  # legacy flag
     role: str = Field(default="none")  # hero|challenger1|challenger2|none
     apply_media_transforms: bool = Field(default=True, nullable=False)
+    media_grid_json: str | None = Field(default=None, nullable=True)  # override of services/model_fit.py grid; None = defaults
     created_at: datetime = Field(default_factory=datetime.utcnow, nullable=False)
 
 
@@ -134,6 +138,8 @@ class ModelTransform(SQLModel, table=True):
     hill_k: float
     hill_s: float
     lag: int = Field(default=0, nullable=False)
+    best_score: float | None = Field(default=None, nullable=True)  # corr^2 of the winning grid combo
+    runner_up_score: float | None = Field(default=None, nullable=True)  # corr^2 of the 2nd-best combo
 
 
 class InvestmentChannel(SQLModel, table=True):

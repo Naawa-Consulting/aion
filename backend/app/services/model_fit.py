@@ -10,6 +10,7 @@ the linear coefficients — see BITACORA for why). Control variables pass throug
 from __future__ import annotations
 
 import itertools
+import json
 import uuid
 from dataclasses import dataclass
 from typing import Optional
@@ -29,11 +30,29 @@ K_QUANTILES = (0.25, 0.5, 0.75)
 
 
 @dataclass(frozen=True)
+class MediaHparamGrid:
+    """Per-model override of the search space in `search_media_hparams`. `resolve_media_grid`
+    builds this from `Model.media_grid_json`, falling back field-by-field to the module
+    defaults above (also this dataclass's own defaults) when unset or empty."""
+
+    decays: tuple[float, ...] = DECAYS
+    shapes: tuple[float, ...] = SHAPES
+    lags: tuple[int, ...] = LAGS
+    k_quantiles: tuple[float, ...] = K_QUANTILES
+
+    @property
+    def combination_count(self) -> int:
+        return len(self.decays) * len(self.shapes) * len(self.lags) * len(self.k_quantiles)
+
+
+@dataclass(frozen=True)
 class MediaTransformParams:
     decay: float
     hill_k: float
     hill_s: float
     lag: int
+    best_score: Optional[float] = None  # corr^2 of the winning grid combo (A09-R7)
+    runner_up_score: Optional[float] = None  # corr^2 of the 2nd-best combo, for a future stable/ambiguous signal
 
 
 def _partial_corr_sq(a: np.ndarray, b: np.ndarray) -> float:
@@ -45,29 +64,45 @@ def _partial_corr_sq(a: np.ndarray, b: np.ndarray) -> float:
     return float(corr**2)
 
 
-def search_media_hparams(x: np.ndarray, y_resid: np.ndarray) -> MediaTransformParams:
+def search_media_hparams(
+    x: np.ndarray, y_resid: np.ndarray, grid: Optional[MediaHparamGrid] = None
+) -> MediaTransformParams:
     """Per-channel grid search maximizing corr^2 between the transformed channel and the
-    (control-residualized) target. Cheap: ~225 combinations, no repeated OLS refits."""
+    (control-residualized) target. Cheap: ~225 combinations by default, no repeated OLS
+    refits. Also tracks the runner-up score (A09-R7): not used for selection, stored so a
+    later phase can flag an optimum as "stable" (clear margin) vs. "ambiguous" (near tie)."""
+    grid = grid or MediaHparamGrid()
     x = np.asarray(x, dtype=float)
     y_resid = np.asarray(y_resid, dtype=float)
     nonzero = x[x > 0]
     if nonzero.size == 0:
         return MediaTransformParams(decay=0.0, hill_k=1.0, hill_s=1.0, lag=0)
-    k_candidates = sorted({float(np.quantile(nonzero, q)) for q in K_QUANTILES})
+    k_candidates = sorted({float(np.quantile(nonzero, q)) for q in grid.k_quantiles})
     if not k_candidates:
         k_candidates = [float(np.mean(nonzero))]
 
     best_score = -np.inf
+    runner_up_score = -np.inf
     best = MediaTransformParams(decay=0.0, hill_k=k_candidates[0], hill_s=1.0, lag=0)
-    for decay, s, lag, k in itertools.product(DECAYS, SHAPES, LAGS, k_candidates):
+    for decay, s, lag, k in itertools.product(grid.decays, grid.shapes, grid.lags, k_candidates):
         transformed = apply_media_transform(x, decay, k, s, lag)
         if not np.all(np.isfinite(transformed)) or np.std(transformed) == 0:
             continue
         score = _partial_corr_sq(transformed, y_resid)
         if score > best_score:
+            runner_up_score = best_score
             best_score = score
             best = MediaTransformParams(decay=decay, hill_k=k, hill_s=s, lag=lag)
-    return best
+        elif score > runner_up_score:
+            runner_up_score = score
+    return MediaTransformParams(
+        decay=best.decay,
+        hill_k=best.hill_k,
+        hill_s=best.hill_s,
+        lag=best.lag,
+        best_score=float(best_score) if np.isfinite(best_score) else None,
+        runner_up_score=float(runner_up_score) if np.isfinite(runner_up_score) else None,
+    )
 
 
 def build_design_matrix(
@@ -76,6 +111,7 @@ def build_design_matrix(
     x_vars: list[str],
     media_flags: dict[str, bool],
     transform_params: Optional[dict[str, MediaTransformParams]] = None,
+    grid: Optional[MediaHparamGrid] = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, MediaTransformParams]]:
     """Returns (work, X, used_params).
 
@@ -120,7 +156,7 @@ def build_design_matrix(
             raw = work[name].to_numpy(dtype=float)
             params = used_params.get(name)
             if params is None:
-                params = search_media_hparams(raw, y_resid)
+                params = search_media_hparams(raw, y_resid, grid=grid)
                 used_params[name] = params
             X[name] = apply_media_transform(raw, params.decay, params.hill_k, params.hill_s, params.lag)
         else:
@@ -130,11 +166,13 @@ def build_design_matrix(
     return work, X, used_params
 
 
-def resolve_media_flags(
-    session: Session, dataset_id: str, company_id: str, x_vars: list[str]
+def _resolve_group_subgroup_flag(
+    session: Session, dataset_id: str, company_id: str, x_vars: list[str], flag_attr: str
 ) -> dict[str, bool]:
-    """A variable is 'media' (adstock+Hill applies) if its Subgroup, or failing that its
-    Group, has `apply_media_transform=True`. Unassigned variables are treated as control."""
+    """Shared lookup for any per-variable boolean that lives on Group/Subgroup: a variable
+    takes its Subgroup's value for `flag_attr`, or failing that its Group's, or False if
+    unassigned. Backs both `resolve_media_flags` (apply_media_transform) and
+    `resolve_seasonal_flags` (is_seasonal)."""
     if not x_vars:
         return {}
     vars_ = session.exec(
@@ -165,11 +203,48 @@ def resolve_media_flags(
             continue
         sg = subgroups.get(v.subgroup_id) if v.subgroup_id else None
         if sg is not None:
-            flags[name] = bool(sg.apply_media_transform)
+            flags[name] = bool(getattr(sg, flag_attr))
             continue
         g = groups.get(v.group_id) if v.group_id else None
-        flags[name] = bool(g.apply_media_transform) if g else False
+        flags[name] = bool(getattr(g, flag_attr)) if g else False
     return flags
+
+
+def resolve_media_flags(
+    session: Session, dataset_id: str, company_id: str, x_vars: list[str]
+) -> dict[str, bool]:
+    """A variable is 'media' (adstock+Hill applies) if its Subgroup, or failing that its
+    Group, has `apply_media_transform=True`. Unassigned variables are treated as control."""
+    return _resolve_group_subgroup_flag(session, dataset_id, company_id, x_vars, "apply_media_transform")
+
+
+def resolve_seasonal_flags(
+    session: Session, dataset_id: str, company_id: str, x_vars: list[str]
+) -> dict[str, bool]:
+    """A variable is 'seasonal' (calendar-bucketed projections in Predict, vs. flat mean) if
+    its Subgroup, or failing that its Group, has `is_seasonal=True`. See T6 / D3."""
+    return _resolve_group_subgroup_flag(session, dataset_id, company_id, x_vars, "is_seasonal")
+
+
+def resolve_media_grid(model: Model) -> MediaHparamGrid:
+    """Parses `Model.media_grid_json` into a `MediaHparamGrid`, falling back field-by-field to
+    the module defaults when the model has no override, the JSON is malformed, or a given
+    field is missing/empty."""
+    raw = getattr(model, "media_grid_json", None)
+    if not raw:
+        return MediaHparamGrid()
+    try:
+        data = json.loads(raw)
+    except (TypeError, ValueError):
+        return MediaHparamGrid()
+    if not isinstance(data, dict):
+        return MediaHparamGrid()
+    return MediaHparamGrid(
+        decays=tuple(float(v) for v in data.get("decays") or DECAYS) or DECAYS,
+        shapes=tuple(float(v) for v in data.get("shapes") or SHAPES) or SHAPES,
+        lags=tuple(int(v) for v in data.get("lags") or LAGS) or LAGS,
+        k_quantiles=tuple(float(v) for v in data.get("k_quantiles") or K_QUANTILES) or K_QUANTILES,
+    )
 
 
 def load_transform_params(session: Session, model_id: str, company_id: str) -> dict[str, MediaTransformParams]:
@@ -177,7 +252,14 @@ def load_transform_params(session: Session, model_id: str, company_id: str) -> d
         select(ModelTransform).where(ModelTransform.model_id == model_id, ModelTransform.company_id == company_id)
     ).all()
     return {
-        r.variable_name: MediaTransformParams(decay=r.decay, hill_k=r.hill_k, hill_s=r.hill_s, lag=r.lag)
+        r.variable_name: MediaTransformParams(
+            decay=r.decay,
+            hill_k=r.hill_k,
+            hill_s=r.hill_s,
+            lag=r.lag,
+            best_score=r.best_score,
+            runner_up_score=r.runner_up_score,
+        )
         for r in rows
     }
 
@@ -195,5 +277,7 @@ def store_transform_params(session: Session, model: Model, params: dict[str, Med
                 hill_k=p.hill_k,
                 hill_s=p.hill_s,
                 lag=p.lag,
+                best_score=p.best_score,
+                runner_up_score=p.runner_up_score,
             )
         )

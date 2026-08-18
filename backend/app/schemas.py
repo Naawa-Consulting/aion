@@ -20,6 +20,9 @@ class ModelDependencyInfo(BaseModel):
     scenarios: int = 0
 
 
+DatasetFrequency = Literal["daily", "weekly", "monthly"]
+
+
 class DatasetOut(BaseModel):
     id: str
     display_name: str
@@ -31,6 +34,7 @@ class DatasetOut(BaseModel):
     time_variable: Optional[str] = None
     time_format: Optional[str] = None
     time_timezone: Optional[str] = None
+    frequency: Optional[DatasetFrequency] = None
     version: int = 1
     previous_version_id: Optional[str] = None
     dependent_variable: Optional[str] = None
@@ -113,6 +117,7 @@ class TimeSelection(BaseModel):
     name: Optional[str] = None
     time_format: Optional[str] = None
     time_timezone: Optional[str] = None
+    frequency: Optional[DatasetFrequency] = None
 
 
 class TimeCandidateResponse(BaseModel):
@@ -125,6 +130,9 @@ class TimeVariableRequest(BaseModel):
     coerce: bool = False
     time_format: Optional[str] = None
     timezone: Optional[str] = None
+    frequency: Optional[DatasetFrequency] = None
+    """Explicit override; when omitted, the backend infers it from the modal delta between
+    consecutive sorted timestamps of `column`."""
 
 
 class VariableOut(BaseModel):
@@ -188,6 +196,7 @@ class GroupOut(BaseModel):
     name: str
     apply_media_transform: bool = False
     is_baseline: bool = False
+    is_seasonal: bool = False
     subgroups: List["SubgroupOut"]
 
 
@@ -196,6 +205,7 @@ class SubgroupOut(BaseModel):
     name: str
     group_id: str
     apply_media_transform: bool = False
+    is_seasonal: bool = False
 
 
 GroupOut.model_rebuild()
@@ -205,12 +215,14 @@ class CreateGroupRequest(BaseModel):
     name: str
     apply_media_transform: bool = False
     is_baseline: bool = False
+    is_seasonal: bool = False
 
 
 class CreateSubgroupRequest(BaseModel):
     group_id: str
     name: str
     apply_media_transform: bool = False
+    is_seasonal: bool = False
 
 
 class AssignVariableRequest(BaseModel):
@@ -224,11 +236,13 @@ class RenameGroupRequest(BaseModel):
     name: Optional[str] = None
     apply_media_transform: Optional[bool] = None
     is_baseline: Optional[bool] = None
+    is_seasonal: Optional[bool] = None
 
 
 class RenameSubgroupRequest(BaseModel):
     name: Optional[str] = None
     apply_media_transform: Optional[bool] = None
+    is_seasonal: Optional[bool] = None
 
 
 class CategorizeRequest(BaseModel):
@@ -260,12 +274,23 @@ class CorrelationResponse(BaseModel):
     items: list[CorrelationItem]
 
 
+class MediaGridConfig(BaseModel):
+    """Override of services/model_fit.py's default adstock/Hill grid search space (M1), scoped
+    to one model. Any field left unset falls back to that field's module default."""
+
+    decays: Optional[list[float]] = None
+    shapes: Optional[list[float]] = None
+    lags: Optional[list[int]] = None
+    k_quantiles: Optional[list[float]] = None
+
+
 class CreateModelRequest(BaseModel):
     dataset_id: str
     name: str
     y_var: str
     x_vars: list[str]
     apply_media_transforms: bool = True
+    media_grid: Optional[MediaGridConfig] = None
 
 
 class ModelMetricsOut(BaseModel):
@@ -287,6 +312,8 @@ class ModelOut(BaseModel):
     is_hero: bool
     role: Literal["hero", "challenger1", "challenger2", "none"] = "none"
     apply_media_transforms: bool = True
+    media_grid: MediaGridConfig
+    media_grid_combinations: int
     metrics: ModelMetricsOut
 
 
@@ -306,6 +333,9 @@ class UpdateModelRequest(BaseModel):
     name: Optional[str] = None
     x_vars: Optional[list[str]] = None
     apply_media_transforms: Optional[bool] = None
+    media_grid: Optional[MediaGridConfig] = None
+    """Setting this (even to an all-default MediaGridConfig) forces a fresh grid search on the
+    next fit, same as changing x_vars/apply_media_transforms."""
 
 
 class ModelRoleRequest(BaseModel):
@@ -327,6 +357,8 @@ class CoefficientItem(BaseModel):
     hill_s: Optional[float] = None
     lag: Optional[int] = None
     raw_mean: Optional[float] = None
+    best_score: Optional[float] = None
+    runner_up_score: Optional[float] = None
 
 
 class ModelSummaryResponse(BaseModel):

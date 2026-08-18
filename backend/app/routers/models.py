@@ -21,10 +21,12 @@ from ..models import Dataset, Model, ModelMetrics, ModelTransform, Scenario, Var
 from ..services.analysis import invalidate_cache_for_model
 from ..services.media_transform import half_life
 from ..services.model_fit import (
+    MediaHparamGrid,
     MediaTransformParams,
     build_design_matrix,
     load_transform_params,
     resolve_media_flags,
+    resolve_media_grid,
     store_transform_params,
 )
 from ..tenancy import get_scoped
@@ -35,6 +37,7 @@ from ..schemas import (
     CorrelationItem,
     CreateModelRequest,
     UpdateModelRequest,
+    MediaGridConfig,
     ModelOut,
     ModelMetricsOut,
     ModelDependencyInfo,
@@ -47,6 +50,22 @@ from ..schemas import (
 
 router = APIRouter()
 ROLE_CHOICES = {"hero", "challenger1", "challenger2", "none"}
+
+
+def _grid_config_to_json(config: Optional[MediaGridConfig]) -> Optional[str]:
+    """Serializes a request-supplied grid override for `Model.media_grid_json`. An empty
+    config (every field omitted) is stored as None so it reads back as "use defaults", same as
+    never having set one."""
+    if config is None:
+        return None
+    data = config.model_dump(exclude_none=True)
+    return json.dumps(data) if data else None
+
+
+def _grid_to_config(grid: MediaHparamGrid) -> MediaGridConfig:
+    return MediaGridConfig(
+        decays=list(grid.decays), shapes=list(grid.shapes), lags=list(grid.lags), k_quantiles=list(grid.k_quantiles)
+    )
 
 
 def _load_df(ds: Dataset) -> pd.DataFrame:
@@ -129,6 +148,7 @@ def correlations(
         work, y_arr, X, _ = _build_matrix(
             session, membership.company_id, dataset_id, df, model.y_var, x_vars,
             transform_params=transform_params, apply_transforms=model.apply_media_transforms,
+            grid=resolve_media_grid(model),
         )
         X_const = sm.add_constant(X, has_constant="add")
         result = sm.OLS(y_arr, X_const).fit()
@@ -180,17 +200,22 @@ def _build_matrix(
     x_vars: list[str],
     transform_params: Optional[dict] = None,
     apply_transforms: bool = True,
+    grid: Optional[MediaHparamGrid] = None,
 ):
     """Resolves media flags from Group/Subgroup, then builds the design matrix (media
     x_vars adstock+Hill transformed, control x_vars raw) via the shared model_fit service.
     `apply_transforms=False` is the per-model override: every x_var is treated as control
     (raw), regardless of its Group/Subgroup media flag — used for variables the user already
-    transformed manually, or to compare a raw vs. transformed model side by side."""
+    transformed manually, or to compare a raw vs. transformed model side by side. `grid`
+    (M1) overrides the default hparam search space; only matters when `transform_params`
+    doesn't already cover every media x_var (i.e. a fresh search actually runs)."""
     media_flags = (
         resolve_media_flags(session, dataset_id, company_id, x_vars) if apply_transforms else {x: False for x in x_vars}
     )
     try:
-        work, X, used_params = build_design_matrix(df, y_var, x_vars, media_flags, transform_params=transform_params)
+        work, X, used_params = build_design_matrix(
+            df, y_var, x_vars, media_flags, transform_params=transform_params, grid=grid
+        )
     except ValueError as e:
         raise api_error(400, "MODEL_BUILD_ERROR", str(e))
     y = work[y_var].to_numpy()
@@ -238,6 +263,7 @@ def _compute_metrics(y: np.ndarray, y_hat: np.ndarray, X: pd.DataFrame) -> dict:
 
 
 def _model_to_out(m: Model, mm: ModelMetrics) -> ModelOut:
+    grid = resolve_media_grid(m)
     return ModelOut(
         id=m.id,
         name=m.name,
@@ -247,6 +273,8 @@ def _model_to_out(m: Model, mm: ModelMetrics) -> ModelOut:
         is_hero=m.role == "hero",
         role=m.role or "none",
         apply_media_transforms=m.apply_media_transforms,
+        media_grid=_grid_to_config(grid),
+        media_grid_combinations=grid.combination_count,
         metrics=ModelMetricsOut(
             r2=mm.r2,
             adj_r2=mm.adj_r2,
@@ -273,6 +301,7 @@ def _fit_and_store_metrics(
     work, y, X, used_params = _build_matrix(
         session, model.company_id, model.dataset_id, df, model.y_var, x_vars,
         transform_params=transform_params, apply_transforms=model.apply_media_transforms,
+        grid=resolve_media_grid(model),
     )
     X_const = sm.add_constant(X, has_constant="add")
     result = sm.OLS(y, X_const).fit()
@@ -383,6 +412,7 @@ def create_model(
         is_hero=False,
         role="none",
         apply_media_transforms=body.apply_media_transforms,
+        media_grid_json=_grid_config_to_json(body.media_grid),
     )
     session.add(m)
     session.commit()
@@ -433,7 +463,10 @@ def update_model(
     )
     if transforms_flag_changed:
         m.apply_media_transforms = body.apply_media_transforms
-    if body.x_vars is not None or transforms_flag_changed:
+    grid_changed = body.media_grid is not None
+    if grid_changed:
+        m.media_grid_json = _grid_config_to_json(body.media_grid)
+    if body.x_vars is not None or transforms_flag_changed or grid_changed:
         x_vars = body.x_vars if body.x_vars is not None else json.loads(m.x_vars_json)
         if body.x_vars is not None:
             m.x_vars_json = json.dumps(body.x_vars)
@@ -469,6 +502,7 @@ def duplicate_model(
         is_hero=False,
         role="none",
         apply_media_transforms=original.apply_media_transforms,
+        media_grid_json=original.media_grid_json,
     )
     session.add(new_model)
     session.commit()
@@ -510,6 +544,7 @@ def create_best_stepwise_model(
     work, y_arr, X, used_params = _build_matrix(
         session, membership.company_id, original.dataset_id, df, original.y_var, original_x,
         transform_params=original_params, apply_transforms=original.apply_media_transforms,
+        grid=resolve_media_grid(original),
     )
     y_series = pd.Series(y_arr, index=work.index)
     selected_predictors = _stepwise_selection(X, y_series, original_x)
@@ -526,6 +561,7 @@ def create_best_stepwise_model(
         is_hero=False,
         role="none",
         apply_media_transforms=original.apply_media_transforms,
+        media_grid_json=original.media_grid_json,
     )
     session.add(new_model)
     session.commit()
@@ -643,6 +679,7 @@ def model_summary(
     work, y, X, used_params = _build_matrix(
         session, membership.company_id, m.dataset_id, df, m.y_var, x_vars,
         transform_params=transform_params, apply_transforms=m.apply_media_transforms,
+        grid=resolve_media_grid(m),
     )
     X_const = sm.add_constant(X, has_constant="add")
     result = sm.OLS(y, X_const).fit()
@@ -699,6 +736,8 @@ def model_summary(
                 hill_s=transform.hill_s if transform else None,
                 lag=transform.lag if transform else None,
                 raw_mean=float(work[var].mean()) if var in work.columns else None,
+                best_score=transform.best_score if transform else None,
+                runner_up_score=transform.runner_up_score if transform else None,
             )
         )
 
@@ -733,6 +772,7 @@ def model_predictions(
     work, y, X, _ = _build_matrix(
         session, membership.company_id, m.dataset_id, df, m.y_var, x_vars,
         transform_params=transform_params, apply_transforms=m.apply_media_transforms,
+        grid=resolve_media_grid(m),
     )
     X_const = sm.add_constant(X, has_constant="add")
     result = sm.OLS(y, X_const).fit()

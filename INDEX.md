@@ -30,10 +30,14 @@ aportan contexto). Convenciones y arquitectura conceptual completas en `CLAUDE.m
 - `app/models.py` — tablas SQLModel: `Company`, `Membership`, `Dataset`, `Variable`, `Group`,
   `Subgroup`, `VariableHistory`, `Model`, `ModelMetrics`, `ModelTransform`, `InvestmentChannel`,
   `Scenario` — todas (salvo Company/Membership) con `company_id`. `Group`/`Subgroup` tienen
-  `apply_media_transform` (marca variables de medios); `ModelTransform` guarda los parámetros de
-  adstock+Hill fit por `(modelo, variable)`; `Model.conversion_rate`/`avg_value` alimentan la capa
-  económica; `InvestmentChannel` es un catálogo por-dataset (gasto real en $, desacoplado de qué
-  variable entró al modelo — ver `app/services/economics.py`).
+  `apply_media_transform` (marca variables de medios) e `is_seasonal` (Fase 8/T6, marca si Predict
+  calendariza sus proyecciones); `Dataset.frequency` (Fase 8/D1) es metadato inferido por delta
+  modal de la columna temporal; `Model.media_grid_json` (Fase 8/M1) override opcional del grid de
+  búsqueda de adstock/Hill; `ModelTransform` guarda los parámetros de adstock+Hill fit por
+  `(modelo, variable)` más `best_score`/`runner_up_score` (Fase 8/A09-R7, corr² del ganador y del
+  2º mejor de la búsqueda); `Model.conversion_rate`/`avg_value` alimentan la capa económica;
+  `InvestmentChannel` es un catálogo por-dataset (gasto real en $, desacoplado de qué variable
+  entró al modelo — ver `app/services/economics.py`).
 - `app/schemas.py` — modelos Pydantic de request/response usados por los routers.
 - `app/errors.py` — `api_error()` (Fase 7.9): construye `HTTPException`s con `detail={code,
   message, ...extra}` en vez de texto plano, para los ~35 errores 4xx visibles al usuario final
@@ -69,8 +73,12 @@ aportan contexto). Convenciones y arquitectura conceptual completas en `CLAUDE.m
 - `app/services/model_fit.py` — `build_design_matrix()`: punto único que arma la matriz de diseño
   (variables de medios transformadas, control crudas) usado por `routers/models.py`,
   `routers/analysis.py` y `routers/predict.py`; incluye el grid-search por canal
-  (`search_media_hparams`) y la resolución de qué variables son "de medios"
-  (`resolve_media_flags`, vía Group/Subgroup).
+  (`search_media_hparams`, ahora acepta un `MediaHparamGrid` opcional — Fase 8/M1 — y devuelve
+  también `best_score`/`runner_up_score` — Fase 8/A09-R7) y la resolución de qué variables son "de
+  medios" (`resolve_media_flags`) o "estacionales" (`resolve_seasonal_flags`, Fase 8/T6) vía
+  Group/Subgroup, ambas sobre el mismo helper compartido `_resolve_group_subgroup_flag`.
+  `resolve_media_grid(model)` resuelve el grid efectivo de un modelo desde
+  `Model.media_grid_json`, con fallback campo-por-campo a los defaults del módulo.
 - `app/utils/datasets.py` — `load_dataset_frame()`: lectura desde Supabase Storage + `sample_size`
   + parseo de columna temporal. Usar siempre esta función, no leer el storage directo.
 - `app/utils/storage.py` — cliente mínimo de Supabase Storage vía `httpx` (`read_bytes`,

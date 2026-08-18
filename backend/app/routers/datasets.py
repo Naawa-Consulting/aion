@@ -61,6 +61,25 @@ def _infer_columns(df: pd.DataFrame) -> list[dict]:
     return [{"name": str(c), "dtype": str(dt)} for c, dt in df.dtypes.items()]
 
 
+def _infer_frequency(parsed: pd.Series) -> Optional[str]:
+    """D1: modal delta between consecutive sorted timestamps, bucketed to the closest of
+    daily/weekly/monthly. `parsed` must already be a datetime series (post `pd.to_datetime`).
+    Returns None with fewer than 2 distinct valid timestamps."""
+    valid = parsed.dropna().sort_values()
+    if len(valid) < 2:
+        return None
+    deltas = valid.diff().dropna().dt.days
+    deltas = deltas[deltas > 0]
+    if deltas.empty:
+        return None
+    modal_days = deltas.mode().iloc[0]
+    if modal_days <= 3:
+        return "daily"
+    if modal_days <= 10:
+        return "weekly"
+    return "monthly"
+
+
 def _dependency_counts(session: Session, dataset_id: str, company_id: str) -> DatasetDependencyInfo:
     var_count = session.exec(
         select(func.count())
@@ -146,6 +165,7 @@ def _dataset_out(session: Session, ds: Dataset) -> DatasetOut:
         time_variable=ds.time_variable,
         time_format=ds.time_format,
         time_timezone=ds.time_timezone,
+        frequency=ds.frequency,
         version=ds.version or 1,
         previous_version_id=ds.previous_version_id,
         dependent_variable=ds.dependent_variable,
@@ -392,6 +412,7 @@ def time_candidates(
             name=ds.time_variable,
             time_format=ds.time_format,
             time_timezone=ds.time_timezone,
+            frequency=ds.frequency,
         )
     return TimeCandidateResponse(candidates=candidates, current=current)
 
@@ -410,6 +431,7 @@ def update_time_variable(
         ds.time_variable = None
         ds.time_format = None
         ds.time_timezone = None
+        ds.frequency = None
         session.add(ds)
         session.commit()
         session.refresh(ds)
@@ -432,6 +454,12 @@ def update_time_variable(
     ds.time_variable = column
     ds.time_format = body.time_format
     ds.time_timezone = body.timezone
+    if body.frequency:
+        ds.frequency = body.frequency
+    else:
+        utc = bool(body.timezone and body.timezone.upper() == "UTC")
+        parsed = pd.to_datetime(series, format=body.time_format, errors="coerce", utc=utc)
+        ds.frequency = _infer_frequency(parsed)
     ds.last_used_at = datetime.now(timezone.utc)
     session.add(ds)
     session.commit()
