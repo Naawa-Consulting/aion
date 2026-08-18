@@ -266,6 +266,7 @@
       "confirmDelete": {
         "title": "Delete model",
         "body": "Delete model \"{name}\"? This can't be undone.",
+        "scenarioWarning": "This model has {count} saved scenario(s) in Predict — deleting it will delete those too.",
         "confirm": "Delete"
       }
     },
@@ -535,7 +536,8 @@
       "exporting": "Exporting...",
       "empty": "Select a model to load variables.",
       "colGroup": "Group",
-      "colVariable": "Variable"
+      "colVariable": "Variable",
+      "invalidInput": "{count} cell(s) couldn't be pasted: the value isn't a number"
     },
     "totals": {
       "title": "Projected totals",

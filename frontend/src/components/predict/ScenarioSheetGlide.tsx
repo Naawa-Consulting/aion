@@ -14,6 +14,8 @@ import DataEditor, {
 } from "@glideapps/glide-data-grid";
 import { useTheme } from "next-themes";
 
+import { parseNumericInput } from "@/lib/format";
+
 import "@glideapps/glide-data-grid/dist/index.css";
 
 const LIGHT_GRID_THEME: Partial<GlideTheme> = {
@@ -83,6 +85,10 @@ export type ScenarioSheetGlideProps = {
   ) => void;
   groupColumnLabel?: string;
   variableColumnLabel?: string;
+  // Called whenever one or more edited/pasted cells were discarded for not being a valid
+  // number, with the count of discarded cells — lets the caller surface a toast instead of
+  // the previous silent no-op (the cell just reverts to its prior value either way).
+  onInvalidInput?: (count: number) => void;
 };
 
 const DEFAULT_ROWS = 20;
@@ -127,14 +133,10 @@ const ScenarioSheetGlide: React.FC<ScenarioSheetGlideProps> = ({
   onMultipliersChange,
   groupColumnLabel = "Group",
   variableColumnLabel = "Variable",
+  onInvalidInput,
 }) => {
   const { resolvedTheme } = useTheme();
   const gridTheme = resolvedTheme === "dark" ? DARK_GRID_THEME : LIGHT_GRID_THEME;
-
-  const [sortState, setSortState] = useState<{
-    column: "group" | "variable" | null;
-    direction: "asc" | "desc";
-  }>({ column: null, direction: "asc" });
 
   const periodLabels = useMemo(() => {
     if (periods && periods.length > 0) {
@@ -328,9 +330,11 @@ const ScenarioSheetGlide: React.FC<ScenarioSheetGlideProps> = ({
 
       const raw =
         newValue.kind === GridCellKind.Number ? newValue.data : newValue.data;
-      const parsed =
-        typeof raw === "number" ? raw : Number((raw ?? "").toString());
-      if (!Number.isFinite(parsed)) return;
+      const parsed = parseNumericInput(raw as string | number);
+      if (!Number.isFinite(parsed)) {
+        onInvalidInput?.(1);
+        return;
+      }
 
       setGridData((prev) => {
         const next = prev.map((row) => [...row]);
@@ -340,7 +344,7 @@ const ScenarioSheetGlide: React.FC<ScenarioSheetGlideProps> = ({
       });
       applyAbsoluteChanges([{ row: cell[1], col: cell[0], absValue: parsed }]);
     },
-    [applyAbsoluteChanges]
+    [applyAbsoluteChanges, onInvalidInput]
   );
 
   const beginEdit = useCallback(
@@ -490,28 +494,34 @@ const ScenarioSheetGlide: React.FC<ScenarioSheetGlideProps> = ({
       const matrixRows = Math.max(1, matrix.length);
       const matrixCols = Math.max(1, ...matrix.map((row) => row.length));
 
+      let rejectedCount = 0;
       for (let r = bounds.startRow; r <= bounds.endRow; r += 1) {
         if (r >= rowsCopy.length) break;
         for (let c = bounds.startCol; c <= bounds.endCol; c += 1) {
           if (c >= totalColumns) break;
+          if (c < 2) continue;
           const rowOffset = r - bounds.startRow;
           const colOffset = c - bounds.startCol;
           const sourceRow = matrix[rowOffset % matrixRows] ?? [];
           const valueToUse = sourceRow[colOffset % matrixCols];
           if (valueToUse == null || valueToUse === "") continue;
-          const parsed = Number(valueToUse);
-          if (c < 2) continue;
-          if (Number.isFinite(parsed) && !Number.isNaN(parsed)) {
+          // Strips thousands separators/currency symbols (e.g. "$5,000.00") so a paste from
+          // Excel doesn't silently fail — see lib/format.ts::parseNumericInput.
+          const parsed = parseNumericInput(valueToUse);
+          if (Number.isFinite(parsed)) {
             rowsCopy[r][c] = parsed;
             updates.push({ row: r, col: c, absValue: parsed });
+          } else {
+            rejectedCount += 1;
           }
         }
       }
       event.preventDefault();
       setGridData(rowsCopy);
       applyAbsoluteChanges(updates);
+      if (rejectedCount > 0) onInvalidInput?.(rejectedCount);
     },
-    [activeEdit, applyAbsoluteChanges, getSelectionBounds, gridData, totalColumns]
+    [activeEdit, applyAbsoluteChanges, getSelectionBounds, gridData, onInvalidInput, totalColumns]
   );
 
   return (
@@ -547,22 +557,6 @@ const ScenarioSheetGlide: React.FC<ScenarioSheetGlideProps> = ({
           edits.forEach((edit) => updateCell(edit.location, edit.value));
         }}
         onCellActivated={handleCellActivated}
-        onHeaderClicked={(columnIndex) => {
-          if (columnIndex > 1) {
-            setSortState({ column: null, direction: "asc" });
-            return;
-          }
-          setSortState((prev) => {
-            const targetColumn = columnIndex === 0 ? "group" : "variable";
-            if (prev.column === targetColumn) {
-              return {
-                column: targetColumn,
-                direction: prev.direction === "asc" ? "desc" : "asc",
-              };
-            }
-            return { column: targetColumn, direction: "asc" };
-          });
-        }}
         rangeSelect="rect"
         // glide-data-grid has its own window-level paste listener that, with no onPaste
         // prop, async-reads the clipboard and writes a single target cell — it resolves

@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import {
   Area,
@@ -290,7 +290,7 @@ export default function PredictPage() {
   }, []);
 
   const requestScenarioSummary = useCallback(
-    async (customAdjustments: Record<string, Record<string, PeriodValue>>) => {
+    async (customAdjustments: Record<string, Record<string, PeriodValue>>, signal?: AbortSignal) => {
       if (!selectedModel) {
         throw new Error("Select a model first");
       }
@@ -305,22 +305,38 @@ export default function PredictPage() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
+        signal,
       });
       return data;
     },
     [selectedModel, horizon, startDate, freq]
   );
 
+  // Guards against the race BITACORA documented on 2026-08-13: without this, an older
+  // in-flight preview (e.g. the auto-fetch from fetchBaselineVariables) can resolve after a
+  // newer one (e.g. a manual "Previsualizar escenario" click) and silently overwrite it with
+  // stale KPIs. Same pattern as transform/page.tsx's previewAbortRef.
+  const previewAbortRef = useRef<AbortController | null>(null);
+
   const fetchPreview = useCallback(async () => {
     if (!selectedModel) return;
+    if (previewAbortRef.current) {
+      previewAbortRef.current.abort();
+    }
+    const controller = new AbortController();
+    previewAbortRef.current = controller;
     setPreviewLoading(true);
     try {
-      const data = await requestScenarioSummary(adjustments);
+      const data = await requestScenarioSummary(adjustments, controller.signal);
       setPreview(data);
     } catch (error: any) {
+      if (error?.name === "AbortError") return;
       toast.error(error?.message || "Preview failed");
     } finally {
-      setPreviewLoading(false);
+      if (previewAbortRef.current === controller) {
+        setPreviewLoading(false);
+        previewAbortRef.current = null;
+      }
     }
   }, [selectedModel, adjustments, requestScenarioSummary]);
 
@@ -410,6 +426,12 @@ export default function PredictPage() {
       );
     },
     [editablePeriods, variables]
+  );
+  const handleInvalidGridInput = useCallback(
+    (count: number) => {
+      toast.error(t("builder.invalidInput", { count }));
+    },
+    [t]
   );
   const handleApplyAllocations = useCallback(
     (allocations: ChannelAllocation[]) => {
@@ -1084,6 +1106,7 @@ export default function PredictPage() {
                     onMultipliersChange={handleGridMultipliersChange}
                     groupColumnLabel={t("builder.colGroup")}
                     variableColumnLabel={t("builder.colVariable")}
+                    onInvalidInput={handleInvalidGridInput}
                   />
                 ) : (
                   <ScenarioSheetTable
@@ -1094,6 +1117,7 @@ export default function PredictPage() {
                     onMultipliersChange={handleGridMultipliersChange}
                     groupColumnLabel={t("builder.colGroup")}
                     variableColumnLabel={t("builder.colVariable")}
+                    onInvalidInput={handleInvalidGridInput}
                   />
                 )}
               </Card>

@@ -266,6 +266,7 @@
       "confirmDelete": {
         "title": "Eliminar modelo",
         "body": "¿Eliminar el modelo \"{name}\"? Esta acción no se puede deshacer.",
+        "scenarioWarning": "Este modelo tiene {count} escenario(s) guardado(s) en Predict — eliminarlo también los eliminará a ellos.",
         "confirm": "Eliminar"
       }
     },
@@ -535,7 +536,8 @@
       "exporting": "Exportando...",
       "empty": "Selecciona un modelo para cargar las variables.",
       "colGroup": "Grupo",
-      "colVariable": "Variable"
+      "colVariable": "Variable",
+      "invalidInput": "{count} celda(s) no se pudieron pegar: el valor no es un número"
     },
     "totals": {
       "title": "Totales proyectados",

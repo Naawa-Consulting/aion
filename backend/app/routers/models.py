@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 import statsmodels.api as sm
 from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy import func
 from sqlmodel import Session, select, delete
 from statsmodels.stats.outliers_influence import variance_inflation_factor
 from statsmodels.stats.stattools import durbin_watson
@@ -36,6 +37,7 @@ from ..schemas import (
     UpdateModelRequest,
     ModelOut,
     ModelMetricsOut,
+    ModelDependencyInfo,
     ModelRoleRequest,
     ModelSummaryResponse,
     CoefficientItem,
@@ -535,6 +537,26 @@ def create_best_stepwise_model(
         raise HTTPException(status_code=500, detail="Failed to compute metrics for new model")
     invalidate_cache_for_model(new_model.id)
     return _model_to_out(new_model, metrics)
+
+
+@router.get("/{model_id}/dependencies", response_model=ModelDependencyInfo)
+def model_dependencies(
+    model_id: str,
+    membership: CurrentMembership = Depends(get_current_membership),
+    session: Session = Depends(get_session),
+):
+    """Counts a model's scenarios before deletion, so the confirmation modal can warn that
+    deleting the model cascades to any planner work built on top of it (see delete_model
+    below) — same intent as datasets.py::_dependency_counts, computed on demand instead of
+    eagerly for every model in the list (a model has nothing else worth calling out: its
+    ModelMetrics/ModelTransform rows are internal bookkeeping, not another user's work)."""
+    get_scoped(session, Model, model_id, membership.company_id)
+    scenario_count = session.exec(
+        select(func.count())
+        .select_from(Scenario)
+        .where(Scenario.model_id == model_id, Scenario.company_id == membership.company_id)
+    ).one()
+    return ModelDependencyInfo(scenarios=int(scenario_count))
 
 
 @router.delete("/{model_id}")

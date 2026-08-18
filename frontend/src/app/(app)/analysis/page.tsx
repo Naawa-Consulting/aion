@@ -40,7 +40,7 @@ import { Disclosure } from "@/components/ui/disclosure";
 import { Tabs } from "@/components/ui/tabs";
 import { ToggleChip } from "@/components/ui/toggle-chip";
 import { Table, TableHeader, TableRow, Th, TableCell } from "@/components/ui/table";
-import { chartColor, useStableCategoricalColor } from "@/lib/chart-colors";
+import { assignCategoricalColors, chartColor, useStableCategoricalColor } from "@/lib/chart-colors";
 import { formatChartNumber, formatChartPercent, formatCurrency } from "@/lib/chart-format";
 import { EMPTY_VALUE } from "@/lib/format";
 import { downloadBlob } from "@/lib/download";
@@ -656,19 +656,35 @@ export default function AnalysisPage() {
   );
   const baselineGroup = summary?.groups.find((g: any) => g.group_id === "baseline");
 
+  // Same two-step pattern as executive-summary/page.tsx: color assignment is keyed off an
+  // alphabetically-sorted name list (order-of-appearance-independent, so a group always maps
+  // to the same color regardless of which page/chart renders first), while the *display*
+  // order below stays sorted by magnitude — a group's color never changes with its rank.
+  const groupColorMap = useMemo(() => {
+    if (!summary) return {};
+    const colorOrder = [...nonBaselineGroups]
+      .map((g: any) => g.group_name || g.group_id || "")
+      .sort((a, b) => a.localeCompare(b));
+    return assignCategoricalColors(colorOrder, isDarkTheme);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [summary, nonBaselineGroups, isDarkTheme]);
+
   // Proportion bar: one 100%-stacked bar instead of N separate cards/bars — resolves the
   // KPI-grid "holes" the Fase 7 audit flagged (fewer than 4 groups left empty slots).
   const proportionSegments = useMemo(() => {
     if (!summary) return [];
     const segments = [...nonBaselineGroups]
       .sort((a: any, b: any) => Math.abs(b.contribution) - Math.abs(a.contribution))
-      .map((g: any) => ({
-        key: g.group_name || g.group_id,
-        name: g.group_name || g.group_id,
-        percent: g.percent ?? (summary.total_contribution ? (g.contribution / summary.total_contribution) * 100 : 0),
-        contribution: g.contribution,
-        color: colorFor(g.group_name || g.group_id, isDarkTheme),
-      }));
+      .map((g: any) => {
+        const key = g.group_name || g.group_id;
+        return {
+          key,
+          name: key,
+          percent: g.percent ?? (summary.total_contribution ? (g.contribution / summary.total_contribution) * 100 : 0),
+          contribution: g.contribution,
+          color: groupColorMap[key] ?? mutedColor,
+        };
+      });
     if (baselineGroup) {
       segments.unshift({
         key: BASELINE_KEY,
@@ -683,7 +699,7 @@ export default function AnalysisPage() {
     }
     return segments;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [summary, nonBaselineGroups, baselineGroup, isDarkTheme, t]);
+  }, [summary, nonBaselineGroups, baselineGroup, groupColorMap, t]);
 
   const hasSubgroups = summary?.subgroups?.some((sg: any) => sg.subgroup_id && sg.subgroup_id !== "baseline") ?? false;
 

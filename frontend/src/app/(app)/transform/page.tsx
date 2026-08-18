@@ -285,7 +285,10 @@ export default function TransformPage() {
     try {
       const data = await apiFetch<Dataset[]>("/datasets");
       setDatasets(data);
-      if (!datasetId && data.length) {
+      // Only reassign when the current selection (persisted from a previous session, or a
+      // stale id whose dataset was deleted) isn't in the fresh list — never override an
+      // active, still-valid selection with "most recently created" on every fetch.
+      if (data.length && !data.some((ds) => ds.id === datasetId)) {
         setDatasetId(data[0].id);
       }
     } catch {

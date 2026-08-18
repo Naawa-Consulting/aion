@@ -218,6 +218,9 @@ export default function ModelingPage() {
   const [bestLoadingId, setBestLoadingId] = useState<string | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<Model | null>(null);
   const [deleteLoading, setDeleteLoading] = useState(false);
+  // null = still loading/unknown, so the warning only ever appears once we actually know a
+  // model has scenarios — never omitted just because the count hasn't arrived yet.
+  const [deleteScenarioCount, setDeleteScenarioCount] = useState<number | null>(null);
   const [detailOpen, setDetailOpen] = useState(false);
   const [activeTab, setActiveTab] = useState("models");
   const autoOpenedRef = useRef(false);
@@ -452,6 +455,14 @@ export default function ModelingPage() {
     setXSelected(model.x_vars);
     setApplyMediaTransforms(model.apply_media_transforms);
     setActiveTab("builder");
+  };
+
+  const openDeleteModal = (model: Model) => {
+    setDeleteTarget(model);
+    setDeleteScenarioCount(null);
+    apiFetch<{ scenarios: number }>(`/models/${model.id}/dependencies`)
+      .then((data) => setDeleteScenarioCount(data.scenarios))
+      .catch(() => setDeleteScenarioCount(0));
   };
 
   const confirmDeleteModel = async () => {
@@ -1054,7 +1065,7 @@ export default function ModelingPage() {
                             {bestLoadingId === m.id ? t("models.actionBestRunning") : t("models.actionBest")}
                           </DropdownItem>
                           <DropdownItem
-                            onClick={() => setDeleteTarget(m)}
+                            onClick={() => openDeleteModal(m)}
                             disabled={!canEdit}
                             title={!canEdit ? tCommon("readOnlyTooltip") : undefined}
                             className="text-bad"
@@ -1457,6 +1468,11 @@ export default function ModelingPage() {
 
       <Modal open={Boolean(deleteTarget)} onClose={() => setDeleteTarget(null)} title={t("models.confirmDelete.title")}>
         <p className="text-sm text-ink">{t("models.confirmDelete.body", { name: deleteTarget?.name || "" })}</p>
+        {deleteScenarioCount != null && deleteScenarioCount > 0 && (
+          <div className="mt-3 rounded-lg border border-bad/50 bg-bad-bg p-3 text-sm text-bad">
+            {t("models.confirmDelete.scenarioWarning", { count: deleteScenarioCount })}
+          </div>
+        )}
         <div className="mt-5 flex justify-end gap-2">
           <Button variant="ghost" onClick={() => setDeleteTarget(null)} disabled={deleteLoading}>
             {tCommon("cancel")}

@@ -76,7 +76,11 @@ export const useGlobalStore = create<GlobalState>()(
     }),
     {
       name: "aion-global-store",
-      partialize: (state) => ({ activeCompanyId: state.activeCompanyId }),
+      partialize: (state) => ({
+        activeCompanyId: state.activeCompanyId,
+        datasetId: state.datasetId,
+        modelId: state.modelId,
+      }),
     }
   )
 );

@@ -100,6 +100,11 @@ fallback, just not localized).
 - Create models: `POST /models` with `dataset_id`, `name`, `y_var`, `x_vars`.
 - Update/re-fit: `PATCH /models/{id}` to rename and/or change predictors (re-computes metrics).
 - Delete: `DELETE /models/{id}` removes metrics, transform params, and dependent scenarios.
+- Dependencies (Fase 8, Fase 0): `GET /models/{id}/dependencies` ⇒ `{scenarios: int}` — scenario
+  count for that model, computed on demand (not eagerly like `DatasetOut.dependencies`, since a
+  model has no other cross-user dependency worth surfacing). Frontend calls it when opening the
+  delete-confirmation modal in `/modeling`, to warn that deleting a model cascades to any Predict
+  scenarios built on top of it — same intent as the dataset delete modal's dependency list.
 - Roles: `POST /models/{id}/role` with `hero|challenger1|challenger2|none` (enforces 1 Hero + 2 Challengers max). Legacy `/hero` endpoint still works.
 - Summary: `GET /models/{id}/summary` ⇒ intercept + coefficients with β, std err, t, p, VIF, plus
   (new) `is_media`, `decay`, `half_life`, `hill_k`, `hill_s`, `lag`, `raw_mean` per coefficient when

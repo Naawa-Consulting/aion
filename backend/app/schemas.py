@@ -16,6 +16,10 @@ class DatasetDependencyInfo(BaseModel):
     scenarios: int = 0
 
 
+class ModelDependencyInfo(BaseModel):
+    scenarios: int = 0
+
+
 class DatasetOut(BaseModel):
     id: str
     display_name: str
