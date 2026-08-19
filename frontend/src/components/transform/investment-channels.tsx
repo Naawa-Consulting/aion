@@ -37,12 +37,6 @@ type InvestmentChannel = {
   created_at: string;
 };
 
-const SOURCE_MODE_LABEL: Record<SourceMode, string> = {
-  dataset_column: "Columna del dataset",
-  rate_metric: "Tasa × métrica",
-  manual: "Manual",
-};
-
 const NO_PROXY = "__none__";
 
 function emptyForm() {
@@ -68,8 +62,15 @@ export function InvestmentChannels({
   datasetColumns: { name: string; dtype: string }[];
   canEdit: boolean;
 }) {
+  const t = useTranslations("transform.investmentChannels");
+  const tCommon = useTranslations("common");
   const tErrors = useTranslations("errors");
   const tToasts = useTranslations("transform.investmentChannels.toasts");
+  const SOURCE_MODE_LABEL: Record<SourceMode, string> = {
+    dataset_column: t("sourceModeDatasetColumn"),
+    rate_metric: t("sourceModeRateMetric"),
+    manual: t("sourceModeManual"),
+  };
   const [channels, setChannels] = useState<InvestmentChannel[]>([]);
   const [loading, setLoading] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
@@ -192,12 +193,12 @@ export function InvestmentChannels({
   const handleSubmit = async () => {
     const name = form.name.trim();
     if (!name) {
-      setFormError("Name cannot be empty");
+      setFormError(t("nameRequired"));
       return;
     }
     const config = buildConfig();
     if (!config) {
-      setFormError("Complete the required fields for the selected source mode");
+      setFormError(t("configIncomplete"));
       return;
     }
     setSaving(true);
@@ -216,14 +217,14 @@ export function InvestmentChannels({
             unset_proxy_variable: proxy_variable === null,
           }),
         });
-        toast.success(`Channel "${name}" updated`);
+        toast.success(tToasts("updated", { name }));
       } else {
         await apiFetch("/economics/channels", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ dataset_id: datasetId, name, source_mode: form.source_mode, config, proxy_variable }),
         });
-        toast.success(`Channel "${name}" created`);
+        toast.success(tToasts("created", { name }));
       }
       closeModal();
       fetchChannels();
@@ -239,7 +240,7 @@ export function InvestmentChannels({
     setDeleteLoading(true);
     try {
       await apiFetch(`/economics/channels/${deleteTarget.id}`, { method: "DELETE" });
-      toast.success(`Channel "${deleteTarget.name}" deleted`);
+      toast.success(tToasts("deleted", { name: deleteTarget.name }));
       setDeleteTarget(null);
       fetchChannels();
     } catch (error: any) {
@@ -254,24 +255,21 @@ export function InvestmentChannels({
   return (
     <Card className="space-y-4">
       <div className="flex items-center justify-between">
-        <CardHeader title="Canales de inversión" subtitle="Costo real por canal, desacoplado de las variables del modelo" />
+        <CardHeader title={t("title")} subtitle={t("subtitle")} />
         <Button
           size="sm"
           onClick={openCreate}
           disabled={!canEdit || !datasetId}
-          title={!canEdit ? "Solo lectura: tu rol es Visualizador" : undefined}
+          title={!canEdit ? tCommon("readOnlyTooltip") : undefined}
         >
-          <Plus size={14} className="mr-1 inline" /> Agregar canal
+          <Plus size={14} className="mr-1 inline" /> {t("add")}
         </Button>
       </div>
 
       {loading ? (
-        <p className="text-sm text-muted">Loading…</p>
+        <p className="text-sm text-muted">{t("loading")}</p>
       ) : channels.length === 0 ? (
-        <p className="text-sm text-muted">
-          Sin canales configurados para este dataset. Un canal representa el gasto real ($) de un medio,
-          independiente de si su variable entró al modelo.
-        </p>
+        <p className="text-sm text-muted">{t("emptyDescription")}</p>
       ) : (
         <div className="space-y-2">
           {channels.map((channel) => (
@@ -283,9 +281,9 @@ export function InvestmentChannels({
                 <span className="font-medium">{channel.name}</span>
                 <Badge>{SOURCE_MODE_LABEL[channel.source_mode]}</Badge>
                 {channel.proxy_variable ? (
-                  <Badge variant="success">proxy: {channel.proxy_variable}</Badge>
+                  <Badge variant="success">{t("proxyBadge", { name: channel.proxy_variable })}</Badge>
                 ) : (
-                  <Badge variant="warning">no modelado</Badge>
+                  <Badge variant="warning">{t("notModeledBadge")}</Badge>
                 )}
               </div>
               <div className="flex items-center gap-1">
@@ -294,7 +292,7 @@ export function InvestmentChannels({
                   className="rounded-full p-1.5 text-muted hover:text-accent disabled:cursor-not-allowed disabled:opacity-60"
                   onClick={() => openEdit(channel)}
                   disabled={!canEdit}
-                  title={!canEdit ? "Solo lectura: tu rol es Visualizador" : "Edit"}
+                  title={!canEdit ? tCommon("readOnlyTooltip") : t("edit")}
                 >
                   <Pencil size={14} />
                 </button>
@@ -303,7 +301,7 @@ export function InvestmentChannels({
                   className="rounded-full p-1.5 text-muted hover:text-bad disabled:cursor-not-allowed disabled:opacity-60"
                   onClick={() => setDeleteTarget(channel)}
                   disabled={!canEdit}
-                  title={!canEdit ? "Solo lectura: tu rol es Visualizador" : "Delete"}
+                  title={!canEdit ? tCommon("readOnlyTooltip") : t("delete")}
                 >
                   <Trash2 size={14} />
                 </button>
@@ -313,34 +311,34 @@ export function InvestmentChannels({
         </div>
       )}
 
-      <Modal open={modalOpen} onClose={closeModal} title={editingId ? "Editar canal" : "Nuevo canal de inversión"}>
+      <Modal open={modalOpen} onClose={closeModal} title={editingId ? t("modalTitleEdit") : t("modalTitleCreate")}>
         <div className="space-y-4">
           <div className="space-y-2">
-            <Eyebrow>Nombre</Eyebrow>
-            <Input value={form.name} onChange={(e) => setForm((p) => ({ ...p, name: e.target.value }))} placeholder="YouTube" />
+            <Eyebrow>{t("nameLabel")}</Eyebrow>
+            <Input value={form.name} onChange={(e) => setForm((p) => ({ ...p, name: e.target.value }))} placeholder={t("namePlaceholder")} />
           </div>
 
           <div className="space-y-2">
-            <Eyebrow>Fuente de inversión</Eyebrow>
+            <Eyebrow>{t("sourceLabel")}</Eyebrow>
             <Select
               value={form.source_mode}
               onChange={(e) => setForm((p) => ({ ...p, source_mode: e.target.value as SourceMode }))}
             >
-              <option value="dataset_column">Columna del dataset</option>
-              <option value="rate_metric">Tasa × métrica</option>
-              <option value="manual">Manual</option>
+              <option value="dataset_column">{t("sourceModeDatasetColumn")}</option>
+              <option value="rate_metric">{t("sourceModeRateMetric")}</option>
+              <option value="manual">{t("sourceModeManual")}</option>
             </Select>
           </div>
 
           {form.source_mode === "dataset_column" && (
             <div className="space-y-2">
-              <Eyebrow>Columna de costo ($)</Eyebrow>
+              <Eyebrow>{t("costColumnLabel")}</Eyebrow>
               <div>
                 <Input
                   list="channel-cost-columns"
                   value={form.cost_column}
                   onChange={(e) => setForm((p) => ({ ...p, cost_column: e.target.value }))}
-                  placeholder="spend_youtube"
+                  placeholder={t("costColumnPlaceholder")}
                 />
                 <datalist id="channel-cost-columns">
                   {columnOptions.map((name) => (
@@ -354,7 +352,7 @@ export function InvestmentChannels({
           {form.source_mode === "rate_metric" && (
             <div className="grid gap-3 md:grid-cols-2">
               <div className="space-y-2">
-                <Eyebrow>Tasa (ej. CPV)</Eyebrow>
+                <Eyebrow>{t("rateLabel")}</Eyebrow>
                 <Input
                   type="number"
                   step="0.0001"
@@ -364,13 +362,13 @@ export function InvestmentChannels({
                 />
               </div>
               <div className="space-y-2">
-                <Eyebrow>Columna de métrica</Eyebrow>
+                <Eyebrow>{t("metricColumnLabel")}</Eyebrow>
                 <div>
                   <Input
                     list="channel-metric-columns"
                     value={form.metric_column}
                     onChange={(e) => setForm((p) => ({ ...p, metric_column: e.target.value }))}
-                    placeholder="youtube_views"
+                    placeholder={t("metricColumnPlaceholder")}
                   />
                   <datalist id="channel-metric-columns">
                     {columnOptions.map((name) => (
@@ -384,14 +382,14 @@ export function InvestmentChannels({
 
           {form.source_mode === "manual" && (
             <div className="space-y-2">
-              <Eyebrow>Periodos de inversión</Eyebrow>
+              <Eyebrow>{t("manualPeriodsLabel")}</Eyebrow>
               <div className="space-y-2">
                 {form.entries.map((entry, index) => (
                   <div key={index} className="flex items-center gap-2">
                     <Input
                       type="number"
                       step="0.01"
-                      placeholder="Monto"
+                      placeholder={t("amountPlaceholder")}
                       value={entry.amount}
                       onChange={(e) => updateEntry(index, "amount", e.target.value)}
                       className="w-28"
@@ -417,18 +415,18 @@ export function InvestmentChannels({
                 ))}
               </div>
               <Button variant="ghost" size="sm" onClick={addEntryRow}>
-                <Plus size={14} className="mr-1 inline" /> Agregar periodo
+                <Plus size={14} className="mr-1 inline" /> {t("addPeriod")}
               </Button>
             </div>
           )}
 
           <div className="space-y-2">
-            <Eyebrow>Variable proxy (modelo)</Eyebrow>
+            <Eyebrow>{t("proxyLabel")}</Eyebrow>
             <Select
               value={form.proxy_variable}
               onChange={(e) => setForm((p) => ({ ...p, proxy_variable: e.target.value }))}
             >
-              <option value={NO_PROXY}>— sin variable de modelo (no modelado) —</option>
+              <option value={NO_PROXY}>{t("proxyNone")}</option>
               {proxyOptions.map((name) => (
                 <option key={name} value={name}>
                   {name}
@@ -436,9 +434,8 @@ export function InvestmentChannels({
               ))}
             </Select>
             <p className="text-xs text-muted">
-              Qué variable del modelo representa este canal. Si no se selecciona, la inversión sigue contando en
-              el total pero no se le atribuye contribución/ROI.
-              {heroXVars && " Solo se muestran las variables del modelo Hero actual, para evitar desalineamiento."}
+              {t("proxyHelp")}
+              {heroXVars && ` ${t("proxyHeroNote")}`}
             </p>
           </div>
 
@@ -446,10 +443,10 @@ export function InvestmentChannels({
 
           <div className="flex justify-end gap-2">
             <Button variant="ghost" onClick={closeModal} disabled={saving}>
-              Cancel
+              {tCommon("cancel")}
             </Button>
             <Button onClick={handleSubmit} disabled={saving}>
-              {saving ? "Saving…" : editingId ? "Save changes" : "Create channel"}
+              {saving ? t("saving") : editingId ? t("save") : t("create")}
             </Button>
           </div>
         </div>
@@ -458,14 +455,14 @@ export function InvestmentChannels({
       {deleteTarget && (
         <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center px-4">
           <div className="w-full max-w-md rounded-2xl bg-surface p-6 shadow-lg space-y-4">
-            <h3 className="text-lg font-semibold">Delete channel &quot;{deleteTarget.name}&quot;?</h3>
-            <ErrorText className="text-xs">This action cannot be undone.</ErrorText>
+            <h3 className="text-lg font-semibold">{t("deleteTitle", { name: deleteTarget.name })}</h3>
+            <ErrorText className="text-xs">{t("deleteBody")}</ErrorText>
             <div className="flex justify-end gap-2">
               <Button variant="ghost" onClick={() => setDeleteTarget(null)} disabled={deleteLoading}>
-                Cancel
+                {tCommon("cancel")}
               </Button>
               <Button variant="danger" onClick={confirmDelete} disabled={deleteLoading}>
-                {deleteLoading ? "Deleting..." : "Delete channel"}
+                {deleteLoading ? t("deleting") : t("deleteConfirm")}
               </Button>
             </div>
           </div>

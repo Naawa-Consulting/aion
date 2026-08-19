@@ -71,10 +71,39 @@ fallback, just not localized).
   Transform op, independent of the per-model automatic transform described below. UI: "Hill (saturation)"/
   "Adstock (carryover)" added to the operation `Select` in `/transform`'s "Create transformation" card, with
   matching K/S or decay inputs.
-- `POST /variables/transform/preview` (live preview of a transform before saving it, `{ time, original,
-  transformed, stats }`) now also computes `stats.correlation_dependent_before`/`correlation_dependent_after`
-  (original/transformed correlated against `Dataset.dependent_variable`, `null` when unset or when the
-  transformed column itself is the dependent variable) alongside the existing before/after `stats.correlation`.
+- `POST /variables/transform/preview` (live preview of a transform before saving it) response shape
+  (Fase 8/Fase 3, T2/T3/T4): `{ time, original, transformed, dependent, dependent_label, stats }`.
+  `original` and `dependent` are now `null` (not an empty/zero-filled array) when they don't apply —
+  `original` is `null` for the 4 generator ops below (there's no source column to compare against),
+  `dependent` is `null` whenever `Dataset.dependent_variable` isn't set. `stats.correlation` (original
+  vs transformed) is only present when `original` is; `stats.correlation_dependent_before`/`_after`
+  (original vs dependent / transformed vs dependent) are present whenever `dependent` is, replacing
+  the earlier, less useful `corr(original, transformed)` as the headline correlation once a dependent
+  variable exists. UI (`/transform`): the preview chart is now a `ComposedChart` — `original` as bars
+  on a left Y axis, `transformed` as a line on a separate right Y axis (fixes the Hill saturation
+  preview, T4: Hill's `[0,1]` output was flattening to a line at zero against raw values in the
+  millions sharing one axis), `dependent` as a third, dashed line on its own hidden axis (scale
+  isolation only, not a 3rd set of visible ticks).
+- **Adstock lag (Fase 8/Fase 3, T1)**: the manual `adstock` transform op now accepts an optional
+  `lag: int` (`TransformRequest.lag` / preview `params.lag`, default `0`) applied before the decay,
+  identical to the lag step in `services/media_transform.py::apply_media_transform` used by the
+  automatic per-model search — previously only the automatic search could combine lag+adstock in one
+  step; the manual builder required a separate `lag` transform chained into a second `adstock`
+  transform. UI: a "Lag, periodos (opcional)" input next to "Adstock (arrastre)"'s decay input.
+- **Variable generators (Fase 8/Fase 3, T5/D6)**: `TransformOp` gained 4 new values that generate a
+  column from scratch instead of transforming an existing one — `constant` (`value: float`),
+  `date_dummy` (`start_date`/`end_date`, requires `Dataset.time_variable` set, 400
+  `TIME_VARIABLE_REQUIRED` otherwise), `trend` (no params — 0-based chronological rank via a shared
+  `_time_order()` helper, falling back to row order when there's no time variable), and `fourier`
+  (`period: float`, `harmonic: int` default `1`, `trig: "sin"|"cos"` default `"sin"` — `sin/cos(2π ·
+  harmonic · time_order / period)`). All four work through both `POST /variables/transform` and
+  `/transform/preview` identically. UI: a second `<optgroup>` ("Generar variable nueva") in the
+  operation `Select`.
+- **Seasonal flag UI (Fase 8/Fase 3, T6-UI)**: the `is_seasonal` group/subgroup flags added
+  backend-only in Fase 1 (see above) now have a checkbox in `/transform`'s "Groups & Subgroups" card
+  (mirrors `apply_media_transform`/`is_baseline`), gated behind the same company-wide-retroactive-flag
+  confirmation modal used for those two (extended to a 3rd `kind: "seasonal"` and an optional
+  `subgroup` field so the one modal handles both group- and subgroup-level seasonal toggles).
 - Group assignment compatibility route `/groups/assign` now updates the variable record directly.
 - **Media flag**: `Group`/`Subgroup` now carry `apply_media_transform: bool` (default `false`).
   `GET /groups` returns it on every group/subgroup; `POST /groups`, `POST /groups/subgroups` accept

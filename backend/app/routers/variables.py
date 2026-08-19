@@ -167,6 +167,17 @@ def _safe_float(value):
         return None
 
 
+def _time_order(df: pd.DataFrame, ds: Dataset) -> pd.Series:
+    """0-based chronological rank of each row, aligned by df's index (not row position) so
+    generators (trend/fourier) line up correctly even when storage order isn't already
+    sorted by time. Falls back to row order when the dataset has no time_variable set."""
+    time_col = getattr(ds, "time_variable", None)
+    if time_col and time_col in df.columns:
+        times = pd.to_datetime(df[time_col], errors="coerce")
+        return times.rank(method="first").sub(1).astype(float)
+    return pd.Series(np.arange(len(df), dtype=float), index=df.index)
+
+
 def _record_history(session: Session, company_id: str, dataset_id: str, variable_id: str, op: str, payload: dict):
     history = VariableHistory(
         id=str(uuid.uuid4()),
@@ -253,8 +264,37 @@ def create_transformation(
             raise api_error(400, "INVALID_RATE_RANGE", "decay must be in [0,1)")
         if body.column not in df.columns:
             raise api_error(400, "COLUMN_NOT_FOUND", "column not found")
+        lag = int(body.lag or 0)
+        if lag < 0:
+            raise api_error(400, "INVALID_PERIODS", "lag must be positive")
         vals = pd.to_numeric(df[body.column], errors="coerce").fillna(0.0).to_numpy(dtype=float)
+        if lag > 0:
+            vals = np.concatenate([np.zeros(lag), vals[:-lag]]) if lag < vals.size else np.zeros_like(vals)
         series = pd.Series(adstock_geometric(vals, float(body.decay)), index=df.index)
+    elif op == "constant":
+        if body.value is None:
+            raise api_error(400, "TRANSFORM_PARAM_REQUIRED", "value required for constant")
+        series = pd.Series(float(body.value), index=df.index)
+    elif op == "date_dummy":
+        time_col = getattr(ds, "time_variable", None)
+        if not time_col or time_col not in df.columns:
+            raise api_error(400, "TIME_VARIABLE_REQUIRED", "Dataset must have a time variable set")
+        if not body.start_date or not body.end_date:
+            raise api_error(400, "TRANSFORM_PARAM_REQUIRED", "start_date and end_date required for date_dummy")
+        times = pd.to_datetime(df[time_col], errors="coerce")
+        start = pd.to_datetime(body.start_date)
+        end = pd.to_datetime(body.end_date)
+        series = ((times >= start) & (times <= end)).astype(int)
+    elif op == "trend":
+        series = _time_order(df, ds)
+    elif op == "fourier":
+        if not body.period:
+            raise api_error(400, "TRANSFORM_PARAM_REQUIRED", "period required for fourier")
+        harmonic = int(body.harmonic or 1)
+        trig = (body.trig or "sin").lower()
+        order = _time_order(df, ds)
+        angle = 2 * np.pi * harmonic * order / float(body.period)
+        series = pd.Series(np.sin(angle) if trig == "sin" else np.cos(angle), index=df.index)
     else:
         raise api_error(400, "UNSUPPORTED_OPERATION", "Unsupported operation")
 
@@ -453,14 +493,16 @@ def preview_transformation(
 
     params = body.params or {}
 
-    column = body.column or params.get("column")
-    if not column or column not in df.columns:
-        raise api_error(400, "COLUMN_NOT_FOUND", "column not found")
-    series = pd.to_numeric(df[column], errors="coerce")
-    if series.isna().all():
-        raise api_error(400, "COLUMN_NOT_NUMERIC", "Column has no numeric values")
-
     op = body.operation.lower()
+    column = body.column or params.get("column")
+    series: pd.Series | None = None
+    if op in {"lag", "decay", "log", "hill", "adstock"}:
+        if not column or column not in df.columns:
+            raise api_error(400, "COLUMN_NOT_FOUND", "column not found")
+        series = pd.to_numeric(df[column], errors="coerce")
+        if series.isna().all():
+            raise api_error(400, "COLUMN_NOT_NUMERIC", "Column has no numeric values")
+
     result: pd.Series | None = None
     if op == "lag":
         periods = int(params.get("periods") or params.get("n") or 1)
@@ -512,8 +554,41 @@ def preview_transformation(
         decay = float(decay_value)
         if not (0 <= decay < 1):
             raise api_error(400, "INVALID_RATE_RANGE", "decay must be in [0,1)")
+        lag = int(params.get("lag") or 0)
+        if lag < 0:
+            raise api_error(400, "INVALID_PERIODS", "lag must be positive")
         vals = series.fillna(0.0).to_numpy()
-        result = pd.Series(adstock_geometric(vals, decay), index=series.index)
+        if lag > 0:
+            vals = np.concatenate([np.zeros(lag), vals[:-lag]]) if lag < vals.size else np.zeros_like(vals)
+        result = pd.Series(adstock_geometric(vals, decay), index=df.index)
+    elif op == "constant":
+        value = params.get("value")
+        if value is None:
+            raise api_error(400, "TRANSFORM_PARAM_REQUIRED", "value required for constant")
+        result = pd.Series(float(value), index=df.index)
+    elif op == "date_dummy":
+        time_col = getattr(ds, "time_variable", None)
+        if not time_col or time_col not in df.columns:
+            raise api_error(400, "TIME_VARIABLE_REQUIRED", "Dataset must have a time variable set")
+        start_date = params.get("start_date")
+        end_date = params.get("end_date")
+        if not start_date or not end_date:
+            raise api_error(400, "TRANSFORM_PARAM_REQUIRED", "start_date and end_date required for date_dummy")
+        times = pd.to_datetime(df[time_col], errors="coerce")
+        start = pd.to_datetime(start_date)
+        end = pd.to_datetime(end_date)
+        result = ((times >= start) & (times <= end)).astype(int)
+    elif op == "trend":
+        result = _time_order(df, ds)
+    elif op == "fourier":
+        period = params.get("period")
+        if not period:
+            raise api_error(400, "TRANSFORM_PARAM_REQUIRED", "period required for fourier")
+        harmonic = int(params.get("harmonic") or 1)
+        trig = str(params.get("trig") or "sin").lower()
+        order = _time_order(df, ds)
+        angle = 2 * np.pi * harmonic * order / float(period)
+        result = pd.Series(np.sin(angle) if trig == "sin" else np.cos(angle), index=df.index)
     else:
         raise api_error(400, "UNSUPPORTED_OPERATION", "Unsupported operation")
 
@@ -529,7 +604,9 @@ def preview_transformation(
 
     limit = min(max(body.limit, 1), 1000)
     time_col = getattr(ds, "time_variable", None)
-    frame = {"original": series, "transformed": result}
+    frame = {"transformed": result}
+    if series is not None:
+        frame["original"] = series
     if dependent_series is not None:
         frame["dependent"] = dependent_series
     if time_col and time_col in df.columns:
@@ -539,35 +616,37 @@ def preview_transformation(
     else:
         combined = pd.DataFrame(frame).head(limit)
         time_values = list(range(len(combined)))
-    original_values = combined["original"].tolist()
     transformed_values = combined["transformed"].tolist()
-    dependent_values = combined["dependent"].tolist() if dependent_series is not None else None
+    original_values = combined["original"].tolist() if "original" in combined.columns else None
+    dependent_values = combined["dependent"].tolist() if "dependent" in combined.columns else None
 
-    original_series = pd.Series(original_values, dtype="float64")
-    transformed_series = pd.Series(transformed_values, dtype="float64")
-    original_mean = original_series.dropna().mean()
-    transformed_mean = transformed_series.dropna().mean()
-    corr = original_series.corr(transformed_series)
+    transformed_series_s = pd.Series(transformed_values, dtype="float64")
+    transformed_mean = transformed_series_s.dropna().mean()
+    stats: dict = {"mean_transformed": 0.0 if pd.isna(transformed_mean) else float(transformed_mean)}
 
-    corr_dependent_before = None
-    corr_dependent_after = None
+    original_series_s = None
+    if original_values is not None:
+        original_series_s = pd.Series(original_values, dtype="float64")
+        original_mean = original_series_s.dropna().mean()
+        stats["mean_original"] = 0.0 if pd.isna(original_mean) else float(original_mean)
+        corr = original_series_s.corr(transformed_series_s)
+        stats["correlation"] = 0.0 if pd.isna(corr) else float(corr)
+
     if dependent_values is not None:
         dependent_series_s = pd.Series(dependent_values, dtype="float64")
-        corr_before = original_series.corr(dependent_series_s)
-        corr_after = transformed_series.corr(dependent_series_s)
-        corr_dependent_before = None if pd.isna(corr_before) else float(corr_before)
-        corr_dependent_after = None if pd.isna(corr_after) else float(corr_after)
+        corr_after = transformed_series_s.corr(dependent_series_s)
+        stats["correlation_dependent_after"] = None if pd.isna(corr_after) else float(corr_after)
+        corr_before = None
+        if original_series_s is not None:
+            corr_before_val = original_series_s.corr(dependent_series_s)
+            corr_before = None if pd.isna(corr_before_val) else float(corr_before_val)
+        stats["correlation_dependent_before"] = corr_before
 
-    stats = {
-        "mean_original": 0.0 if pd.isna(original_mean) else float(original_mean),
-        "mean_transformed": 0.0 if pd.isna(transformed_mean) else float(transformed_mean),
-        "correlation": 0.0 if pd.isna(corr) else float(corr),
-        "correlation_dependent_before": corr_dependent_before,
-        "correlation_dependent_after": corr_dependent_after,
-    }
     return {
         "time": time_values,
-        "original": [None if pd.isna(x) else float(x) for x in original_values],
+        "original": [None if pd.isna(x) else float(x) for x in original_values] if original_values is not None else None,
         "transformed": [None if pd.isna(x) else float(x) for x in transformed_values],
+        "dependent": [None if pd.isna(x) else float(x) for x in dependent_values] if dependent_values is not None else None,
+        "dependent_label": dependent_col if dependent_values is not None else None,
         "stats": stats,
     }

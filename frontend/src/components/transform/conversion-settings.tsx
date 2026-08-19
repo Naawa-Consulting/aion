@@ -44,6 +44,7 @@ function MetricEditor({
   onChange: (next: MetricInput) => void;
   datasetColumns: { name: string; dtype: string }[];
 }) {
+  const t = useTranslations("transform.conversionSettings");
   return (
     <div className="space-y-2">
       <Eyebrow>{label}</Eyebrow>
@@ -51,9 +52,9 @@ function MetricEditor({
         value={value.source_mode}
         onChange={(e) => onChange({ source_mode: e.target.value as SourceMode, config: {} })}
       >
-        <option value="manual">Valor fijo</option>
-        <option value="dataset_column">Columna del dataset</option>
-        <option value="rate_metric">Tasa × métrica</option>
+        <option value="manual">{t("modeManual")}</option>
+        <option value="dataset_column">{t("modeColumn")}</option>
+        <option value="rate_metric">{t("modeRate")}</option>
       </Select>
       {value.source_mode === "manual" && (
         <Input
@@ -69,7 +70,7 @@ function MetricEditor({
           value={value.config.column ?? ""}
           onChange={(e) => onChange({ ...value, config: { column: e.target.value } })}
         >
-          <option value="">Select column</option>
+          <option value="">{t("selectColumn")}</option>
           {datasetColumns.map((col) => (
             <option key={col.name} value={col.name}>
               {col.name}
@@ -86,13 +87,13 @@ function MetricEditor({
             onChange={(e) =>
               onChange({ ...value, config: { ...value.config, rate_value: parseFloat(e.target.value) || 0 } })
             }
-            placeholder="Rate"
+            placeholder={t("ratePlaceholder")}
           />
           <Select
             value={value.config.metric_column ?? ""}
             onChange={(e) => onChange({ ...value, config: { ...value.config, metric_column: e.target.value } })}
           >
-            <option value="">Select column</option>
+            <option value="">{t("selectColumn")}</option>
             {datasetColumns.map((col) => (
               <option key={col.name} value={col.name}>
                 {col.name}
@@ -114,6 +115,8 @@ export function ConversionSettingsCard({
   datasetColumns: { name: string; dtype: string }[];
   canEdit: boolean;
 }) {
+  const t = useTranslations("transform.conversionSettings");
+  const tCommon = useTranslations("common");
   const tErrors = useTranslations("errors");
   const tToasts = useTranslations("transform.conversionSettings.toasts");
   const [conversionRate, setConversionRate] = useState<MetricInput>(emptyMetric());
@@ -187,31 +190,28 @@ export function ConversionSettingsCard({
 
   return (
     <Card className="space-y-4">
-      <CardHeader
-        title="Conversion settings"
-        subtitle="Tasa de conversión y valor promedio para ROI/ROAS en Analysis"
-      />
+      <CardHeader title={t("title")} subtitle={t("subtitle")} />
       {loading ? (
-        <p className="text-sm text-muted">Loading…</p>
+        <p className="text-sm text-muted">{t("loading")}</p>
       ) : (
         <>
           <div className="grid gap-4 md:grid-cols-2">
             <MetricEditor
-              label="Tasa de conversión"
+              label={t("conversionRateLabel")}
               value={conversionRate}
               onChange={setConversionRate}
               datasetColumns={datasetColumns}
             />
-            <MetricEditor label="Valor promedio" value={avgValue} onChange={setAvgValue} datasetColumns={datasetColumns} />
+            <MetricEditor label={t("avgValueLabel")} value={avgValue} onChange={setAvgValue} datasetColumns={datasetColumns} />
           </div>
           <div className="flex gap-2 justify-end">
             {configured && (
               <Button variant="ghost" size="sm" onClick={handleClear} disabled={!canEdit || saving}>
-                Clear
+                {t("clear")}
               </Button>
             )}
             <Button size="sm" onClick={handleSave} disabled={!canEdit || saving}>
-              {saving ? "Saving..." : "Save"}
+              {saving ? t("saving") : tCommon("save")}
             </Button>
           </div>
         </>

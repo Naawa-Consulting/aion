@@ -5,16 +5,17 @@ import { toast } from "sonner";
 import { useTranslations } from "next-intl";
 import { useTheme } from "next-themes";
 import clsx from "clsx";
-import { Pencil, Trash2, GripVertical } from "lucide-react";
+import { Pencil, Trash2, GripVertical, Info } from "lucide-react";
 import {
   ResponsiveContainer,
-  LineChart,
+  ComposedChart,
   CartesianGrid,
   XAxis,
   YAxis,
   Tooltip as RechartsTooltip,
   Legend,
   Line,
+  Bar,
 } from "recharts";
 
 import { Card, CardHeader } from "@/components/ui/card";
@@ -30,6 +31,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Modal } from "@/components/ui/modal";
 import { RowActions } from "@/components/ui/row-actions";
 import { IconButton } from "@/components/ui/icon-button";
+import { Tooltip as InfoPopover } from "@/components/ui/tooltip";
 import { useGlobalStore } from "@/lib/store";
 import { useKeyboardShortcut } from "@/hooks/useKeyboardShortcut";
 import { apiFetch, ApiError } from "@/lib/api";
@@ -59,15 +61,37 @@ type Group = {
   name: string;
   apply_media_transform: boolean;
   is_baseline: boolean;
-  subgroups: { id: string; name: string; group_id: string; apply_media_transform: boolean }[];
+  is_seasonal: boolean;
+  subgroups: { id: string; name: string; group_id: string; apply_media_transform: boolean; is_seasonal: boolean }[];
 };
-type TransformOp = "lag" | "decay" | "log" | "add" | "sub" | "mul" | "div" | "hill" | "adstock";
+type TransformOp =
+  | "lag" | "decay" | "log" | "add" | "sub" | "mul" | "div" | "hill" | "adstock"
+  | "constant" | "date_dummy" | "trend" | "fourier";
 type PreviewPayload = {
   dataset_id: string;
   operation: TransformOp;
   column?: string;
   params: Record<string, string | number | boolean | null>;
   limit: number;
+};
+type PreviewData = {
+  time: (string | number)[];
+  original: (number | null)[] | null;
+  transformed: (number | null)[];
+  dependent?: (number | null)[] | null;
+  dependent_label?: string | null;
+  stats?: {
+    mean_original?: number;
+    mean_transformed?: number;
+    correlation?: number;
+    correlation_dependent_before?: number | null;
+    correlation_dependent_after?: number | null;
+  };
+};
+type PendingGroupFlag = {
+  group: Group;
+  kind: "media" | "baseline" | "seasonal";
+  subgroup?: { id: string; name: string; is_seasonal: boolean };
 };
 
 type HistoryItem = { id: string; op: string; params: Record<string, any>; created_at: string };
@@ -93,18 +117,26 @@ export default function TransformPage() {
   const [hillK, setHillK] = useState(1);
   const [hillS, setHillS] = useState(1);
   const [adstockDecay, setAdstockDecay] = useState(0.5);
+  const [adstockLag, setAdstockLag] = useState(0);
   const [left, setLeft] = useState("");
   const [right, setRight] = useState("");
+  const [constantValue, setConstantValue] = useState(1);
+  const [dummyStart, setDummyStart] = useState("");
+  const [dummyEnd, setDummyEnd] = useState("");
+  const [fourierPeriod, setFourierPeriod] = useState(12);
+  const [fourierHarmonic, setFourierHarmonic] = useState(1);
+  const [fourierTrig, setFourierTrig] = useState<"sin" | "cos">("sin");
   const [newName, setNewName] = useState("");
   const [search, setSearch] = useState("");
   const [dtypeFilter, setDtypeFilter] = useState("");
   const [showDerivedOnly, setShowDerivedOnly] = useState(false);
+  const [showUncategorizedOnly, setShowUncategorizedOnly] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [bulkGroupId, setBulkGroupId] = useState("");
   const [bulkSubgroupId, setBulkSubgroupId] = useState("");
   const [bulkApplying, setBulkApplying] = useState(false);
   const [showPreview, setShowPreview] = useState(true);
-  const [previewData, setPreviewData] = useState<{ time: (string | number)[]; original: (number | null)[]; transformed: (number | null)[]; stats?: { mean_original?: number; mean_transformed?: number; correlation?: number } } | null>(null);
+  const [previewData, setPreviewData] = useState<PreviewData | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
   const [previewError, setPreviewError] = useState("");
   const [history, setHistory] = useState<HistoryItem[]>([]);
@@ -125,10 +157,11 @@ export default function TransformPage() {
   const [renamingSubgroupId, setRenamingSubgroupId] = useState<string | null>(null);
   const [groupToDelete, setGroupToDelete] = useState<Group | null>(null);
   const [groupDeleteLoading, setGroupDeleteLoading] = useState(false);
-  // A02-R2: is_baseline/apply_media_transform are company-wide flags that retroactively affect
-  // every model built on this group's variables — confirm before applying, instead of firing on
-  // the checkbox's own onChange.
-  const [pendingGroupFlag, setPendingGroupFlag] = useState<{ group: Group; kind: "media" | "baseline" } | null>(null);
+  // A02-R2: is_baseline/apply_media_transform/is_seasonal are company-wide flags that
+  // retroactively affect every model (is_seasonal also affects Predict's forecast, T6) built on
+  // this group's variables — confirm before applying, instead of firing on the checkbox's own
+  // onChange. subgroup is set when confirming a subgroup-level flag instead of the group itself.
+  const [pendingGroupFlag, setPendingGroupFlag] = useState<PendingGroupFlag | null>(null);
   const [groupDeleteError, setGroupDeleteError] = useState("");
   const [subgroupToDelete, setSubgroupToDelete] = useState<{ group: Group; subgroup: { id: string; name: string } } | null>(
     null
@@ -175,17 +208,37 @@ export default function TransformPage() {
     }
     if (op === "adstock") {
       if (!column) return null;
-      return { ...base, column, params: { decay: adstockDecay } as Record<string, string | number | boolean | null> };
+      return { ...base, column, params: { decay: adstockDecay, lag: adstockLag } as Record<string, string | number | boolean | null> };
+    }
+    if (op === "constant") {
+      return { ...base, params: { value: constantValue } as Record<string, string | number | boolean | null> };
+    }
+    if (op === "date_dummy") {
+      if (!dummyStart || !dummyEnd) return null;
+      return { ...base, params: { start_date: dummyStart, end_date: dummyEnd } as Record<string, string | number | boolean | null> };
+    }
+    if (op === "trend") {
+      return { ...base, params: {} };
+    }
+    if (op === "fourier") {
+      if (!fourierPeriod) return null;
+      return {
+        ...base,
+        params: { period: fourierPeriod, harmonic: fourierHarmonic, trig: fourierTrig } as Record<string, string | number | boolean | null>,
+      };
     }
     if (!left || !right) return null;
     return { ...base, column: left, params: { left, right } };
-  }, [activeDatasetId, op, column, n, alpha, hillK, hillS, adstockDecay, left, right]);
+  }, [
+    activeDatasetId, op, column, n, alpha, hillK, hillS, adstockDecay, adstockLag, left, right,
+    constantValue, dummyStart, dummyEnd, fourierPeriod, fourierHarmonic, fourierTrig,
+  ]);
   const runPreview = useCallback(
     async (payload: PreviewPayload, signal?: AbortSignal) => {
       setPreviewLoading(true);
       setPreviewError("");
       try {
-        const data = await apiFetch<typeof previewData>("/variables/transform/preview", {
+        const data = await apiFetch<PreviewData>("/variables/transform/preview", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(payload),
@@ -267,12 +320,15 @@ export default function TransformPage() {
   useEffect(() => {
     const next = variables.filter((v) => {
       if (showDerivedOnly && !v.is_derived) return false;
+      if (showUncategorizedOnly && v.group_id) return false;
       if (search && !v.name.toLowerCase().includes(search.toLowerCase())) return false;
       if (dtypeFilter && !v.dtype.toLowerCase().includes(dtypeFilter.toLowerCase())) return false;
       return true;
     });
     setFilteredVariables(next);
-  }, [variables, search, dtypeFilter, showDerivedOnly]);
+  }, [variables, search, dtypeFilter, showDerivedOnly, showUncategorizedOnly]);
+
+  const uncategorizedCount = useMemo(() => variables.filter((v) => !v.group_id).length, [variables]);
 
   useKeyboardShortcut(
     "z",
@@ -495,6 +551,50 @@ export default function TransformPage() {
     }
   };
 
+  const toggleGroupSeasonal = async (group: Group) => {
+    const next = !group.is_seasonal;
+    setGroups((prev) => prev.map((g) => (g.id === group.id ? { ...g, is_seasonal: next } : g)));
+    try {
+      await apiFetch(`/groups/${group.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ is_seasonal: next }),
+      });
+      toast.success(next ? t("toasts.seasonalOn", { name: group.name }) : t("toasts.seasonalOff", { name: group.name }));
+    } catch (error: any) {
+      setGroups((prev) => prev.map((g) => (g.id === group.id ? { ...g, is_seasonal: !next } : g)));
+      toast.error(error instanceof ApiError ? translateApiError(error, tErrors) : t("toasts.groupUpdateFailed"));
+    }
+  };
+
+  const toggleSubgroupSeasonal = async (group: Group, subgroup: { id: string; name: string; is_seasonal: boolean }) => {
+    const next = !subgroup.is_seasonal;
+    setGroups((prev) =>
+      prev.map((g) =>
+        g.id === group.id
+          ? { ...g, subgroups: g.subgroups.map((s) => (s.id === subgroup.id ? { ...s, is_seasonal: next } : s)) }
+          : g
+      )
+    );
+    try {
+      await apiFetch(`/groups/subgroups/${subgroup.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ is_seasonal: next }),
+      });
+      toast.success(next ? t("toasts.seasonalOn", { name: subgroup.name }) : t("toasts.seasonalOff", { name: subgroup.name }));
+    } catch (error: any) {
+      setGroups((prev) =>
+        prev.map((g) =>
+          g.id === group.id
+            ? { ...g, subgroups: g.subgroups.map((s) => (s.id === subgroup.id ? { ...s, is_seasonal: !next } : s)) }
+            : g
+        )
+      );
+      toast.error(error instanceof ApiError ? translateApiError(error, tErrors) : t("toasts.subgroupUpdateFailed"));
+    }
+  };
+
   const confirmDeleteGroup = async () => {
     if (!groupToDelete) return;
     setGroupDeleteLoading(true);
@@ -597,6 +697,18 @@ export default function TransformPage() {
       } else if (op === "adstock") {
         payload.column = column;
         payload.decay = adstockDecay;
+        payload.lag = adstockLag;
+      } else if (op === "constant") {
+        payload.value = constantValue;
+      } else if (op === "date_dummy") {
+        payload.start_date = dummyStart;
+        payload.end_date = dummyEnd;
+      } else if (op === "trend") {
+        // no params
+      } else if (op === "fourier") {
+        payload.period = fourierPeriod;
+        payload.harmonic = fourierHarmonic;
+        payload.trig = fourierTrig;
       } else {
         payload.left = left;
         payload.right = right;
@@ -780,15 +892,23 @@ export default function TransformPage() {
             <div className="space-y-2">
               <Eyebrow htmlFor="transform-op">{t("builder.operation")}</Eyebrow>
               <Select id="transform-op" value={op} onChange={(e) => setOp(e.target.value as any)}>
-                <option value="lag">{t("builder.ops.lag")}</option>
-                <option value="decay">{t("builder.ops.decay")}</option>
-                <option value="log">{t("builder.ops.log")}</option>
-                <option value="add">{t("builder.ops.add")}</option>
-                <option value="sub">{t("builder.ops.sub")}</option>
-                <option value="mul">{t("builder.ops.mul")}</option>
-                <option value="div">{t("builder.ops.div")}</option>
-                <option value="hill">{t("builder.ops.hill")}</option>
-                <option value="adstock">{t("builder.ops.adstock")}</option>
+                <optgroup label={t("builder.opGroups.transform")}>
+                  <option value="lag">{t("builder.ops.lag")}</option>
+                  <option value="decay">{t("builder.ops.decay")}</option>
+                  <option value="log">{t("builder.ops.log")}</option>
+                  <option value="add">{t("builder.ops.add")}</option>
+                  <option value="sub">{t("builder.ops.sub")}</option>
+                  <option value="mul">{t("builder.ops.mul")}</option>
+                  <option value="div">{t("builder.ops.div")}</option>
+                  <option value="hill">{t("builder.ops.hill")}</option>
+                  <option value="adstock">{t("builder.ops.adstock")}</option>
+                </optgroup>
+                <optgroup label={t("builder.opGroups.generate")}>
+                  <option value="constant">{t("builder.ops.constant")}</option>
+                  <option value="date_dummy">{t("builder.ops.date_dummy")}</option>
+                  <option value="trend">{t("builder.ops.trend")}</option>
+                  <option value="fourier">{t("builder.ops.fourier")}</option>
+                </optgroup>
               </Select>
             </div>
             <div className="space-y-2">
@@ -846,16 +966,87 @@ export default function TransformPage() {
               </>
             )}
             {op === "adstock" && (
+              <>
+                <div className="space-y-2">
+                  <Eyebrow htmlFor="transform-adstock-decay">{t("builder.decayOptional")}</Eyebrow>
+                  <Input
+                    id="transform-adstock-decay"
+                    type="number"
+                    step="0.05"
+                    value={adstockDecay}
+                    onChange={(e) => setAdstockDecay(parseFloat(e.target.value) || 0)}
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Eyebrow htmlFor="transform-adstock-lag">{t("builder.lagOptional")}</Eyebrow>
+                  <Input
+                    id="transform-adstock-lag"
+                    type="number"
+                    min={0}
+                    value={adstockLag}
+                    onChange={(e) => setAdstockLag(Math.max(0, parseInt(e.target.value) || 0))}
+                  />
+                </div>
+              </>
+            )}
+            {op === "constant" && (
               <div className="space-y-2">
-                <Eyebrow htmlFor="transform-adstock-decay">{t("builder.decayOptional")}</Eyebrow>
+                <Eyebrow htmlFor="transform-constant-value">{t("builder.constantValue")}</Eyebrow>
                 <Input
-                  id="transform-adstock-decay"
+                  id="transform-constant-value"
                   type="number"
-                  step="0.05"
-                  value={adstockDecay}
-                  onChange={(e) => setAdstockDecay(parseFloat(e.target.value) || 0)}
+                  step="any"
+                  value={constantValue}
+                  onChange={(e) => setConstantValue(parseFloat(e.target.value) || 0)}
                 />
               </div>
+            )}
+            {op === "date_dummy" && (
+              <>
+                <div className="space-y-2">
+                  <Eyebrow htmlFor="transform-dummy-start">{t("builder.dummyStartRequired")}</Eyebrow>
+                  <Input id="transform-dummy-start" type="date" value={dummyStart} onChange={(e) => setDummyStart(e.target.value)} required />
+                </div>
+                <div className="space-y-2">
+                  <Eyebrow htmlFor="transform-dummy-end">{t("builder.dummyEndRequired")}</Eyebrow>
+                  <Input id="transform-dummy-end" type="date" value={dummyEnd} onChange={(e) => setDummyEnd(e.target.value)} required />
+                </div>
+              </>
+            )}
+            {op === "trend" && (
+              <p className="text-sm text-muted md:col-span-2">{t("builder.trendHint")}</p>
+            )}
+            {op === "fourier" && (
+              <>
+                <div className="space-y-2">
+                  <Eyebrow htmlFor="transform-fourier-period">{t("builder.fourierPeriodRequired")}</Eyebrow>
+                  <Input
+                    id="transform-fourier-period"
+                    type="number"
+                    step="any"
+                    value={fourierPeriod}
+                    onChange={(e) => setFourierPeriod(parseFloat(e.target.value) || 0)}
+                    required
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Eyebrow htmlFor="transform-fourier-harmonic">{t("builder.fourierHarmonicOptional")}</Eyebrow>
+                  <Input
+                    id="transform-fourier-harmonic"
+                    type="number"
+                    min={1}
+                    value={fourierHarmonic}
+                    onChange={(e) => setFourierHarmonic(Math.max(1, parseInt(e.target.value) || 1))}
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Eyebrow htmlFor="transform-fourier-trig">{t("builder.fourierTrigOptional")}</Eyebrow>
+                  <Select id="transform-fourier-trig" value={fourierTrig} onChange={(e) => setFourierTrig(e.target.value as "sin" | "cos")}>
+                    <option value="sin">sin</option>
+                    <option value="cos">cos</option>
+                  </Select>
+                </div>
+              </>
             )}
             {requiresLeftRight && (
               <>
@@ -921,12 +1112,26 @@ export default function TransformPage() {
                 </ErrorText>
               ) : previewData ? (
                 <>
-                  <PreviewChart data={previewData} originalLabel={t("builder.seriesOriginal")} transformedLabel={t("builder.seriesTransformed")} />
+                  <PreviewChart
+                    data={previewData}
+                    originalLabel={t("builder.seriesOriginal")}
+                    transformedLabel={t("builder.seriesTransformed")}
+                    dependentLabel={previewData.dependent_label ? t("builder.seriesDependent", { name: previewData.dependent_label }) : ""}
+                  />
                   {previewData.stats && (
                     <div className="text-xs text-muted flex flex-wrap gap-4 tabular-nums">
-                      <span>{t("builder.statMeanOriginal", { value: previewData.stats.mean_original?.toFixed(2) ?? "—" })}</span>
+                      {previewData.stats.mean_original != null && (
+                        <span>{t("builder.statMeanOriginal", { value: previewData.stats.mean_original.toFixed(2) })}</span>
+                      )}
                       <span>{t("builder.statMeanTransformed", { value: previewData.stats.mean_transformed?.toFixed(2) ?? "—" })}</span>
-                      <span>{t("builder.statCorrelation", { value: previewData.stats.correlation?.toFixed(2) ?? "—" })}</span>
+                      {previewData.stats.correlation_dependent_before != null || previewData.stats.correlation_dependent_after != null ? (
+                        <>
+                          <span>{t("builder.statCorrDependentBefore", { value: previewData.stats.correlation_dependent_before?.toFixed(2) ?? "—" })}</span>
+                          <span>{t("builder.statCorrDependentAfter", { value: previewData.stats.correlation_dependent_after?.toFixed(2) ?? "—" })}</span>
+                        </>
+                      ) : previewData.stats.correlation != null ? (
+                        <span>{t("builder.statCorrelation", { value: previewData.stats.correlation.toFixed(2) })}</span>
+                      ) : null}
                     </div>
                   )}
                 </>
@@ -965,6 +1170,14 @@ export default function TransformPage() {
             <label className="flex items-center gap-2 text-xs text-muted whitespace-nowrap">
               <input type="checkbox" checked={showDerivedOnly} onChange={(e) => setShowDerivedOnly(e.target.checked)} />
               {t("variablesCard.derivedOnly")}
+            </label>
+            <label className="flex items-center gap-2 text-xs text-muted whitespace-nowrap">
+              <input
+                type="checkbox"
+                checked={showUncategorizedOnly}
+                onChange={(e) => setShowUncategorizedOnly(e.target.checked)}
+              />
+              {t("variablesCard.uncategorizedOnly", { count: uncategorizedCount })}
             </label>
           </div>
           <label className="flex items-center gap-2 text-xs text-muted">
@@ -1232,7 +1445,7 @@ export default function TransformPage() {
                       <Badge>{t("groups.subgroupCount", { count: group.subgroups.length })}</Badge>
                       {group.is_baseline && <Badge variant="accent">{t("groups.baseline")}</Badge>}
                     </div>
-                    <label className="flex items-center gap-2 text-xs text-muted" title={t("groups.mediaTooltip")}>
+                    <label className="flex items-center gap-2 text-xs text-muted">
                       <input
                         type="checkbox"
                         checked={group.apply_media_transform}
@@ -1240,8 +1453,9 @@ export default function TransformPage() {
                         onChange={() => setPendingGroupFlag({ group, kind: "media" })}
                       />
                       {t("groups.mediaLabel")}
+                      <InfoTooltip label={t("groups.mediaLabel")} content={t("groups.mediaTooltip")} />
                     </label>
-                    <label className="flex items-center gap-2 text-xs text-muted" title={t("groups.baselineTooltip")}>
+                    <label className="flex items-center gap-2 text-xs text-muted">
                       <input
                         type="checkbox"
                         checked={group.is_baseline}
@@ -1249,6 +1463,17 @@ export default function TransformPage() {
                         onChange={() => setPendingGroupFlag({ group, kind: "baseline" })}
                       />
                       {t("groups.baselineLabel")}
+                      <InfoTooltip label={t("groups.baselineLabel")} content={t("groups.baselineTooltip")} />
+                    </label>
+                    <label className="flex items-center gap-2 text-xs text-muted">
+                      <input
+                        type="checkbox"
+                        checked={group.is_seasonal}
+                        disabled={!canEdit}
+                        onChange={() => setPendingGroupFlag({ group, kind: "seasonal" })}
+                      />
+                      {t("groups.seasonalLabel")}
+                      <InfoTooltip label={t("groups.seasonalLabel")} content={t("groups.seasonalTooltip")} />
                     </label>
                     <div className="space-y-2">
                       {group.subgroups.map((sub) => (
@@ -1305,10 +1530,7 @@ export default function TransformPage() {
                                 <span className="truncate text-ink">{sub.name}</span>
                                 <Pencil size={14} className="text-muted opacity-0 group-hover:opacity-100 transition" />
                               </button>
-                              <label
-                                className="flex items-center gap-1 text-3xs uppercase text-muted shrink-0"
-                                title={t("groups.mediaTooltip")}
-                              >
+                              <label className="flex items-center gap-1 text-3xs uppercase text-muted shrink-0">
                                 <input
                                   type="checkbox"
                                   checked={sub.apply_media_transform}
@@ -1316,6 +1538,17 @@ export default function TransformPage() {
                                   onChange={() => toggleSubgroupMediaTransform(group, sub)}
                                 />
                                 {t("groups.mediaShort")}
+                                <InfoTooltip label={t("groups.mediaLabel")} content={t("groups.mediaTooltip")} />
+                              </label>
+                              <label className="flex items-center gap-1 text-3xs uppercase text-muted shrink-0">
+                                <input
+                                  type="checkbox"
+                                  checked={sub.is_seasonal}
+                                  disabled={!canEdit}
+                                  onChange={() => setPendingGroupFlag({ group, kind: "seasonal", subgroup: sub })}
+                                />
+                                {t("groups.seasonalShort")}
+                                <InfoTooltip label={t("groups.seasonalLabel")} content={t("groups.seasonalTooltip")} />
                               </label>
                               <IconButton
                                 size="sm"
@@ -1393,8 +1626,12 @@ export default function TransformPage() {
         title={t("groups.confirmFlagTitle")}
       >
         <p className="text-sm text-ink">
-          {pendingGroupFlag?.kind === "baseline"
+          {pendingGroupFlag?.subgroup
+            ? t("groups.confirmSeasonalBody", { name: pendingGroupFlag.subgroup.name })
+            : pendingGroupFlag?.kind === "baseline"
             ? t("groups.confirmBaselineBody", { name: pendingGroupFlag.group.name })
+            : pendingGroupFlag?.kind === "seasonal"
+            ? t("groups.confirmSeasonalBody", { name: pendingGroupFlag.group.name })
             : t("groups.confirmMediaBody", { name: pendingGroupFlag?.group.name ?? "" })}
         </p>
         <div className="mt-4 flex justify-end gap-2">
@@ -1404,10 +1641,17 @@ export default function TransformPage() {
           <Button
             onClick={async () => {
               if (!pendingGroupFlag) return;
-              const { group, kind } = pendingGroupFlag;
+              const { group, kind, subgroup } = pendingGroupFlag;
               setPendingGroupFlag(null);
-              if (kind === "baseline") await toggleGroupBaseline(group);
-              else await toggleGroupMediaTransform(group);
+              if (subgroup) {
+                await toggleSubgroupSeasonal(group, subgroup);
+              } else if (kind === "baseline") {
+                await toggleGroupBaseline(group);
+              } else if (kind === "seasonal") {
+                await toggleGroupSeasonal(group);
+              } else {
+                await toggleGroupMediaTransform(group);
+              }
             }}
           >
             {tCommon("confirm")}
@@ -1512,11 +1756,15 @@ function GroupAssignments({
   const members = variables.filter((v) => v.group_id === groupId || subgroupIds.includes(v.subgroup_id || ""));
   if (!members.length) return null;
   return (
-    <div className="text-xs text-muted">
-      {label}:{" "}
-      {members.map((m, idx) => (
-        <span key={m.id}>{idx > 0 && ", "}{m.name}</span>
-      ))}
+    <div className="space-y-1">
+      <p className="text-3xs uppercase text-muted">{label} ({members.length})</p>
+      <div className="flex flex-wrap gap-1">
+        {members.map((m) => (
+          <Badge key={m.id} variant="neutral" className="truncate max-w-[160px]">
+            {m.name}
+          </Badge>
+        ))}
+      </div>
     </div>
   );
 }
@@ -1525,32 +1773,70 @@ function PreviewChart({
   data,
   originalLabel,
   transformedLabel,
+  dependentLabel,
 }: {
-  data: { time: (string | number)[]; original: (number | null)[]; transformed: (number | null)[] };
+  data: { time: (string | number)[]; original: (number | null)[] | null; transformed: (number | null)[]; dependent?: (number | null)[] | null };
   originalLabel: string;
   transformedLabel: string;
+  dependentLabel?: string;
 }) {
   const { resolvedTheme } = useTheme();
   const isDark = resolvedTheme === "dark";
+  const hasOriginal = !!data.original;
+  const hasDependent = !!data.dependent;
   const chartData = data.time.map((time, index) => ({
     time,
-    original: data.original[index],
+    original: hasOriginal ? data.original![index] : undefined,
     transformed: data.transformed[index],
+    dependent: hasDependent ? data.dependent![index] : undefined,
   }));
 
+  // T3+T4: original (raw units, e.g. millions) and transformed (e.g. Hill output in [0,1]) can
+  // differ by orders of magnitude — sharing one Y axis flattened the transformed line to zero.
+  // Two visible axes (left=original bars, right=transformed line) fix that; dependent gets its
+  // own hidden axis purely for independent scaling, not for a 3rd set of ticks.
   return (
     <div className="w-full">
       <ResponsiveContainer width="100%" height={240}>
-        <LineChart data={chartData}>
+        <ComposedChart data={chartData}>
           <CartesianGrid strokeDasharray="3 3" />
           <XAxis dataKey="time" tick={{ fontSize: 10 }} minTickGap={20} />
-          <YAxis tick={{ fontSize: 10 }} />
+          <YAxis yAxisId="left" tick={{ fontSize: 10 }} hide={!hasOriginal} />
+          <YAxis yAxisId="right" orientation="right" tick={{ fontSize: 10 }} />
+          {hasDependent && <YAxis yAxisId="dependent" hide />}
           <RechartsTooltip />
           <Legend />
-          <Line type="monotone" dataKey="original" name={originalLabel} stroke={chartColor(0, isDark)} dot={false} />
-          <Line type="monotone" dataKey="transformed" name={transformedLabel} stroke={chartColor(1, isDark)} dot={false} />
-        </LineChart>
+          {hasOriginal && (
+            <Bar yAxisId="left" dataKey="original" name={originalLabel} fill={chartColor(0, isDark)} opacity={0.6} />
+          )}
+          <Line yAxisId="right" type="monotone" dataKey="transformed" name={transformedLabel} stroke={chartColor(1, isDark)} dot={false} strokeWidth={2} />
+          {hasDependent && (
+            <Line
+              yAxisId="dependent"
+              type="monotone"
+              dataKey="dependent"
+              name={dependentLabel || "dependent"}
+              stroke={chartColor(2, isDark)}
+              strokeDasharray="4 3"
+              dot={false}
+            />
+          )}
+        </ComposedChart>
       </ResponsiveContainer>
     </div>
+  );
+}
+
+function InfoTooltip({ label, content }: { label: string; content: string }) {
+  return (
+    <InfoPopover content={<span style={{ whiteSpace: "normal", display: "block", maxWidth: 220 }}>{content}</span>}>
+      <button
+        type="button"
+        aria-label={label}
+        className="rounded-full p-0.5 text-muted transition hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+      >
+        <Info className="h-3.5 w-3.5" />
+      </button>
+    </InfoPopover>
   );
 }

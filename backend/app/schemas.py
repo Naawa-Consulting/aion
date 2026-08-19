@@ -156,7 +156,10 @@ class VariableHistoryItem(BaseModel):
     created_at: datetime
 
 
-TransformOp = Literal["lag", "decay", "log", "add", "sub", "mul", "div", "hill", "adstock"]
+TransformOp = Literal[
+    "lag", "decay", "log", "add", "sub", "mul", "div", "hill", "adstock",
+    "constant", "date_dummy", "trend", "fourier",
+]
 
 
 class TransformRequest(BaseModel):
@@ -171,6 +174,13 @@ class TransformRequest(BaseModel):
     k: Optional[float] = None         # for hill
     s: Optional[float] = None         # for hill
     decay: Optional[float] = None     # for adstock (0<=decay<1)
+    lag: Optional[int] = None         # for adstock (T1: lag before adstock, same as apply_media_transform)
+    value: Optional[float] = None     # for constant
+    start_date: Optional[str] = None  # for date_dummy
+    end_date: Optional[str] = None    # for date_dummy
+    period: Optional[float] = None    # for fourier
+    harmonic: Optional[int] = None    # for fourier (default 1)
+    trig: Optional[str] = None        # for fourier: "sin" | "cos" (default "sin")
 
 
 class TransformPreviewRequest(BaseModel):
