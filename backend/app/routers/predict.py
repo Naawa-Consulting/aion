@@ -515,6 +515,19 @@ def _compute_plan(
     economics = _compute_scenario_economics(
         session, ds.id, company_id, work, X.columns, variable_raw_series, variable_contribution_series
     )
+    # Fase 5/P2: per-variable, per-period RAW-unit baseline (before any adjustment) exposed so
+    # the grid can seed multiplier-mode cells against the same seasonal figure this function
+    # actually simulates against, instead of a flat all-time mean. Deliberately a fresh RAW mean
+    # from `work` (not the existing `baseline_means` above, which is a mean of `X` — identical to
+    # `work` for structural variables, but the *transformed* adstock+Hill series for media ones,
+    # never what the grid should display since the grid always edits raw spend).
+    raw_means = {name: float(pd.to_numeric(work[name], errors="coerce").fillna(0.0).mean()) for name in X.columns}
+    variable_period_baselines: dict[str, dict[str, float]] = {}
+    for name in X.columns:
+        bucketed = calendar_buckets.get(name, {})
+        variable_period_baselines[name] = {
+            labels[i]: float(bucketed.get(period_calendar_keys[i], raw_means[name])) for i in range(len(labels))
+        }
     summary = ScenarioSummary(
         periods=labels,
         total=total_value,
@@ -523,6 +536,7 @@ def _compute_plan(
         subgroups=_serialize_subgroup_totals(aggregate_subgroups, sg_map, g_map),
         series=[ScenarioSeriesPoint(period=point.period, y_pred=point.y_pred) for point in series_points],
         economics=economics,
+        variable_baselines=variable_period_baselines,
     )
     return summary, series_points
 
@@ -711,6 +725,7 @@ def _scenario_out_from_record(record: Scenario, session: Session, company_id: st
         last_edited_at=record.last_edited_at or record.created_at,
         base_total=base_total,
         delta_pct_vs_base=delta_pct,
+        is_featured=record.is_featured,
     )
 
 
@@ -724,6 +739,36 @@ def _ensure_scenario_capacity(session: Session, model_id: str, company_id: str, 
     ).all()
     if len(existing) >= limit:
         raise api_error(400, "SCENARIO_LIMIT_REACHED", f"Maximum {limit} scenarios per model", limit=limit)
+
+
+def _ensure_featured_capacity(session: Session, model_id: str, company_id: str, exclude_id: str, limit: int = 3):
+    """P6: at most `limit` featured scenarios per model. `exclude_id` lets re-saving an
+    already-featured scenario pass without counting itself twice."""
+    existing = session.exec(
+        select(Scenario.id).where(
+            Scenario.model_id == model_id,
+            Scenario.company_id == company_id,
+            Scenario.is_featured == True,  # noqa: E712 — SQLAlchemy column comparison, not a Python bool check
+            Scenario.id != exclude_id,
+        )
+    ).all()
+    if len(existing) >= limit:
+        raise api_error(400, "FEATURED_LIMIT_REACHED", f"Maximum {limit} featured scenarios per model", limit=limit)
+
+
+def _generate_unique_scenario_name(session: Session, model_id: str, company_id: str, base_name: str) -> str:
+    existing = {
+        s.name
+        for s in session.exec(
+            select(Scenario).where(Scenario.model_id == model_id, Scenario.company_id == company_id)
+        ).all()
+    }
+    if base_name not in existing:
+        return base_name
+    suffix = 2
+    while f"{base_name} ({suffix})" in existing:
+        suffix += 1
+    return f"{base_name} ({suffix})"
 
 
 @router.post("/{model_id}/simulate")
@@ -913,6 +958,11 @@ def update_scenario(
     freq = body.freq or definition.freq
     adjustments = body.adjustments or definition.adjustments
 
+    if body.is_featured is True and not record.is_featured:
+        _ensure_featured_capacity(session, record.model_id, membership.company_id, exclude_id=record.id)
+    if body.is_featured is not None:
+        record.is_featured = body.is_featured
+
     summary, _ = _compute_plan(
         session,
         record.model_id,
@@ -930,6 +980,34 @@ def update_scenario(
     session.commit()
     session.refresh(record)
     return _scenario_out_from_record(record, session, membership.company_id, summary)
+
+
+@router.post("/scenarios/{scenario_id}/duplicate", response_model=ScenarioOut)
+def duplicate_scenario(
+    scenario_id: str,
+    membership: CurrentMembership = Depends(require_write_access),
+    session: Session = Depends(get_session),
+):
+    original = get_scoped(session, Scenario, scenario_id, membership.company_id)
+    _ensure_scenario_capacity(session, original.model_id, membership.company_id)
+    new_name = _generate_unique_scenario_name(
+        session, original.model_id, membership.company_id, f"{original.name} - copy"
+    )
+    record = Scenario(
+        id=str(uuid.uuid4()),
+        company_id=membership.company_id,
+        model_id=original.model_id,
+        dataset_id=original.dataset_id,
+        name=new_name,
+        adjustments_json=original.adjustments_json,
+        results_json=original.results_json,
+        is_featured=False,  # never inherit "featured" — that's a deliberate per-scenario pin, not a copyable attribute
+        last_edited_at=utcnow(),
+    )
+    session.add(record)
+    session.commit()
+    session.refresh(record)
+    return _scenario_out_from_record(record, session, membership.company_id)
 
 
 @router.delete("/scenarios/{scenario_id}")

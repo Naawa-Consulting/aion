@@ -576,6 +576,7 @@
       "horizon": "Horizonte",
       "startDate": "Fecha de inicio",
       "frequency": "Frecuencia",
+      "frequencyFloorHint": "El dataset es {freq} — no se puede planear más fino que eso.",
       "scenarioName": "Nombre del escenario",
       "scenarioNamePlaceholder": "Nombre del escenario",
       "preview": "Previsualizar escenario",
@@ -629,6 +630,12 @@
       "lastEdited": "Última edición: {date}",
       "load": "Cargar",
       "delete": "Eliminar",
+      "duplicate": "Duplicar",
+      "featured": "Destacado",
+      "markFeatured": "Destacar",
+      "unmarkFeatured": "Quitar de destacados",
+      "featuredHint": "Hasta {limit} escenarios destacados por modelo — se usarán en la narrativa del Resumen Ejecutivo.",
+      "featuredLimitReached": "Ya hay {limit} escenarios destacados en este modelo. Quita uno para destacar otro.",
       "deleteConfirmTitle": "¿Eliminar este escenario?",
       "deleteConfirmBody": "\"{name}\" se eliminará de forma permanente. No se puede deshacer.",
       "deleteConfirmAction": "Eliminar"
@@ -647,6 +654,11 @@
       "scenarioUpdated": "Escenario actualizado",
       "scenarioDeleted": "Escenario eliminado",
       "scenarioRenamed": "Escenario renombrado",
+      "scenarioDuplicated": "Escenario duplicado",
+      "duplicateFailed": "No se pudo duplicar el escenario",
+      "featuredSaved": "Escenario destacado",
+      "featuredRemoved": "Escenario quitado de destacados",
+      "featuredFailed": "No se pudo actualizar el destacado",
       "nothingToExport": "Todavía no hay nada que exportar",
       "previewBeforeExport": "Previsualiza el escenario antes de exportar"
     }
@@ -711,6 +723,18 @@
       "title": "Variable dependiente",
       "description": "Se usa en Transform para mostrar la correlación contra esta columna al previsualizar transformaciones.",
       "none": "Ninguna seleccionada"
+    },
+    "frequency": {
+      "title": "Frecuencia del dataset",
+      "description": "Se detecta automáticamente al fijar la variable de tiempo. Corrígela aquí si la detección se equivocó.",
+      "helper": "Predict la usa como valor por defecto y como piso de granularidad al planear un escenario.",
+      "currentValue": "Actual: {value}",
+      "auto": "Automática (detectada de la variable de tiempo)",
+      "options": {
+        "daily": "Diaria",
+        "weekly": "Semanal",
+        "monthly": "Mensual"
+      }
     },
     "sample": {
       "title": "Tamaño de muestra de trabajo",
@@ -796,6 +820,9 @@
       "dependentSaved": "✅ Variable dependiente guardada",
       "dependentCleared": "Variable dependiente eliminada",
       "dependentFailed": "No se pudo guardar la variable dependiente",
+      "frequencySaved": "✅ Frecuencia guardada",
+      "frequencyCleared": "Frecuencia devuelta a automática",
+      "frequencyFailed": "No se pudo guardar la frecuencia",
       "datasetUpdated": "✅ Dataset actualizado correctamente (v{version})",
       "updateFailed": "No se pudo actualizar el dataset",
       "uploaded": "Datasets subidos",

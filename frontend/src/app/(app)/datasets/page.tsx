@@ -41,6 +41,7 @@ type Dataset = {
   time_variable?: string | null;
   time_format?: string | null;
   time_timezone?: string | null;
+  frequency?: "daily" | "weekly" | "monthly" | null;
   dependent_variable?: string | null;
   version?: number;
   previous_version_id?: string | null;
@@ -145,6 +146,8 @@ export default function DatasetsPage() {
   const [togglingVariableId, setTogglingVariableId] = useState<string | null>(null);
   const [dependentVariable, setDependentVariable] = useState("");
   const [dependentVariableSaving, setDependentVariableSaving] = useState(false);
+  const [frequency, setFrequency] = useState("");
+  const [frequencySaving, setFrequencySaving] = useState(false);
 
   const dismissUpdateModal = useCallback(() => {
     setUpdateState({ open: false, strategy: "strict", uploading: false });
@@ -305,6 +308,7 @@ export default function DatasetsPage() {
     setTimeTimezone(currentDataset.time_timezone ?? "");
     setTimeCoerce(!currentDataset.time_variable);
     setDependentVariable(currentDataset.dependent_variable ?? "");
+    setFrequency(currentDataset.frequency ?? "");
   }, [currentDataset]);
 
   const totalRows = currentDataset?.total_rows ?? currentDataset?.n_rows ?? 0;
@@ -458,6 +462,31 @@ export default function DatasetsPage() {
         setDependentVariable(previous);
       } finally {
         setDependentVariableSaving(false);
+      }
+    },
+    [currentDataset, t, tErrors]
+  );
+
+  const handleChangeFrequency = useCallback(
+    async (value: string) => {
+      if (!currentDataset) return;
+      const previous = currentDataset.frequency ?? "";
+      setFrequency(value);
+      setFrequencySaving(true);
+      try {
+        const updated = await apiFetch<Dataset>(`/datasets/${currentDataset.id}/frequency`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ frequency: value || null }),
+        });
+        setDatasets((prev) => prev.map((ds) => (ds.id === updated.id ? updated : ds)));
+        toast.success(value ? t("toasts.frequencySaved") : t("toasts.frequencyCleared"));
+      } catch (error: any) {
+        console.error(error);
+        toast.error(error instanceof ApiError ? translateApiError(error, tErrors) : t("toasts.frequencyFailed"));
+        setFrequency(previous);
+      } finally {
+        setFrequencySaving(false);
       }
     },
     [currentDataset, t, tErrors]
@@ -958,6 +987,33 @@ export default function DatasetsPage() {
                         {col.name}
                       </option>
                     ))}
+                  </Select>
+                </div>
+              </Disclosure>
+
+              <Disclosure
+                as="h3"
+                title={t("frequency.title")}
+                subtitle={
+                  currentDataset.frequency
+                    ? t("frequency.currentValue", { value: t(`frequency.options.${currentDataset.frequency}`) })
+                    : t("frequency.description")
+                }
+                defaultOpen={!currentDataset.frequency}
+                className="rounded-xl border border-line p-4"
+              >
+                <div className="space-y-3 pt-2">
+                  <p className="text-xs text-muted">{t("frequency.helper")}</p>
+                  <Select
+                    aria-label={t("frequency.title")}
+                    value={frequency}
+                    onChange={(event) => handleChangeFrequency(event.target.value)}
+                    disabled={!canEdit || !currentDataset || frequencySaving}
+                  >
+                    <option value="">{t("frequency.auto")}</option>
+                    <option value="daily">{t("frequency.options.daily")}</option>
+                    <option value="weekly">{t("frequency.options.weekly")}</option>
+                    <option value="monthly">{t("frequency.options.monthly")}</option>
                   </Select>
                 </div>
               </Disclosure>

@@ -190,7 +190,8 @@ class Scenario(SQLModel, table=True):
     model_id: str = Field(index=True)
     dataset_id: str
     name: str
-    adjustments_json: str  # JSON array of {variable, multiplier}
+    adjustments_json: str  # time-phased plan {horizon,start_date,freq,adjustments}, see routers/predict.py::_dump_definition
     results_json: str  # cached summary result
+    is_featured: bool = Field(default=False, nullable=False)  # Fase 5/P6: max 3 per model, enforced in routers/predict.py
     created_at: datetime = Field(default_factory=datetime.utcnow, nullable=False)
     last_edited_at: datetime = Field(default_factory=utcnow, nullable=False)

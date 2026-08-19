@@ -23,7 +23,7 @@ import { ErrorText } from "@/components/ui/error-text";
 import { Select } from "@/components/ui/select";
 import { Input } from "@/components/ui/input";
 import { Eyebrow } from "@/components/ui/eyebrow";
-import { Info } from "lucide-react";
+import { Info, Star, Copy } from "lucide-react";
 import { PageHeader } from "@/components/ui/page-header";
 import { FilterBar, FilterField } from "@/components/ui/filter-bar";
 import { EmptyState } from "@/components/ui/empty-state";
@@ -48,7 +48,12 @@ import { downloadBlob } from "@/lib/download";
 import { useGlobalStore } from "@/lib/store";
 import { useActiveCurrency } from "@/hooks/useActiveCompany";
 
-type Dataset = { id: string; display_name: string; columns: { name: string; dtype: string }[] };
+type Dataset = {
+  id: string;
+  display_name: string;
+  columns: { name: string; dtype: string }[];
+  frequency?: "daily" | "weekly" | "monthly" | null;
+};
 type Model = {
   id: string;
   name: string;
@@ -116,11 +121,22 @@ type Scenario = {
   last_edited_at: string;
   base_total?: number | null;
   delta_pct_vs_base?: number | null;
+  is_featured?: boolean;
 };
 
 const DEFAULT_MULTIPLIER = 1;
 const SCENARIO_LIMIT = 5;
+const FEATURED_LIMIT = 3;
 const DESKTOP_QUERY = "(min-width: 1024px)";
+
+// P1: Dataset.frequency ("daily"|"weekly"|"monthly") uses different literals than Scenario.freq
+// ("day"|"week"|"month") — map + rank so it can act as a default/floor for scenario granularity.
+const FREQ_FLOOR_MAP: Record<"daily" | "weekly" | "monthly", "day" | "week" | "month"> = {
+  daily: "day",
+  weekly: "week",
+  monthly: "month",
+};
+const FREQ_RANK: Record<"day" | "week" | "month", number> = { day: 0, week: 1, month: 2 };
 
 function SecondaryLink({ href, children }: { href: string; children: React.ReactNode }) {
   return (
@@ -255,10 +271,18 @@ export default function PredictPage() {
     () => models.find((model) => model.id === selectedModel),
     [models, selectedModel]
   );
+  const selectedDatasetInfo = useMemo(
+    () => datasets.find((dataset) => dataset.id === selectedDataset),
+    [datasets, selectedDataset]
+  );
+  // P1: Dataset.frequency acts as the default AND the floor for a scenario's own granularity —
+  // a dataset detected/set as "monthly" shouldn't let a scenario plan week-by-week off it.
+  const freqFloor = selectedDatasetInfo?.frequency ? FREQ_FLOOR_MAP[selectedDatasetInfo.frequency] : null;
   const dependentLabel = selectedModelInfo?.y_var ?? "Y";
   const freqLabel = t(`freq.${freq}`);
   const editMode: "absolute" = "absolute";
   const reachedScenarioLimit = !currentScenarioId && scenarios.length >= SCENARIO_LIMIT;
+  const reachedFeaturedLimit = scenarios.filter((scenario) => scenario.is_featured).length >= FEATURED_LIMIT;
   const saveButtonLabel = currentScenarioId ? t("params.saveChanges") : t("params.save");
 
   const fetchDatasets = useCallback(async () => {
@@ -406,7 +430,9 @@ export default function PredictPage() {
     setRenamingScenarioId(null);
     setRenameValue("");
     setScenarioName("Scenario 1");
-  }, [selectedModel]);
+    // P1: default a fresh scenario's granularity to the dataset's own detected/set frequency.
+    if (freqFloor) setFreq(freqFloor);
+  }, [selectedModel, freqFloor]);
 
   useEffect(() => {
     if (!selectedModel) return;
@@ -570,6 +596,40 @@ export default function PredictPage() {
       toast.error(error instanceof ApiError ? translateApiError(error, tErrors) : t("toasts.deleteFailed"));
     } finally {
       setDeleteLoading(false);
+    }
+  };
+
+  const handleDuplicateScenario = async (scenario: Scenario) => {
+    if (!selectedModel) return;
+    if (scenarios.length >= SCENARIO_LIMIT) {
+      toast.error(t("params.limitReached", { limit: SCENARIO_LIMIT }));
+      return;
+    }
+    try {
+      await apiFetch<Scenario>(`/predict/scenarios/${scenario.id}/duplicate`, { method: "POST" });
+      toast.success(t("toasts.scenarioDuplicated"));
+      await fetchScenarios(selectedModel);
+    } catch (error) {
+      toast.error(error instanceof ApiError ? translateApiError(error, tErrors) : t("toasts.duplicateFailed"));
+    }
+  };
+
+  const handleToggleFeatured = async (scenario: Scenario) => {
+    const nextFeatured = !scenario.is_featured;
+    if (nextFeatured && reachedFeaturedLimit) {
+      toast.error(t("scenarios.featuredLimitReached", { limit: FEATURED_LIMIT }));
+      return;
+    }
+    try {
+      await apiFetch<Scenario>(`/predict/scenarios/${scenario.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ is_featured: nextFeatured }),
+      });
+      toast.success(nextFeatured ? t("toasts.featuredSaved") : t("toasts.featuredRemoved"));
+      if (selectedModel) await fetchScenarios(selectedModel);
+    } catch (error) {
+      toast.error(error instanceof ApiError ? translateApiError(error, tErrors) : t("toasts.featuredFailed"));
     }
   };
 
@@ -1057,10 +1117,19 @@ export default function PredictPage() {
                       value={freq}
                       onChange={(e) => setFreq(e.target.value as any)}
                     >
-                      <option value="day">{t("freq.day")}</option>
-                      <option value="week">{t("freq.week")}</option>
-                      <option value="month">{t("freq.month")}</option>
+                      <option value="day" disabled={freqFloor ? FREQ_RANK.day < FREQ_RANK[freqFloor] : false}>
+                        {t("freq.day")}
+                      </option>
+                      <option value="week" disabled={freqFloor ? FREQ_RANK.week < FREQ_RANK[freqFloor] : false}>
+                        {t("freq.week")}
+                      </option>
+                      <option value="month" disabled={freqFloor ? FREQ_RANK.month < FREQ_RANK[freqFloor] : false}>
+                        {t("freq.month")}
+                      </option>
                     </Select>
+                    {freqFloor && (
+                      <p className="text-xs text-muted">{t("params.frequencyFloorHint", { freq: t(`freq.${freqFloor}`) })}</p>
+                    )}
                   </div>
                   <div className="min-w-[200px] flex-1 space-y-2">
                     <Eyebrow htmlFor="predict-scenario-name">{t("params.scenarioName")}</Eyebrow>
@@ -1274,6 +1343,7 @@ export default function PredictPage() {
 
               <Card className="space-y-4">
                 <CardHeader title={t("scenarios.title")} subtitle={t("scenarios.subtitle", { limit: SCENARIO_LIMIT })} />
+                <p className="text-xs text-muted">{t("scenarios.featuredHint", { limit: FEATURED_LIMIT })}</p>
                 {scenarios.length ? (
                   <div className="grid gap-4 md:grid-cols-3">
                     {scenarios.map((scenario) => {
@@ -1301,6 +1371,19 @@ export default function PredictPage() {
                                 <p className="truncate text-sm font-semibold text-ink">{scenario.name}</p>
                                 <div className="flex items-center gap-2">
                                   {isActive && <Badge variant="accent">{t("scenarios.active")}</Badge>}
+                                  {scenario.is_featured && <Badge variant="warning">{t("scenarios.featured")}</Badge>}
+                                  <button
+                                    type="button"
+                                    aria-label={scenario.is_featured ? t("scenarios.unmarkFeatured") : t("scenarios.markFeatured")}
+                                    title={scenario.is_featured ? t("scenarios.unmarkFeatured") : t("scenarios.markFeatured")}
+                                    className={`rounded p-0.5 transition ${
+                                      scenario.is_featured ? "text-warn" : "text-muted hover:text-ink"
+                                    }`}
+                                    onClick={() => handleToggleFeatured(scenario)}
+                                    disabled={!canEdit}
+                                  >
+                                    <Star className="h-3.5 w-3.5" fill={scenario.is_featured ? "currentColor" : "none"} />
+                                  </button>
                                   <button
                                     type="button"
                                     className="text-xs text-muted hover:text-ink"
@@ -1329,9 +1412,18 @@ export default function PredictPage() {
                               {t("scenarios.lastEdited", { date: formatScenarioDate(scenario.last_edited_at) })}
                             </p>
                           </div>
-                          <div className="flex gap-2">
+                          <div className="flex flex-wrap gap-2">
                             <Button variant="secondary" size="sm" onClick={() => handleLoadScenario(scenario)}>
                               {t("scenarios.load")}
+                            </Button>
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              onClick={() => handleDuplicateScenario(scenario)}
+                              disabled={!canEdit || scenarios.length >= SCENARIO_LIMIT}
+                              title={!canEdit ? tCommon("readOnlyTooltip") : undefined}
+                            >
+                              <Copy className="mr-1 h-3 w-3" /> {t("scenarios.duplicate")}
                             </Button>
                             <Button
                               variant="ghost"

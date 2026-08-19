@@ -576,6 +576,7 @@
       "horizon": "Horizon",
       "startDate": "Start date",
       "frequency": "Frequency",
+      "frequencyFloorHint": "The dataset is {freq} — you can't plan finer than that.",
       "scenarioName": "Scenario name",
       "scenarioNamePlaceholder": "Scenario name",
       "preview": "Preview scenario",
@@ -629,6 +630,12 @@
       "lastEdited": "Last edited: {date}",
       "load": "Load",
       "delete": "Delete",
+      "duplicate": "Duplicate",
+      "featured": "Featured",
+      "markFeatured": "Feature",
+      "unmarkFeatured": "Remove from featured",
+      "featuredHint": "Up to {limit} featured scenarios per model — used in the Executive Summary narrative.",
+      "featuredLimitReached": "This model already has {limit} featured scenarios. Remove one to feature another.",
       "deleteConfirmTitle": "Delete this scenario?",
       "deleteConfirmBody": "\"{name}\" will be permanently deleted. This can't be undone.",
       "deleteConfirmAction": "Delete"
@@ -647,6 +654,11 @@
       "scenarioUpdated": "Scenario updated",
       "scenarioDeleted": "Scenario deleted",
       "scenarioRenamed": "Scenario renamed",
+      "scenarioDuplicated": "Scenario duplicated",
+      "duplicateFailed": "Unable to duplicate scenario",
+      "featuredSaved": "Scenario featured",
+      "featuredRemoved": "Scenario removed from featured",
+      "featuredFailed": "Unable to update featured status",
       "nothingToExport": "Nothing to export yet",
       "previewBeforeExport": "Preview the scenario before exporting"
     }
@@ -711,6 +723,18 @@
       "title": "Dependent variable",
       "description": "Used in Transform to show correlation against this column while previewing transformations.",
       "none": "None selected"
+    },
+    "frequency": {
+      "title": "Dataset frequency",
+      "description": "Auto-detected when the time variable is set. Correct it here if detection got it wrong.",
+      "helper": "Predict uses this as the default and floor granularity when planning a scenario.",
+      "currentValue": "Current: {value}",
+      "auto": "Automatic (detected from the time variable)",
+      "options": {
+        "daily": "Daily",
+        "weekly": "Weekly",
+        "monthly": "Monthly"
+      }
     },
     "sample": {
       "title": "Working sample size",
@@ -796,6 +820,9 @@
       "dependentSaved": "✅ Dependent variable saved",
       "dependentCleared": "Dependent variable cleared",
       "dependentFailed": "Failed to save dependent variable",
+      "frequencySaved": "✅ Frequency saved",
+      "frequencyCleared": "Frequency reverted to automatic",
+      "frequencyFailed": "Failed to save frequency",
       "datasetUpdated": "✅ Dataset successfully updated (v{version})",
       "updateFailed": "Failed to update dataset",
       "uploaded": "Datasets uploaded",

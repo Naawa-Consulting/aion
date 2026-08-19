@@ -35,6 +35,7 @@ from ..schemas import (
     TimeSelection,
     TimeVariableRequest,
     DependentVariableRequest,
+    DatasetFrequencyRequest,
     DatasetUpdateResponse,
     DatasetVersionsResponse,
     DatasetVersionInfo,
@@ -489,6 +490,25 @@ def update_dependent_variable(
     session.commit()
     session.refresh(ds)
     invalidate_cache_for_dataset(dataset_id)
+    return _dataset_out(session, ds)
+
+
+@router.patch("/{dataset_id}/frequency", response_model=DatasetOut)
+def update_dataset_frequency(
+    dataset_id: str,
+    body: DatasetFrequencyRequest,
+    membership: CurrentMembership = Depends(require_write_access),
+    session: Session = Depends(get_session),
+):
+    """Fase 5/P1: manual override of the metadata-only `Dataset.frequency`, for when the
+    delta-based inference in `update_time_variable` guesses wrong. Does not re-run inference —
+    `body.frequency=None` simply clears it back to "not set"."""
+    ds = get_scoped(session, Dataset, dataset_id, membership.company_id)
+    ds.frequency = body.frequency
+    ds.last_used_at = datetime.now(timezone.utc)
+    session.add(ds)
+    session.commit()
+    session.refresh(ds)
     return _dataset_out(session, ds)
 
 

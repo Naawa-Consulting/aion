@@ -88,6 +88,13 @@ class DependentVariableRequest(BaseModel):
     column: Optional[str] = None
 
 
+class DatasetFrequencyRequest(BaseModel):
+    frequency: Optional[DatasetFrequency] = None
+    """Manual override (Fase 5/P1). `None` clears it back to "not set" — it is NOT re-inferred
+    here; the only place that infers a value is `PATCH /datasets/{id}/time_variable` when its own
+    `frequency` field is omitted."""
+
+
 class DatasetUpdateResponse(BaseModel):
     id: str
     display_name: str
@@ -431,6 +438,7 @@ class ScenarioUpdate(BaseModel):
     start_date: Optional[date] = None
     freq: Optional[Literal["day", "week", "month"]] = None
     adjustments: Optional[ScenarioAdjustments] = None
+    is_featured: Optional[bool] = None
 
 
 class ScenarioPreviewRequest(BaseModel):
@@ -480,6 +488,10 @@ class ScenarioSummary(BaseModel):
     subgroups: list[ContributionSlice]
     series: list[ScenarioSeriesPoint]
     economics: Optional[ScenarioEconomics] = None
+    variable_baselines: Optional[Dict[str, Dict[str, float]]] = None
+    """Fase 5/P2: {variable_name: {period_label: raw_unit_baseline}} — the same seasonal/flat
+    mean `_compute_plan` actually simulates multiplier-mode adjustments against, so the grid can
+    stop guessing with a flat all-time mean."""
 
 
 class ScenarioOut(BaseModel):
@@ -495,6 +507,7 @@ class ScenarioOut(BaseModel):
     last_edited_at: datetime
     base_total: Optional[float] = None
     delta_pct_vs_base: Optional[float] = None
+    is_featured: bool = False
 
 
 class ScenarioTimeseriesSlice(BaseModel):
