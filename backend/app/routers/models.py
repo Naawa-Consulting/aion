@@ -741,7 +741,8 @@ def model_summary(
             )
         )
 
-    return ModelSummaryResponse(model_id=m.id, intercept=intercept, coefficients=coefficients)
+    y_mean = float(y.mean()) if len(y) else None
+    return ModelSummaryResponse(model_id=m.id, intercept=intercept, coefficients=coefficients, y_mean=y_mean)
 
 
 def _infer_time_column(df: pd.DataFrame) -> Optional[str]:

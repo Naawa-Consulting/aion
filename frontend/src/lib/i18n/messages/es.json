@@ -354,6 +354,7 @@
     "title": "Análisis y atribución",
     "print": "Imprimir reporte",
     "printedAt": "Generado: {value}",
+    "printMeta": "R²: {r2} · Versión del dataset: {version}",
     "filters": {
       "dataset": "Dataset",
       "model": "Modelo",
@@ -379,6 +380,10 @@
     "economicsNotConfiguredLink": "Configurar en Transform",
     "kpis": {
       "targetFallback": "la variable objetivo",
+      "fit": "Ajuste del modelo",
+      "fitTooltip": "R² mide qué tan bien el modelo explica el comportamiento de {yVar}. Por debajo de 70% conviene revisar el modelo. Error absoluto (MAE): {maeRel} · Error cuadrático (RMSE): {rmseRel}, relativos al promedio histórico de {yVar}.",
+      "reliable": "Confiable",
+      "review": "Revisar",
       "totalContribution": "Total {yVar}",
       "totalContributionTooltip": "Suma de la contribución de todas las variables sobre {yVar} en el periodo seleccionado.",
       "baseline": "Baseline",
@@ -410,12 +415,22 @@
       "economics": "Economía",
       "saturation": "Saturación"
     },
+    "waterfall": {
+      "yAxisLabel": "Contribución",
+      "totalLabel": "Total",
+      "tooltipValue": "Contribución",
+      "tooltipPercent": "% del total",
+      "tooltipDelta": "Aporte al total",
+      "baselineHint": "Baseline: estacionalidad y tendencia — no es un canal en el que se pueda invertir."
+    },
     "table": {
       "includeBaseline": "Incluir baseline",
       "viewGroup": "Grupo",
       "viewGroupSubgroup": "Grupo / Subgrupo",
       "viewVariable": "Grupo / Subgrupo / Variable",
       "export": "Exportar Excel",
+      "filterByGroup": "Filtrar por grupo:",
+      "filterBySubgroup": "Filtrar por subgrupo:",
       "colGroup": "Grupo",
       "colSubgroup": "Subgrupo",
       "colVariable": "Variable",
@@ -426,7 +441,8 @@
       "colRoi": "ROI",
       "colRoas": "ROAS",
       "unmodeled": "Sin modelar",
-      "empty": "Selecciona un modelo para ver contribuciones."
+      "empty": "Selecciona un modelo para ver contribuciones.",
+      "emptyFiltered": "Ningún resultado con los filtros seleccionados."
     },
     "timeseries": {
       "timeColumn": "Columna de tiempo",
@@ -445,7 +461,9 @@
       "export": "Exportar Excel",
       "error": "No se pudieron cargar las contribuciones apiladas. Intenta de nuevo.",
       "empty": "Sin datos para los filtros seleccionados.",
-      "noTimeColumn": "Selecciona un dataset, modelo y columna de tiempo para ver contribuciones apiladas."
+      "noTimeColumn": "Selecciona un dataset, modelo y columna de tiempo para ver contribuciones apiladas.",
+      "yAxisPercent": "% del total",
+      "other": "Otros"
     },
     "economics": {
       "title": "Inversión vs. ingreso en el tiempo",
@@ -456,6 +474,10 @@
       "error": "No se pudo cargar la serie de economía. Intenta de nuevo.",
       "totalInvestment": "Inversión total",
       "totalRevenue": "Ingreso total",
+      "totalRoi": "ROI total",
+      "channelInvestment": "Inversión ({name})",
+      "channelRevenue": "Ingreso ({name})",
+      "channelRoi": "ROI ({name})",
       "seriesInvestmentTotal": "Inversión total",
       "seriesRevenueTotal": "Ingreso total",
       "seriesInvestmentChannel": "Inversión (canal)",
@@ -464,8 +486,12 @@
     "saturation": {
       "title": "Curvas de saturación",
       "subtitle": "Punto de inversión actual vs. la curva de respuesta completa del canal — para justificar decisiones de inversión",
-      "currentLevel": "nivel actual",
+      "historicalAverage": "promedio histórico",
       "ceiling": "techo",
+      "xAxisLabel": "Nivel de la variable",
+      "yAxisLabel": "% de saturación",
+      "levelTooltipLabel": "Nivel",
+      "saturationTooltipLabel": "Saturación",
       "saturationCaption": "{percent} de saturación",
       "investmentCaption": "Inversión real: {value} ({name})"
     },

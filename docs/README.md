@@ -33,6 +33,9 @@ fallback, just not localized).
 - Working sample selector: dataset detail now exposes a “Working Sample Size” control (All rows vs. Custom). Selection calls `PATCH /datasets/{id}/sample_size` (with `{ sample_size: null|number }`), persists on the dataset, and every downstream module (Transform/Modeling/Analysis/Predict) automatically restricts computations to the first `sample_size` rows. Responses now include `sample_size` and `total_rows` so the UI can display “Currently using X of Y rows” and show a confirmation/loading overlay before applying the change.
 - Time variable selector: choose a temporal column inside the dataset detail card. `GET /datasets/{id}/time_candidates` suggests columns; `PATCH /datasets/{id}/time_variable` saves `{ column, coerce, time_format, timezone, frequency? }` (or clears when `column=null`). All analytics endpoints now load data via the helper that enforces sample size + datetime parsing, so temporal features (lag/decay, stacked charts, scenario horizons) stay consistent.
 - **Dataset frequency (Fase 8, D1)**: `Dataset.frequency` (`"daily"|"weekly"|"monthly"|null`) is metadata only for now — it doesn't re-aggregate the dataset or change model fitting. Set automatically on `PATCH /datasets/{id}/time_variable` from the modal delta between consecutive sorted timestamps of the chosen column (`≤3 days → daily`, `≤10 → weekly`, else `monthly`), or pass `frequency` explicitly in the same request to override the inference. Returned on `DatasetOut.frequency` and `TimeCandidateResponse.current.frequency`. No UI yet (backend-only phase) — a future Predict phase (P1) uses it as the default/floor for scenario granularity.
+- **Dataset version on `GET /datasets/{id}/meta`** (Fase 8/Fase 4, A09-R10): `DatasetMeta.version` now
+  echoes `Dataset.version` (already tracked for "Update File" replacements) — Analysis reads it to show
+  provenance in its print report and Excel exports (see Module 4), rather than needing a second endpoint.
 - Replace dataset file: new “Update File” action opens a modal that uploads a CSV/XLSX via `POST /datasets/{id}/update` (strict vs. force schema modes). Each replacement writes `/data/{dataset_id}/v{n}.parquet`, bumps the dataset’s `version`, and archives the previous file so `GET /datasets/{id}/versions` can list history. Schema differences return 400 with added/removed columns, and a success toast announces the new version.
 - Dependent variable: `Dataset.dependent_variable` (nullable string, a column name) is set via `PATCH /datasets/{id}/dependent_variable` with `{ column: string|null }` (400 if the column doesn't exist) and returned on `DatasetOut`. UI: a "Dependent variable" `Select` on the dataset detail card (right after the Time variable card), auto-saving on change; `POST /variables/transform/preview` (Module 2) reads it to add correlation-vs-dependent to its preview response.
 - Hide variable from Datasets: the dataset summary modal's column table ("View details") now fetches `GET /variables?dataset_id=...&include_excluded=true` alongside `GET /datasets/{id}/summary` and joins by column name, adding a "Hide" checkbox column that calls `PATCH /variables/{id}/categorization` with `{ is_excluded }` only (see Module 2 — this is exactly the omit-vs-null-safe shape that lets a page with no group/subgroup context toggle just this one field).
@@ -148,7 +151,11 @@ fallback, just not localized).
 - Roles: `POST /models/{id}/role` with `hero|challenger1|challenger2|none` (enforces 1 Hero + 2 Challengers max). Legacy `/hero` endpoint still works.
 - Summary: `GET /models/{id}/summary` ⇒ intercept + coefficients with β, std err, t, p, VIF, plus
   (new) `is_media`, `decay`, `half_life`, `hill_k`, `hill_s`, `lag`, `raw_mean` per coefficient when
-  that variable is media-flagged (see below); all `null` for control variables.
+  that variable is media-flagged (see below); all `null` for control variables. Also returns
+  `y_mean` (Fase 8/Fase 4, top-level, alongside `intercept`/`coefficients`) — the fitted `y`
+  series' own mean, reusing a value already computed during the fit rather than a new query.
+  Analysis uses it to express MAE/RMSE as a % of the dependent variable's historical average
+  (`GET /analysis`'s own KPI card, not this endpoint's own consumer — see Module 4).
 - Predictions: `GET /models/{id}/predictions?granularity=auto|weekly|monthly[&time_col=col]` ⇒ `{index, y_true, y_pred, residuals}` (when not auto, requires a datetime column).
 - Metrics stored: R², Adjusted R², VIF, Durbin–Watson, MAE, RMSE, MAPE (exposed via `ModelOut.metrics`).
 - Frontend `/modeling` now offers correlation bars with search, creation/edit form, model table with hero/challenger controls, comparison dashboard, hero coefficient table, and actual-vs-model chart with residual toggle.
@@ -406,6 +413,43 @@ Investment KPI by orders of magnitude).
 - If the dataset has no `ConversionSettings` configured, `economics_configured=false` and the
   optimizer maximizes projected contribution instead of revenue (same allocation logic, one factor
   dropped) — usable before the economic layer is set up, not blocked by it.
+
+### Analysis legible (Fase 8, Fase 4 — not to be confused with the "Exports (Fase 4)" section above,
+which is the *original* 7-phase redesign's Fase 4; see BITACORA "Rediseño UI/UX" for the naming history)
+
+- **R² + dataset version, provenance everywhere an export leaves the app**: `GET
+  /analysis/{id}/export/summary.xlsx`, `POST /analysis/summary/export`, and `GET
+  /analysis/{id}/export/stacked.xlsx` now all include an `Info` sheet (Model, Dataset, Dataset
+  version, R², Date range, Generated timestamp) via a shared `routers/analysis.py::_export_info_sheet`
+  helper — no response shape changed for the existing sheets. The `/analysis` print report
+  (`.print-only` header) shows the same R²/dataset version line. Dataset version comes from the new
+  `DatasetMeta.version` field (see Module 1); R² from `ModelMetrics`, already loaded per model.
+- **`y_mean` on `GET /models/{id}/summary`** (see Module 3): Analysis's Fit KPI card shows R² + a
+  quality badge (same `>0.7` threshold Modeling/Resumen Ejecutivo already use) and expresses
+  MAE/RMSE as a % of this value in the card's tooltip, instead of showing raw error numbers with no
+  sense of scale.
+- **Shared `WaterfallChart`** (`frontend/src/components/charts/waterfall-chart.tsx`): the
+  baseline→groups→Total attribution waterfall, previously inline in `executive-summary/page.tsx`
+  only, is now a standalone component (props: `baseline`, `segments`, per-string labels, and an
+  optional `yAxisLabel` — no page-specific state). Resumen Ejecutivo renders from it unchanged;
+  `/analysis` replaced its always-visible "Contribución por grupo" bar (the old `GroupProportionBar`,
+  now deleted) with this same component, passing `yAxisLabel="Contribución"` — both fed by the same
+  `proportionSegments` data Analysis's KPI cards already used (so the numbers can't drift out of
+  sync). Not a separate tab: the waterfall *is* the main contribution chart on `/analysis` now.
+- **Detail table filter + sort** (A5/A6): the Analysis detail table gets a multi-select
+  group/subgroup filter (`ToggleChip` rows, AND-combined, reset on model change) and click-to-sort
+  column headers. The sort affordance lives in the shared `components/ui/table.tsx::Th` itself now
+  (`sortDirection`/`onSort` props, optional — every other `<Th>` in the app is unaffected), so any
+  future sortable table reuses the same control instead of a bespoke one.
+- **Chart legibility**: the stacked contributions chart and the investment/revenue timeseries chart
+  both gained a Y-axis title (`{yVar}` or the active currency); the saturation curves gained X/Y axis
+  titles and a real tooltip label (previously a bare `x=1.2`/`45%` with no indication of what those
+  numbers were). The saturation chart's ceiling/historical-average reference lines switched from a
+  categorical red (`chartColor(7)`, previously reused for both regardless of meaning) to the
+  `warning`/`good` semantic tokens in `lib/chart-colors.ts`'s `CHART_STATUS_LIGHT/DARK`. The
+  timeseries chart's series are now sorted by magnitude (sum of `|value|` across the period) before
+  color assignment, and anything past the 8 categorical slots is summed into one real "Otros"
+  series instead of several distinct series silently sharing one overflow color.
 
 ## Module 5
 

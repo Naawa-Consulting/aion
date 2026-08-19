@@ -6,10 +6,10 @@ import Link from "next/link";
 import { toast } from "sonner";
 import { useTranslations } from "next-intl";
 import { useTheme } from "next-themes";
-import { Bar, BarChart, CartesianGrid, Cell, LabelList, ResponsiveContainer, Tooltip as RechartsTooltip, XAxis, YAxis } from "recharts";
 import { Info, Printer, Download } from "lucide-react";
 
 import { Card, CardHeader } from "@/components/ui/card";
+import { WaterfallChart } from "@/components/charts/waterfall-chart";
 import { Select } from "@/components/ui/select";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -108,9 +108,6 @@ export default function ExecutiveSummaryPage() {
   const { resolvedTheme } = useTheme();
   const isDarkTheme = resolvedTheme === "dark";
   const mutedColor = isDarkTheme ? "#81858e" : "#6d7178";
-  const lineColor = isDarkTheme ? "#262a2f" : "#e5e6ea";
-  const surfaceColor = isDarkTheme ? "#16181b" : "#ffffff";
-  const inkColor = isDarkTheme ? "#f2f3f5" : "#17181c";
   const { activeCompanyId } = useGlobalStore();
   const [datasets, setDatasets] = useState<Dataset[]>([]);
   const [selectedDataset, setSelectedDataset] = useState("");
@@ -258,54 +255,22 @@ export default function ExecutiveSummaryPage() {
   const chartGroups = [...nonBaselineGroups].sort((a, b) => Math.abs(b.contribution) - Math.abs(a.contribution));
   const yVar = summary?.model?.y_var ?? "";
 
-  // Waterfall build-up: baseline anchors at 0, each group steps the running total
-  // (up or down), and a closing Total bar spans 0 → the final cumulative percent
-  // (always 100% by construction, since `percent` is each row's share of
-  // `total_contribution` — see backend `analysis.py::percent`).
-  type WaterfallDatum = {
-    key: string;
-    name: string;
-    base: number;
-    range: number;
-    contribution: number;
-    percent: number;
-    color: string;
-    isTotal?: boolean;
-  };
-  const waterfallData: WaterfallDatum[] = [];
-  let cumulative = 0;
-  const pushStep = (key: string, name: string, contribution: number, percent: number, color: string) => {
-    const start = cumulative;
-    cumulative += percent;
-    waterfallData.push({
-      key,
-      name,
-      base: Math.min(start, cumulative),
-      range: Math.abs(cumulative - start),
-      contribution,
-      percent,
-      color,
-    });
-  };
-  if (baselineGroup) {
-    pushStep("baseline", baselineGroup.group_name || "Baseline", baselineGroup.contribution, baselineGroup.percent, mutedColor);
-  }
-  chartGroups.forEach((g) => {
+  // Waterfall data (extracted to the shared `WaterfallChart`, Fase 8 A4): baseline first, then
+  // groups sorted by magnitude with their assigned color — the component itself builds the
+  // running-total steps and the closing Total bar.
+  const waterfallBaseline = baselineGroup
+    ? {
+        key: "baseline",
+        name: baselineGroup.group_name || "Baseline",
+        contribution: baselineGroup.contribution,
+        percent: baselineGroup.percent,
+        color: mutedColor,
+      }
+    : null;
+  const waterfallSegments = chartGroups.map((g) => {
     const key = g.group_name || g.group_id || "";
-    pushStep(key, g.group_name || key, g.contribution, g.percent, colorMap[key]);
+    return { key, name: g.group_name || key, contribution: g.contribution, percent: g.percent, color: colorMap[key] };
   });
-  if (groups.length > 0) {
-    waterfallData.push({
-      key: "total",
-      name: t("groups.totalLabel"),
-      base: Math.min(0, cumulative),
-      range: Math.abs(cumulative),
-      contribution: summary?.total_contribution ?? 0,
-      percent: cumulative,
-      color: inkColor,
-      isTotal: true,
-    });
-  }
 
   const fitBadge =
     selectedModelInfo?.r2 !== null && selectedModelInfo?.r2 !== undefined
@@ -524,86 +489,17 @@ export default function ExecutiveSummaryPage() {
                 <CardHeader as="h2" title={t("groups.title")} subtitle={t("groups.subtitle", { yVar: yVarOrFallback })} />
                 {loading ? (
                   <Skeleton className="h-chart-md" />
-                ) : waterfallData.length ? (
-                  <>
-                    <div className="h-chart-md">
-                      <ResponsiveContainer width="100%" height="100%">
-                        <BarChart data={waterfallData} margin={{ top: 24, bottom: 8 }}>
-                          <CartesianGrid vertical={false} stroke={lineColor} />
-                          <XAxis
-                            type="category"
-                            dataKey="name"
-                            tick={{ fill: mutedColor, fontSize: 12 }}
-                            axisLine={{ stroke: lineColor }}
-                            tickLine={false}
-                          />
-                          <YAxis
-                            type="number"
-                            tickFormatter={(v) => formatChartPercent(v, 0)}
-                            tick={{ fill: mutedColor, fontSize: 12 }}
-                            axisLine={{ stroke: lineColor }}
-                            tickLine={false}
-                          />
-                          <RechartsTooltip
-                            cursor={{ fill: lineColor, opacity: 0.4 }}
-                            content={({ active, payload }) => {
-                              if (!active || !payload?.length) return null;
-                              const d = payload[0].payload as (typeof waterfallData)[number];
-                              return (
-                                <div
-                                  className="rounded-lg border px-3 py-2 text-xs shadow-[var(--shadow-soft)]"
-                                  style={{ background: surfaceColor, borderColor: lineColor }}
-                                >
-                                  <p className="font-medium text-ink">{d.name}</p>
-                                  <p className="text-muted">
-                                    {t("groups.tooltipValue")}: {formatChartNumber(d.contribution, 1)}
-                                  </p>
-                                  <p className="text-muted">
-                                    {d.isTotal ? t("groups.tooltipPercent") : t("groups.tooltipDelta")}:{" "}
-                                    {formatChartPercent(d.percent, 1)}
-                                  </p>
-                                </div>
-                              );
-                            }}
-                          />
-                          {/* Invisible foundation bar: positions the visible "range" segment at the
-                              right cumulative offset so each step floats instead of starting at 0. */}
-                          <Bar dataKey="base" stackId="waterfall" fill="transparent" isAnimationActive={false} />
-                          <Bar dataKey="range" stackId="waterfall" radius={[4, 4, 0, 0]} barSize={40}>
-                            {waterfallData.map((d) => (
-                              <Cell key={d.key} fill={d.color} />
-                            ))}
-                            <LabelList
-                              dataKey="percent"
-                              content={(props: any) => {
-                                const { x, y, width, height, value, index } = props;
-                                const d = waterfallData[index as number];
-                                if (!d || typeof value !== "number") return null;
-                                const positive = value >= 0;
-                                const labelY = positive ? y - 6 : y + height + 14;
-                                const text = `${!d.isTotal && value > 0 ? "+" : ""}${formatChartPercent(value, 1)}`;
-                                return (
-                                  <text
-                                    x={x + width / 2}
-                                    y={labelY}
-                                    textAnchor="middle"
-                                    fontSize={12}
-                                    fontWeight={500}
-                                    fill={inkColor}
-                                  >
-                                    {text}
-                                  </text>
-                                );
-                              }}
-                            />
-                          </Bar>
-                        </BarChart>
-                      </ResponsiveContainer>
-                    </div>
-                    {baselineGroup && <p className="text-xs text-muted">{t("groups.baselineHint")}</p>}
-                  </>
                 ) : (
-                  <EmptyState title={t("groups.empty")} />
+                  <WaterfallChart
+                    baseline={waterfallBaseline}
+                    segments={waterfallSegments}
+                    totalLabel={t("groups.totalLabel")}
+                    tooltipValueLabel={t("groups.tooltipValue")}
+                    tooltipPercentLabel={t("groups.tooltipPercent")}
+                    tooltipDeltaLabel={t("groups.tooltipDelta")}
+                    emptyLabel={t("groups.empty")}
+                    baselineHint={t("groups.baselineHint")}
+                  />
                 )}
               </Card>
             </>

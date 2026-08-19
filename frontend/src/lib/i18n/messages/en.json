@@ -354,6 +354,7 @@
     "title": "Analysis & Attribution",
     "print": "Print report",
     "printedAt": "Generated: {value}",
+    "printMeta": "R²: {r2} · Dataset version: {version}",
     "filters": {
       "dataset": "Dataset",
       "model": "Model",
@@ -379,6 +380,10 @@
     "economicsNotConfiguredLink": "Configure in Transform",
     "kpis": {
       "targetFallback": "the target variable",
+      "fit": "Model fit",
+      "fitTooltip": "R² measures how well the model explains {yVar}. Below 70% it's worth reviewing the model. Mean absolute error (MAE): {maeRel} · Root mean squared error (RMSE): {rmseRel}, relative to the historical average of {yVar}.",
+      "reliable": "Reliable",
+      "review": "Review",
       "totalContribution": "Total {yVar}",
       "totalContributionTooltip": "Sum of every variable's contribution to {yVar} over the selected period.",
       "baseline": "Baseline",
@@ -410,12 +415,22 @@
       "economics": "Economics",
       "saturation": "Saturation"
     },
+    "waterfall": {
+      "yAxisLabel": "Contribution",
+      "totalLabel": "Total",
+      "tooltipValue": "Contribution",
+      "tooltipPercent": "% of total",
+      "tooltipDelta": "Step contribution",
+      "baselineHint": "Baseline: seasonality and trend — not a channel you can invest in."
+    },
     "table": {
       "includeBaseline": "Include baseline",
       "viewGroup": "Group",
       "viewGroupSubgroup": "Group / Subgroup",
       "viewVariable": "Group / Subgroup / Variable",
       "export": "Export Excel",
+      "filterByGroup": "Filter by group:",
+      "filterBySubgroup": "Filter by subgroup:",
       "colGroup": "Group",
       "colSubgroup": "Subgroup",
       "colVariable": "Variable",
@@ -426,7 +441,8 @@
       "colRoi": "ROI",
       "colRoas": "ROAS",
       "unmodeled": "Not modeled",
-      "empty": "Select a model to view contributions."
+      "empty": "Select a model to view contributions.",
+      "emptyFiltered": "No rows match the selected filters."
     },
     "timeseries": {
       "timeColumn": "Time column",
@@ -445,7 +461,9 @@
       "export": "Export Excel",
       "error": "Couldn't load stacked contributions. Please try again.",
       "empty": "No data for the selected filters.",
-      "noTimeColumn": "Select a dataset, model, and time column to view stacked contributions."
+      "noTimeColumn": "Select a dataset, model, and time column to view stacked contributions.",
+      "yAxisPercent": "% of total",
+      "other": "Other"
     },
     "economics": {
       "title": "Investment vs. revenue over time",
@@ -456,6 +474,10 @@
       "error": "Couldn't load the economics timeseries. Please try again.",
       "totalInvestment": "Total investment",
       "totalRevenue": "Total revenue",
+      "totalRoi": "Total ROI",
+      "channelInvestment": "Investment ({name})",
+      "channelRevenue": "Revenue ({name})",
+      "channelRoi": "ROI ({name})",
       "seriesInvestmentTotal": "Total investment",
       "seriesRevenueTotal": "Total revenue",
       "seriesInvestmentChannel": "Investment (channel)",
@@ -464,8 +486,12 @@
     "saturation": {
       "title": "Saturation curves",
       "subtitle": "Current investment point vs. the channel's full response curve — to justify investment decisions",
-      "currentLevel": "current level",
+      "historicalAverage": "historical average",
       "ceiling": "ceiling",
+      "xAxisLabel": "Variable level",
+      "yAxisLabel": "% saturation",
+      "levelTooltipLabel": "Level",
+      "saturationTooltipLabel": "Saturation",
       "saturationCaption": "{percent} saturated",
       "investmentCaption": "Actual investment: {value} ({name})"
     },

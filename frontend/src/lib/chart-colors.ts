@@ -49,6 +49,12 @@ export function chartColor(index: number, isDark: boolean): string {
   return isDark ? OVERFLOW_DARK : OVERFLOW_LIGHT;
 }
 
+// Same neutral `chartColor` folds extra series into — exposed directly for callers that build
+// their own explicit "Otros/Other" aggregate series instead of letting the palette overflow.
+export function overflowColor(isDark: boolean): string {
+  return isDark ? OVERFLOW_DARK : OVERFLOW_LIGHT;
+}
+
 /**
  * Assigns a stable color per name given a fixed, deterministic ordering
  * (e.g. names sorted once upstream) — never re-derive order from a hash or

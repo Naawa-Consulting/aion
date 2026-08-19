@@ -1,5 +1,6 @@
 import React from "react";
 import clsx from "clsx";
+import { ChevronDown, ChevronUp, ChevronsUpDown } from "lucide-react";
 
 type TableProps = React.HTMLAttributes<HTMLTableElement> & {
   wrapperClassName?: string;
@@ -22,10 +23,14 @@ export function TableRow({ className, ...props }: React.HTMLAttributes<HTMLTable
   return <tr className={clsx("border-b border-line last:border-0", className)} {...props} />;
 }
 
-type ThProps = React.ThHTMLAttributes<HTMLTableCellElement>;
+type ThProps = React.ThHTMLAttributes<HTMLTableCellElement> & {
+  /** Fase 8 A6: pass both to make this header clickable-sortable; omit for a plain header. */
+  sortDirection?: "asc" | "desc" | null;
+  onSort?: () => void;
+};
 
 // scope="col" por defecto — hoy hay 38 <th> en la app y ninguno lo tiene.
-export function Th({ className, scope = "col", ...props }: ThProps) {
+export function Th({ className, scope = "col", sortDirection, onSort, children, ...props }: ThProps) {
   return (
     <th
       scope={scope}
@@ -34,7 +39,26 @@ export function Th({ className, scope = "col", ...props }: ThProps) {
         className
       )}
       {...props}
-    />
+    >
+      {onSort ? (
+        <button
+          type="button"
+          onClick={onSort}
+          className="inline-flex items-center gap-1 uppercase tracking-wide hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+        >
+          {children}
+          {sortDirection === "asc" ? (
+            <ChevronUp className="h-3 w-3" />
+          ) : sortDirection === "desc" ? (
+            <ChevronDown className="h-3 w-3" />
+          ) : (
+            <ChevronsUpDown className="h-3 w-3 opacity-40" />
+          )}
+        </button>
+      ) : (
+        children
+      )}
+    </th>
   );
 }
 

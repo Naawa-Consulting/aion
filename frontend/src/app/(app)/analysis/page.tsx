@@ -42,7 +42,15 @@ import { Disclosure } from "@/components/ui/disclosure";
 import { Tabs } from "@/components/ui/tabs";
 import { ToggleChip } from "@/components/ui/toggle-chip";
 import { Table, TableHeader, TableRow, Th, TableCell } from "@/components/ui/table";
-import { assignCategoricalColors, chartColor, useStableCategoricalColor } from "@/lib/chart-colors";
+import { WaterfallChart } from "@/components/charts/waterfall-chart";
+import {
+  assignCategoricalColors,
+  chartColor,
+  overflowColor,
+  useStableCategoricalColor,
+  CHART_STATUS_LIGHT,
+  CHART_STATUS_DARK,
+} from "@/lib/chart-colors";
 import { formatChartNumber, formatChartPercent, formatCurrency } from "@/lib/chart-format";
 import { EMPTY_VALUE } from "@/lib/format";
 import { downloadBlob } from "@/lib/download";
@@ -81,6 +89,7 @@ type DatasetMeta = {
   time_column: string | null;
   date_min: string | null;
   date_max: string | null;
+  version: number;
 };
 type DateBounds = { min: string | null; max: string | null };
 type ChannelEconomics = {
@@ -138,6 +147,7 @@ const MODEL_ROLE_LABEL: Record<ModelRole, string> = {
 };
 const TIME_COLUMN_PLACEHOLDER = "__none__";
 const BASELINE_KEY = "__baseline__";
+const OTHER_SERIES_KEY = "__other__";
 
 const clampDateValue = (value: string | null, bounds: DateBounds): string | null => {
   if (!value) return null;
@@ -170,6 +180,7 @@ const normalizeDatasetMeta = (raw: any): DatasetMeta => ({
   time_column: raw.time_column ?? raw.timeColumn ?? null,
   date_min: raw.date_min ?? raw.dateMin ?? null,
   date_max: raw.date_max ?? raw.dateMax ?? null,
+  version: raw.version ?? 1,
 });
 
 const isBaselineKey = (key: string) => key.toLowerCase().includes("baseline") || key === "__intercept__";
@@ -243,6 +254,7 @@ function AnalysisPageContent() {
   const [stacked, setStacked] = useState<StackedData | null>(null);
   const [timeCol, setTimeCol] = useState(TIME_COLUMN_PLACEHOLDER);
   const [timeColumnDefault, setTimeColumnDefault] = useState<string | null>(null);
+  const [datasetVersion, setDatasetVersion] = useState<number | null>(null);
   const [freq, setFreq] = useState<"day" | "week" | "month">(() => {
     const urlFreq = initialParamsRef.current.get("freq");
     return urlFreq === "day" || urlFreq === "week" || urlFreq === "month" ? urlFreq : "month";
@@ -259,6 +271,11 @@ function AnalysisPageContent() {
   const [printedAt, setPrintedAt] = useState<string | null>(null);
   const [highlightedChannel, setHighlightedChannel] = useState<string>("");
   const [modelCoefficients, setModelCoefficients] = useState<ModelCoefficient[]>([]);
+  const [modelYMean, setModelYMean] = useState<number | null>(null);
+  const [groupFilter, setGroupFilter] = useState<string[]>([]);
+  const [subgroupFilter, setSubgroupFilter] = useState<string[]>([]);
+  const [sortColumn, setSortColumn] = useState<string | null>(null);
+  const [sortDirection, setSortDirection] = useState<"asc" | "desc">("desc");
   const [loading, setLoading] = useState(false);
   const [summaryError, setSummaryError] = useState(false);
   const [initializing, setInitializing] = useState(true);
@@ -327,10 +344,12 @@ function AnalysisPageContent() {
   const fetchDatasetMeta = useCallback(async (datasetId: string) => {
     setTimeColumnDefault(null);
     setDateBounds({ min: null, max: null });
+    setDatasetVersion(null);
     try {
       const raw = await apiFetch<any>(`/datasets/${datasetId}/meta`);
       const data = normalizeDatasetMeta(raw);
       setTimeColumnDefault(data.time_column);
+      setDatasetVersion(data.version);
       const bounds = { min: data.date_min ?? null, max: data.date_max ?? null };
       setDateBounds(bounds);
       if (!dateRangeInitializedRef.current && (bounds.min || bounds.max)) {
@@ -488,11 +507,26 @@ function AnalysisPageContent() {
   useEffect(() => {
     if (!selectedModel) {
       setModelCoefficients([]);
+      setModelYMean(null);
       return;
     }
-    apiFetch<{ coefficients: ModelCoefficient[] }>(`/models/${selectedModel}/summary`)
-      .then((data) => setModelCoefficients(data.coefficients || []))
-      .catch(() => setModelCoefficients([]));
+    apiFetch<{ coefficients: ModelCoefficient[]; y_mean?: number | null }>(`/models/${selectedModel}/summary`)
+      .then((data) => {
+        setModelCoefficients(data.coefficients || []);
+        setModelYMean(data.y_mean ?? null);
+      })
+      .catch(() => {
+        setModelCoefficients([]);
+        setModelYMean(null);
+      });
+  }, [selectedModel]);
+
+  // A5/A6 (Fase 8): reset the detail table's filter/sort whenever the model changes — a stale
+  // group filter from the previous model could otherwise hide every row silently.
+  useEffect(() => {
+    setGroupFilter([]);
+    setSubgroupFilter([]);
+    setSortColumn(null);
   }, [selectedModel]);
 
   const readyForStacked = Boolean(selectedModel && timeCol && timeCol !== TIME_COLUMN_PLACEHOLDER);
@@ -683,23 +717,32 @@ function AnalysisPageContent() {
     [asPercent]
   );
 
+  // A03-R3: sort by magnitude (sum of |value| across the whole period) before assigning color,
+  // same principle as groupColorMap/proportionSegments below, and fold anything past the 8
+  // categorical slots into one real "Otros" series (summed per period) instead of letting
+  // `chartColor` silently paint several distinct series the same flat overflow neutral.
+  const MAX_CATEGORICAL_SERIES = 8;
   const sortedSeries = useMemo(() => {
     if (!stacked) return [];
-    const arr = [...stacked.series];
-    arr.sort((a, b) => {
-      if (isBaselineKey(a.key) && !isBaselineKey(b.key)) return -1;
-      if (!isBaselineKey(a.key) && isBaselineKey(b.key)) return 1;
-      return a.key.localeCompare(b.key);
-    });
-    return arr;
+    const baseline = stacked.series.filter((s) => isBaselineKey(s.key));
+    const rest = stacked.series
+      .filter((s) => !isBaselineKey(s.key))
+      .map((s) => ({ ...s, magnitude: s.values.reduce((sum, v) => sum + Math.abs(v ?? 0), 0) }))
+      .sort((a, b) => b.magnitude - a.magnitude);
+    if (rest.length <= MAX_CATEGORICAL_SERIES) return [...baseline, ...rest];
+    const kept = rest.slice(0, MAX_CATEGORICAL_SERIES - 1);
+    const overflow = rest.slice(MAX_CATEGORICAL_SERIES - 1);
+    const otherValues = stacked.index.map((_, idx) => overflow.reduce((sum, s) => sum + (s.values[idx] ?? 0), 0));
+    return [...baseline, ...kept, { key: OTHER_SERIES_KEY, values: otherValues }];
   }, [stacked]);
 
   const seriesColorMap = useMemo(() => {
     const map: Record<string, string> = {};
     sortedSeries.forEach((series) => {
-      // Baseline is a fixed neutral, not a categorical slot — "no es un canal" (same rule
-      // executive-summary's proportion chart already established for this exact case).
-      map[series.key] = isBaselineKey(series.key) ? mutedColor : colorFor(series.key, isDarkTheme);
+      // Baseline and the "Otros" bucket are fixed neutrals, not categorical slots — neither is
+      // "un canal" (same rule executive-summary's proportion chart already established).
+      map[series.key] =
+        isBaselineKey(series.key) ? mutedColor : series.key === OTHER_SERIES_KEY ? overflowColor(isDarkTheme) : colorFor(series.key, isDarkTheme);
     });
     return map;
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -783,6 +826,11 @@ function AnalysisPageContent() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [summary, nonBaselineGroups, baselineGroup, groupColorMap, t]);
 
+  // A4 (Fase 8): same segments driving the proportion bar/KPI cards, fed into the shared
+  // waterfall chart extracted from executive-summary/page.tsx — one attribution story, two views.
+  const waterfallBaseline = proportionSegments.find((s) => s.key === BASELINE_KEY) ?? null;
+  const waterfallSegments = proportionSegments.filter((s) => s.key !== BASELINE_KEY);
+
   const hasSubgroups = summary?.subgroups?.some((sg: any) => sg.subgroup_id && sg.subgroup_id !== "baseline") ?? false;
 
   const tableRows = useMemo(() => {
@@ -819,6 +867,11 @@ function AnalysisPageContent() {
   const unmatchedChannels = useMemo(
     () => (economics?.channels || []).filter((ch) => !ch.proxy_variable || !ch.proxy_in_current_model),
     [economics]
+  );
+
+  const highlightedChannelInfo = useMemo(
+    () => economics?.channels.find((ch) => ch.id === highlightedChannel) ?? null,
+    [economics, highlightedChannel]
   );
 
   // Folds ROI/ROAS/investment/revenue onto the same contribution rows instead of a separate
@@ -890,8 +943,83 @@ function AnalysisPageContent() {
     return withEcon;
   }, [tableRows, tableView, hasSubgroups, channelByVariable, unmatchedChannels, varMetaMap, economics, t]);
 
+  // A5 (Fase 8): multi-select group/subgroup filter for the detail table.
+  const availableGroupNames = useMemo(
+    () => Array.from(new Set((summary?.groups || []).map((g: any) => g.group_name).filter(Boolean))) as string[],
+    [summary]
+  );
+  const availableSubgroupNames = useMemo(
+    () => Array.from(new Set((summary?.subgroups || []).map((sg: any) => sg.subgroup_name).filter(Boolean))) as string[],
+    [summary]
+  );
+  const toggleInFilter = (list: string[], setList: (v: string[]) => void, value: string) => {
+    setList(list.includes(value) ? list.filter((v) => v !== value) : [...list, value]);
+  };
+  const filteredTableRows = useMemo(() => {
+    return (enrichedTableRows as any[]).filter((row) => {
+      if (groupFilter.length && !groupFilter.includes(row.group_name)) return false;
+      if (tableView !== "group" && subgroupFilter.length && !subgroupFilter.includes(row.subgroup_name)) return false;
+      return true;
+    });
+  }, [enrichedTableRows, groupFilter, subgroupFilter, tableView]);
+
+  // A6 (Fase 8): click-to-sort column headers, reusing the shared `Th` component's onSort/
+  // sortDirection props so every future sortable table can follow the same pattern.
+  const TABLE_COLUMN_ACCESSORS: Record<string, (row: any) => any> = {
+    group: (row) => row.group_name,
+    subgroup: (row) => row.subgroup_name,
+    variable: (row) => row.display_name ?? row.name,
+    contribution: (row) => row.contribution,
+    percent: (row) => row.percent,
+    investment: (row) => row.investment,
+    revenue: (row) => row.revenue,
+    roi: (row) => row.roi,
+    roas: (row) => row.roas,
+  };
+  const toggleSort = (column: string) => {
+    setSortColumn((prev) => {
+      if (prev !== column) {
+        setSortDirection("desc");
+        return column;
+      }
+      setSortDirection((d) => (d === "desc" ? "asc" : "desc"));
+      return column;
+    });
+  };
+  const sortedTableRows = useMemo(() => {
+    if (!sortColumn) return filteredTableRows;
+    const accessor = TABLE_COLUMN_ACCESSORS[sortColumn];
+    const rows = [...filteredTableRows];
+    rows.sort((a, b) => {
+      const av = accessor(a);
+      const bv = accessor(b);
+      if (av == null && bv == null) return 0;
+      if (av == null) return 1;
+      if (bv == null) return -1;
+      const cmp = typeof av === "number" && typeof bv === "number" ? av - bv : String(av).localeCompare(String(bv));
+      return sortDirection === "asc" ? cmp : -cmp;
+    });
+    return rows;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filteredTableRows, sortColumn, sortDirection]);
+
   const hasMediaCoefficients = modelCoefficients.some((c) => c.is_media);
   const hasEconomicsChannels = Boolean(economics && economics.channels.length > 0);
+
+  // A09-R1/A06-R7 (Fase 8): R² + quality badge, with MAE/RMSE expressed as % of the historical
+  // average of {yVar} (`modelYMean`, from `/models/{id}/summary`) so the raw error numbers mean
+  // something without knowing the dependent variable's own scale.
+  const selectedModelInfo = models.find((m) => m.id === selectedModel);
+  const fitBadge =
+    selectedModelInfo?.r2 !== null && selectedModelInfo?.r2 !== undefined
+      ? selectedModelInfo.r2 > 0.7
+        ? { variant: "success" as const, label: t("kpis.reliable") }
+        : { variant: "warning" as const, label: t("kpis.review") }
+      : null;
+  const relativeError = (value: number | null | undefined) =>
+    value != null && modelYMean && Number.isFinite(modelYMean) && modelYMean !== 0
+      ? formatChartPercent((Math.abs(value) / Math.abs(modelYMean)) * 100, 1)
+      : EMPTY_VALUE;
 
   const roiValue = economics?.totals.roi ?? null;
   const roiBadge = !economics?.economics_configured
@@ -929,59 +1057,118 @@ function AnalysisPageContent() {
               {t("table.export")}
             </Button>
           </div>
+          {/* A5 (Fase 8): multi-select filter by group/subgroup, AND-combined. */}
+          {(availableGroupNames.length > 1 || (tableView !== "group" && availableSubgroupNames.length > 1)) && (
+            <div className="flex flex-wrap items-start gap-x-6 gap-y-2 text-sm no-print">
+              {availableGroupNames.length > 1 && (
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <span className="text-2xs font-medium uppercase tracking-wide text-muted">{t("table.filterByGroup")}</span>
+                  {availableGroupNames.map((name) => (
+                    <ToggleChip key={name} active={groupFilter.includes(name)} onClick={() => toggleInFilter(groupFilter, setGroupFilter, name)}>
+                      {name}
+                    </ToggleChip>
+                  ))}
+                </div>
+              )}
+              {tableView !== "group" && availableSubgroupNames.length > 1 && (
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <span className="text-2xs font-medium uppercase tracking-wide text-muted">{t("table.filterBySubgroup")}</span>
+                  {availableSubgroupNames.map((name) => (
+                    <ToggleChip
+                      key={name}
+                      active={subgroupFilter.includes(name)}
+                      onClick={() => toggleInFilter(subgroupFilter, setSubgroupFilter, name)}
+                    >
+                      {name}
+                    </ToggleChip>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
           {loading ? (
             <Skeleton className="h-64" />
           ) : summary ? (
-            <Table wrapperClassName="max-h-[420px] overflow-auto">
-              <TableHeader className="sticky top-0 z-10">
-                <TableRow>
-                  <Th>{t("table.colGroup")}</Th>
-                  {tableView !== "group" && <Th>{t("table.colSubgroup")}</Th>}
-                  {tableView === "variable" && <Th>{t("table.colVariable")}</Th>}
-                  <Th className="text-right">{t("table.colContribution")}</Th>
-                  <Th className="text-right">{t("table.colPercent")}</Th>
-                  {economics && (
-                    <>
-                      <Th className="text-right">{t("table.colInvestment")}</Th>
-                      <Th className="text-right">{t("table.colRevenue")}</Th>
-                      <Th className="text-right">{t("table.colRoi")}</Th>
-                      <Th className="text-right">{t("table.colRoas")}</Th>
-                    </>
-                  )}
-                </TableRow>
-              </TableHeader>
-              <tbody>
-                {enrichedTableRows.map((row: any, idx: number) => (
-                  <TableRow key={`${row.group_id || row.subgroup_id || row.name}-${idx}`} className="hover:bg-surface-2">
-                    <TableCell>{row.group_name || EMPTY_VALUE}</TableCell>
-                    {tableView !== "group" && <TableCell>{row.subgroup_name || EMPTY_VALUE}</TableCell>}
-                    {tableView === "variable" && <TableCell>{row.display_name ?? row.name}</TableCell>}
-                    <TableCell className="text-right tabular-nums">
-                      {row.contribution != null ? formatChartNumber(row.contribution, 1) : EMPTY_VALUE}
-                    </TableCell>
-                    <TableCell className="text-right tabular-nums">
-                      {row.percent != null ? formatChartPercent(row.percent, 1) : percentOfTotal(row.contribution)}
-                    </TableCell>
+            sortedTableRows.length ? (
+              <Table wrapperClassName="max-h-[420px] overflow-auto">
+                <TableHeader className="sticky top-0 z-10">
+                  <TableRow>
+                    <Th sortDirection={sortColumn === "group" ? sortDirection : null} onSort={() => toggleSort("group")}>
+                      {t("table.colGroup")}
+                    </Th>
+                    {tableView !== "group" && (
+                      <Th sortDirection={sortColumn === "subgroup" ? sortDirection : null} onSort={() => toggleSort("subgroup")}>
+                        {t("table.colSubgroup")}
+                      </Th>
+                    )}
+                    {tableView === "variable" && (
+                      <Th sortDirection={sortColumn === "variable" ? sortDirection : null} onSort={() => toggleSort("variable")}>
+                        {t("table.colVariable")}
+                      </Th>
+                    )}
+                    <Th className="text-right" sortDirection={sortColumn === "contribution" ? sortDirection : null} onSort={() => toggleSort("contribution")}>
+                      {t("table.colContribution")}
+                    </Th>
+                    <Th className="text-right" sortDirection={sortColumn === "percent" ? sortDirection : null} onSort={() => toggleSort("percent")}>
+                      {t("table.colPercent")}
+                    </Th>
                     {economics && (
                       <>
-                        <TableCell className="text-right tabular-nums">
-                          {row.investment != null ? formatCurrency(row.investment, currency, 0) : EMPTY_VALUE}
-                        </TableCell>
-                        <TableCell className="text-right tabular-nums">
-                          {row.revenue != null ? formatCurrency(row.revenue, currency, 0) : EMPTY_VALUE}
-                        </TableCell>
-                        <TableCell className="text-right tabular-nums">
-                          {row.roi != null ? fmtRoi(row.roi) : EMPTY_VALUE}
-                        </TableCell>
-                        <TableCell className="text-right tabular-nums">
-                          {row.roas != null ? fmtRoas(row.roas) : EMPTY_VALUE}
-                        </TableCell>
+                        <Th className="text-right" sortDirection={sortColumn === "investment" ? sortDirection : null} onSort={() => toggleSort("investment")}>
+                          {t("table.colInvestment")}
+                        </Th>
+                        <Th className="text-right" sortDirection={sortColumn === "revenue" ? sortDirection : null} onSort={() => toggleSort("revenue")}>
+                          {t("table.colRevenue")}
+                        </Th>
+                        <Th className="text-right" sortDirection={sortColumn === "roi" ? sortDirection : null} onSort={() => toggleSort("roi")}>
+                          {t("table.colRoi")}
+                        </Th>
+                        <Th className="text-right" sortDirection={sortColumn === "roas" ? sortDirection : null} onSort={() => toggleSort("roas")}>
+                          {t("table.colRoas")}
+                        </Th>
                       </>
                     )}
                   </TableRow>
-                ))}
-              </tbody>
-            </Table>
+                </TableHeader>
+                <tbody>
+                  {sortedTableRows.map((row: any, idx: number) => (
+                    <TableRow key={`${row.group_id || row.subgroup_id || row.name}-${idx}`} className="hover:bg-surface-2">
+                      <TableCell>{row.group_name || EMPTY_VALUE}</TableCell>
+                      {tableView !== "group" && <TableCell>{row.subgroup_name || EMPTY_VALUE}</TableCell>}
+                      {tableView === "variable" && (
+                        <TableCell className="max-w-[240px] truncate" title={row.display_name ?? row.name}>
+                          {row.display_name ?? row.name}
+                        </TableCell>
+                      )}
+                      <TableCell className="text-right tabular-nums">
+                        {row.contribution != null ? formatChartNumber(row.contribution, 1) : EMPTY_VALUE}
+                      </TableCell>
+                      <TableCell className="text-right tabular-nums">
+                        {row.percent != null ? formatChartPercent(row.percent, 1) : percentOfTotal(row.contribution)}
+                      </TableCell>
+                      {economics && (
+                        <>
+                          <TableCell className="text-right tabular-nums">
+                            {row.investment != null ? formatCurrency(row.investment, currency, 0) : EMPTY_VALUE}
+                          </TableCell>
+                          <TableCell className="text-right tabular-nums">
+                            {row.revenue != null ? formatCurrency(row.revenue, currency, 0) : EMPTY_VALUE}
+                          </TableCell>
+                          <TableCell className="text-right tabular-nums">
+                            {row.roi != null ? fmtRoi(row.roi) : EMPTY_VALUE}
+                          </TableCell>
+                          <TableCell className="text-right tabular-nums">
+                            {row.roas != null ? fmtRoas(row.roas) : EMPTY_VALUE}
+                          </TableCell>
+                        </>
+                      )}
+                    </TableRow>
+                  ))}
+                </tbody>
+              </Table>
+            ) : (
+              <EmptyState title={t("table.emptyFiltered")} />
+            )
           ) : (
             <EmptyState title={t("table.empty")} />
           )}
@@ -1053,7 +1240,7 @@ function AnalysisPageContent() {
                 <BarChart
                   data={chartSeries.length ? chartSeries : [{ period: "" }]}
                   stackOffset={stackOffset}
-                  margin={{ top: 10, right: 24, left: 48, bottom: 16 }}
+                  margin={{ top: 10, right: 24, left: 8, bottom: 16 }}
                   onMouseLeave={() => setHighlightedKey(null)}
                   onMouseMove={(state: any) => {
                     const activeKey = state?.activePayload?.[0]?.dataKey;
@@ -1067,6 +1254,12 @@ function AnalysisPageContent() {
                     tickFormatter={(value) => formatStackedValue(value)}
                     tick={{ fill: mutedColor, fontSize: 12 }}
                     axisLine={{ stroke: lineColor }}
+                    label={{
+                      value: asPercent ? t("timeseries.yAxisPercent") : yVarOrFallback,
+                      angle: -90,
+                      position: "insideLeft",
+                      style: { fill: mutedColor, fontSize: 11, textAnchor: "middle" },
+                    }}
                   />
                   <Tooltip content={<StackChartTooltip percentMode={asPercent} onSeriesHover={setHighlightedKey} totalLabel={tCommon("total")} />} />
                   <Legend wrapperStyle={{ fontSize: 12, color: mutedColor }} />
@@ -1074,6 +1267,7 @@ function AnalysisPageContent() {
                     <Bar
                       key={series.key}
                       dataKey={series.key}
+                      name={series.key === OTHER_SERIES_KEY ? t("timeseries.other") : series.key}
                       stackId={viewMode === "stacked" ? "a" : undefined}
                       fill={seriesColorMap[series.key]}
                       stroke={seriesColorMap[series.key]}
@@ -1112,6 +1306,25 @@ function AnalysisPageContent() {
               <span className="text-muted">
                 {t("economics.totalRevenue")}: <span className="tabular-nums text-ink">{formatCurrency(economics.totals.revenue, currency, 0)}</span>
               </span>
+              <span className="text-muted">
+                {t("economics.totalRoi")}: <span className="tabular-nums text-ink">{fmtRoi(economics.totals.roi)}</span>
+              </span>
+              {highlightedChannelInfo && (
+                <>
+                  <span className="text-muted">
+                    {t("economics.channelInvestment", { name: highlightedChannelInfo.name })}:{" "}
+                    <span className="tabular-nums text-ink">{formatCurrency(highlightedChannelInfo.investment, currency, 0)}</span>
+                  </span>
+                  <span className="text-muted">
+                    {t("economics.channelRevenue", { name: highlightedChannelInfo.name })}:{" "}
+                    <span className="tabular-nums text-ink">{formatCurrency(highlightedChannelInfo.revenue, currency, 0)}</span>
+                  </span>
+                  <span className="text-muted">
+                    {t("economics.channelRoi", { name: highlightedChannelInfo.name })}:{" "}
+                    <span className="tabular-nums text-ink">{fmtRoi(highlightedChannelInfo.roi)}</span>
+                  </span>
+                </>
+              )}
             </div>
           )}
           {!readyForStacked ? (
@@ -1133,14 +1346,16 @@ function AnalysisPageContent() {
               ) : (
                 <div className="h-chart-md">
                   <ResponsiveContainer width="100%" height="100%">
-                    <LineChart data={economicsChartData} margin={{ top: 10, right: 24, left: 24, bottom: 16 }}>
+                    <LineChart data={economicsChartData} margin={{ top: 10, right: 24, left: 8, bottom: 16 }}>
                       <CartesianGrid strokeDasharray="3 3" stroke={lineColor} />
                       <XAxis dataKey="period" tickMargin={8} tick={{ fill: mutedColor, fontSize: 12 }} axisLine={{ stroke: lineColor }} />
                       <YAxis
-                        tickMargin={12}
+                        width={80}
+                        tickMargin={8}
                         tickFormatter={(v) => formatChartNumber(v, 0)}
                         tick={{ fill: mutedColor, fontSize: 12 }}
                         axisLine={{ stroke: lineColor }}
+                        label={{ value: currency, angle: -90, position: "insideLeft", dx: -8, style: { fill: mutedColor, fontSize: 11, textAnchor: "middle" } }}
                       />
                       <Tooltip
                         cursor={{ stroke: lineColor, strokeDasharray: "3 3" }}
@@ -1213,8 +1428,12 @@ function AnalysisPageContent() {
                   isDark={isDarkTheme}
                   channel={channelByVariable.get(c.name)}
                   currency={currency}
-                  currentLevelLabel={t("saturation.currentLevel")}
+                  historicalAverageLabel={t("saturation.historicalAverage")}
                   ceilingLabel={t("saturation.ceiling")}
+                  xAxisLabel={t("saturation.xAxisLabel")}
+                  yAxisLabel={t("saturation.yAxisLabel")}
+                  levelTooltipLabel={t("saturation.levelTooltipLabel")}
+                  saturationTooltipLabel={t("saturation.saturationTooltipLabel")}
                   saturationCaption={(pct) => t("saturation.saturationCaption", { percent: formatChartPercent(pct, 0) })}
                   investmentCaption={(value, name) => t("saturation.investmentCaption", { value, name })}
                 />
@@ -1255,6 +1474,14 @@ function AnalysisPageContent() {
         {(dateRange.start || dateRange.end) && (
           <p className="text-sm text-muted">
             {dateRange.start || EMPTY_VALUE} — {dateRange.end || EMPTY_VALUE}
+          </p>
+        )}
+        {summary && (
+          <p className="text-xs text-muted">
+            {t("printMeta", {
+              r2: selectedModelInfo?.r2 != null ? formatChartPercent(selectedModelInfo.r2 * 100, 1) : EMPTY_VALUE,
+              version: datasetVersion ?? EMPTY_VALUE,
+            })}
           </p>
         )}
         {printedAt && <p className="text-xs text-muted">{t("printedAt", { value: printedAt })}</p>}
@@ -1378,6 +1605,21 @@ function AnalysisPageContent() {
                 ) : (
                   <>
                     <StatCard
+                      label={t("kpis.fit")}
+                      value={selectedModelInfo?.r2 != null ? formatChartPercent(selectedModelInfo.r2 * 100, 1) : EMPTY_VALUE}
+                      icon={
+                        <InfoTooltip
+                          label={t("kpis.fit")}
+                          content={t("kpis.fitTooltip", {
+                            yVar: yVarOrFallback,
+                            maeRel: relativeError(selectedModelInfo?.mae),
+                            rmseRel: relativeError(selectedModelInfo?.rmse),
+                          })}
+                        />
+                      }
+                      trend={fitBadge ? <Badge variant={fitBadge.variant}>{fitBadge.label}</Badge> : undefined}
+                    />
+                    <StatCard
                       label={t("kpis.totalContribution", { yVar: yVarOrFallback })}
                       value={summary ? formatChartNumber(summary.total_contribution, 1) : EMPTY_VALUE}
                       icon={
@@ -1428,15 +1670,19 @@ function AnalysisPageContent() {
               <Card className="space-y-3">
                 <CardHeader as="h2" title={t("proportion.title")} subtitle={t("proportion.subtitle", { yVar: yVarOrFallback })} />
                 {loading ? (
-                  <Skeleton className="h-12" />
-                ) : proportionSegments.length ? (
-                  <GroupProportionBar
-                    segments={proportionSegments}
-                    valueLabel={t("proportion.legendValue")}
-                    percentLabel={t("proportion.legendPercent")}
-                  />
+                  <Skeleton className="h-chart-md" />
                 ) : (
-                  <EmptyState title={t("proportion.empty")} />
+                  <WaterfallChart
+                    baseline={waterfallBaseline}
+                    segments={waterfallSegments}
+                    totalLabel={t("waterfall.totalLabel")}
+                    tooltipValueLabel={t("waterfall.tooltipValue")}
+                    tooltipPercentLabel={t("waterfall.tooltipPercent")}
+                    tooltipDeltaLabel={t("waterfall.tooltipDelta")}
+                    emptyLabel={t("proportion.empty")}
+                    baselineHint={t("waterfall.baselineHint")}
+                    yAxisLabel={t("waterfall.yAxisLabel")}
+                  />
                 )}
               </Card>
 
@@ -1458,89 +1704,17 @@ function AnalysisPageContent() {
   );
 }
 
-function GroupProportionBar({
-  segments,
-  valueLabel,
-  percentLabel,
-}: {
-  segments: { key: string; name: string; percent: number; contribution: number; color: string }[];
-  valueLabel: string;
-  percentLabel: string;
-}) {
-  // Render widths (percent, floored at 0.5 so a ~0% group stays visible/hoverable) — computed
-  // once here so the hover tooltip can be positioned by cumulative offset instead of relying on
-  // DOM measurement.
-  const widths = segments.map((s) => Math.max(s.percent, 0.5));
-  const totalWidth = widths.reduce((sum, w) => sum + w, 0) || 1;
-  let cumulative = 0;
-  const laidOut = segments.map((segment, i) => {
-    const width = widths[i];
-    const centerPercent = ((cumulative + width / 2) / totalWidth) * 100;
-    cumulative += width;
-    return { ...segment, renderWidth: width, centerPercent };
-  });
-  const [hoveredKey, setHoveredKey] = useState<string | null>(null);
-  const hovered = laidOut.find((s) => s.key === hoveredKey);
-
-  return (
-    <div className="space-y-3">
-      <div className="relative">
-        {/* `overflow-hidden` clips the square-cornered segments to the row's rounded border —
-            it also clips anything that pokes outside the row, which is why the hover tooltip
-            below is a sibling positioned against this wrapper (no overflow), not a child of
-            this row: nested here, it silently never became visible. */}
-        <div className="flex h-8 w-full overflow-hidden rounded-lg border border-line" role="list">
-          {laidOut.map((segment) => (
-            <div
-              key={segment.key}
-              tabIndex={0}
-              role="listitem"
-              aria-label={`${segment.name}: ${formatChartPercent(segment.percent, 1)}`}
-              onMouseEnter={() => setHoveredKey(segment.key)}
-              onMouseLeave={() => setHoveredKey(null)}
-              onFocus={() => setHoveredKey(segment.key)}
-              onBlur={() => setHoveredKey(null)}
-              className="flex h-full min-w-[6px] items-center justify-center overflow-hidden text-2xs font-medium text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
-              style={{ width: `${segment.renderWidth}%`, backgroundColor: segment.color }}
-            >
-              {segment.percent >= 6 && <span className="truncate px-1">{formatChartPercent(segment.percent, 0)}</span>}
-            </div>
-          ))}
-        </div>
-        {hovered && (
-          <span
-            role="tooltip"
-            aria-hidden
-            className="pointer-events-none absolute bottom-full z-50 mb-2 -translate-x-1/2 whitespace-nowrap rounded-md border border-line bg-surface px-2 py-1 text-xs text-ink shadow-[var(--shadow-soft)]"
-            style={{ left: `${hovered.centerPercent}%` }}
-          >
-            <strong>{hovered.name}</strong>
-            <br />
-            {valueLabel}: {formatChartNumber(hovered.contribution, 1)}
-            <br />
-            {percentLabel}: {formatChartPercent(hovered.percent, 1)}
-          </span>
-        )}
-      </div>
-      <div className="flex flex-wrap gap-x-4 gap-y-1.5">
-        {segments.map((segment) => (
-          <span key={segment.key} className="inline-flex items-center gap-1.5 text-xs text-muted">
-            <span className="inline-block h-2.5 w-2.5 rounded-sm" style={{ backgroundColor: segment.color }} aria-hidden />
-            {segment.name} <span className="tabular-nums text-ink">{formatChartPercent(segment.percent, 1)}</span>
-          </span>
-        ))}
-      </div>
-    </div>
-  );
-}
-
 function SaturationCurveChart({
   coef,
   isDark,
   channel,
   currency,
-  currentLevelLabel,
+  historicalAverageLabel,
   ceilingLabel,
+  xAxisLabel,
+  yAxisLabel,
+  levelTooltipLabel,
+  saturationTooltipLabel,
   saturationCaption,
   investmentCaption,
 }: {
@@ -1548,8 +1722,12 @@ function SaturationCurveChart({
   isDark: boolean;
   channel?: ChannelEconomics;
   currency: string;
-  currentLevelLabel: string;
+  historicalAverageLabel: string;
   ceilingLabel: string;
+  xAxisLabel: string;
+  yAxisLabel: string;
+  levelTooltipLabel: string;
+  saturationTooltipLabel: string;
   saturationCaption: (percent: number) => string;
   investmentCaption: (value: string, name: string) => string;
 }) {
@@ -1557,6 +1735,10 @@ function SaturationCurveChart({
   const s = coef.hill_s ?? 1;
   if (!k || !s) return null;
   const rawMean = coef.raw_mean ?? null;
+  // A03-R4: ceiling/historical-average reference lines are status markers, not distinct
+  // categories — use the semantic `warning`/`good` tokens instead of a categorical palette slot
+  // (the old code reused categorical red for both, which reads as "problem" for a normal ceiling).
+  const statusColors = isDark ? CHART_STATUS_DARK : CHART_STATUS_LIGHT;
   // Domain must cover the operating point too — a channel used well past 4×K would otherwise
   // push `raw_mean` off the plotted range and silently drop the reference line/dot (recharts
   // does not auto-extend a `type="number"` axis to fit ReferenceLine/ReferenceDot coordinates).
@@ -1570,9 +1752,11 @@ function SaturationCurveChart({
   const operatingY = rawMean != null ? Math.pow(rawMean, s) / (Math.pow(k, s) + Math.pow(rawMean, s) || 1) : null;
   return (
     <div className="space-y-1">
-      <p className="truncate text-xs font-medium text-ink">{coef.name}</p>
-      <ResponsiveContainer width="100%" height={160}>
-        <LineChart data={points} margin={{ top: 14, right: 8, bottom: 0, left: -16 }}>
+      <p className="truncate text-xs font-medium text-ink" title={coef.name}>
+        {coef.name}
+      </p>
+      <ResponsiveContainer width="100%" height={180}>
+        <LineChart data={points} margin={{ top: 14, right: 8, bottom: 4, left: 6 }}>
           <CartesianGrid strokeDasharray="3 3" opacity={0.2} />
           <XAxis
             dataKey="x"
@@ -1580,25 +1764,36 @@ function SaturationCurveChart({
             domain={[0, domainMax]}
             tick={{ fontSize: 10 }}
             tickFormatter={(v) => formatChartNumber(v, 0)}
+            label={{ value: xAxisLabel, position: "insideBottom", offset: -2, style: { fontSize: 10 } }}
           />
-          <YAxis domain={[0, 1]} tick={{ fontSize: 10 }} tickFormatter={(v) => formatChartPercent(Number(v) * 100, 0)} />
+          <YAxis
+            domain={[0, 1]}
+            tick={{ fontSize: 10 }}
+            tickFormatter={(v) => formatChartPercent(Number(v) * 100, 0)}
+            label={{ value: yAxisLabel, angle: -90, position: "insideLeft", style: { fontSize: 10, textAnchor: "middle" } }}
+          />
           <Tooltip
-            formatter={(v: number) => formatChartPercent(v * 100, 1)}
-            labelFormatter={(v: number) => `x=${formatChartNumber(v, 1)}`}
+            formatter={(v: number) => [formatChartPercent(v * 100, 1), saturationTooltipLabel]}
+            labelFormatter={(v: number) => `${levelTooltipLabel}: ${formatChartNumber(v, 1)}`}
           />
           <Line type="monotone" dataKey="y" stroke={chartColor(0, isDark)} dot={false} strokeWidth={2} />
           <ReferenceLine
             y={1}
-            stroke={chartColor(7, isDark)}
+            stroke={statusColors.warning}
             strokeDasharray="2 2"
             label={{ value: ceilingLabel, fontSize: 10, position: "insideTopRight" }}
           />
           {rawMean != null && (
             <ReferenceLine
               x={rawMean}
-              stroke={chartColor(7, isDark)}
+              stroke={statusColors.good}
               strokeDasharray="4 4"
-              label={{ value: currentLevelLabel, fontSize: 10, position: "insideBottomRight" }}
+              // "insideBottomLeft" (not Right): the label's left edge anchors at the line and
+              // extends rightward. `rawMean` sits well left of `domainMax` (domain padding is
+              // `k * 4`), so this reliably has more room than anchoring the label's right edge
+              // at the line — which clipped against the chart's left boundary when a channel's
+              // historical average was close to x=0.
+              label={{ value: historicalAverageLabel, fontSize: 10, position: "insideBottomLeft" }}
             />
           )}
           {rawMean != null && operatingY != null && (

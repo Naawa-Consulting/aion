@@ -12,7 +12,7 @@ from sqlmodel import Session, select
 from ..auth import CurrentMembership, get_current_membership
 from ..db import get_session
 from ..errors import api_error
-from ..models import Dataset, InvestmentChannel, Model, ModelMetrics, Variable, Subgroup, Group
+from ..models import Dataset, InvestmentChannel, Model, ModelMetrics, Variable, Subgroup, Group, utcnow
 from ..schemas import SummaryTableExportRequest
 from ..services.analysis import (
     AnalysisCacheKey,
@@ -559,6 +559,30 @@ def stacked(
     return response
 
 
+def _export_info_sheet(
+    session: Session,
+    company_id: str,
+    dataset_id: Optional[str],
+    model_name: Optional[str],
+    r2: Optional[float],
+    start_date: Optional[str],
+    end_date: Optional[str],
+) -> pd.DataFrame:
+    """Provenance sheet (A09-R10): which model/dataset version/fit an export came from, so a
+    downloaded file is self-explanatory without the app open next to it."""
+    ds = get_scoped(session, Dataset, dataset_id, company_id) if dataset_id else None
+    return pd.DataFrame(
+        [
+            {"Field": "Model", "Value": model_name},
+            {"Field": "Dataset", "Value": ds.display_name if ds else None},
+            {"Field": "Dataset version", "Value": ds.version if ds else None},
+            {"Field": "R²", "Value": r2},
+            {"Field": "Date range", "Value": f"{start_date or ''} – {end_date or ''}".strip(" –")},
+            {"Field": "Generated", "Value": utcnow().isoformat()},
+        ]
+    )
+
+
 @router.get("/{model_id}/export/summary.xlsx")
 def export_summary(
     model_id: str,
@@ -572,8 +596,19 @@ def export_summary(
     data = summary(
         model_id, include_intercept, as_percent, start_date, end_date, membership, session
     )
+    mm = session.get(ModelMetrics, model_id)
+    info = _export_info_sheet(
+        session,
+        membership.company_id,
+        data["model"].get("dataset_id"),
+        data["model"].get("name"),
+        float(mm.r2) if mm else None,
+        start_date,
+        end_date,
+    )
     return excel_response(
         {
+            "Info": info,
             "variables": pd.DataFrame(data["variables"]),
             "groups": pd.DataFrame(data["groups"]),
             "subgroups": pd.DataFrame(data["subgroups"]),
@@ -685,10 +720,20 @@ def export_summary_table_excel(
         raise api_error(400, "INVALID_GROUP_MODE", "Invalid group mode")
 
     df = pd.DataFrame(table_rows)
+    mm = session.get(ModelMetrics, payload.model_id)
+    info = _export_info_sheet(
+        session,
+        membership.company_id,
+        dataset_id,
+        model_info.get("name"),
+        float(mm.r2) if mm else None,
+        payload.start_date,
+        payload.end_date,
+    )
     filename = (
         f"summary_table_{dataset_id or 'dataset'}_{model_info.get('id')}.xlsx"
     )
-    return excel_response({"Summary": df}, filename)
+    return excel_response({"Info": info, "Summary": df}, filename)
 
 
 @router.get("/{model_id}/export/stacked.xlsx")
@@ -722,4 +767,15 @@ def export_stacked(
         {"period": idx, **{s["key"]: s["values"][i] for s in data["series"]}}
         for i, idx in enumerate(index)
     ]
-    return excel_response({"stacked": pd.DataFrame(rows)}, "stacked.xlsx")
+    m = get_scoped(session, Model, model_id, membership.company_id)
+    mm = session.get(ModelMetrics, model_id)
+    info = _export_info_sheet(
+        session,
+        membership.company_id,
+        m.dataset_id,
+        m.name,
+        float(mm.r2) if mm else None,
+        start_date,
+        end_date,
+    )
+    return excel_response({"Info": info, "stacked": pd.DataFrame(rows)}, "stacked.xlsx")

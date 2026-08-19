@@ -598,6 +598,7 @@ def get_dataset_meta(
         date_min=date_min,
         date_max=date_max,
         has_valid_dates=has_valid_dates,
+        version=ds.version,
     )
 
 

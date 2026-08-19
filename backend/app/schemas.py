@@ -55,6 +55,7 @@ class DatasetMeta(BaseModel):
     date_min: Optional[date] = None
     date_max: Optional[date] = None
     has_valid_dates: bool = False
+    version: int = 1
 
 
 class UploadResult(BaseModel):
@@ -375,6 +376,7 @@ class ModelSummaryResponse(BaseModel):
     model_id: str
     intercept: CoefficientItem
     coefficients: list[CoefficientItem]
+    y_mean: Optional[float] = None
 
 
 class PredictionsResponse(BaseModel):
