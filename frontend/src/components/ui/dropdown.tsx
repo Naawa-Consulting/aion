@@ -3,6 +3,7 @@
 import clsx from "clsx";
 import React, { useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
+import { Tooltip } from "@/components/ui/tooltip";
 
 type DropdownProps = {
   trigger: React.ReactNode;
@@ -67,22 +68,36 @@ export function Dropdown({ trigger, children, align = "right", triggerAriaLabel 
 
 type DropdownItemProps = React.ButtonHTMLAttributes<HTMLButtonElement> & {
   active?: boolean;
+  // A05-R3: mismo criterio que `Button` — explicación visible (Tooltip) en vez de un `title`
+  // nativo inalcanzable en un botón `disabled`.
+  disabledReason?: string;
 };
 
 // Extraído de las clases que user-menu.tsx y company-switcher.tsx repetían a mano.
 export const DropdownItem = React.forwardRef<HTMLButtonElement, DropdownItemProps>(
-  ({ className, active, ...props }, ref) => (
-    <button
-      ref={ref}
-      type="button"
-      className={clsx(
-        "flex w-full items-center justify-between gap-2 rounded-xl px-3 py-2 text-left text-sm hover:bg-accent-bg",
-        active && "bg-accent-bg",
-        className
-      )}
-      {...props}
-    />
-  )
+  ({ className, active, disabled, disabledReason, ...props }, ref) => {
+    const item = (
+      <button
+        ref={ref}
+        type="button"
+        disabled={disabled}
+        className={clsx(
+          "flex w-full items-center justify-between gap-2 rounded-xl px-3 py-2 text-left text-sm hover:bg-accent-bg",
+          active && "bg-accent-bg",
+          className
+        )}
+        {...props}
+      />
+    );
+    if (disabled && disabledReason) {
+      return (
+        <Tooltip content={disabledReason} triggerClassName="block w-full">
+          {item}
+        </Tooltip>
+      );
+    }
+    return item;
+  }
 );
 
 DropdownItem.displayName = "DropdownItem";

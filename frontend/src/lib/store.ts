@@ -25,6 +25,13 @@ type GlobalState = {
   updateLongOperationProgress: (progress: number | null) => void;
   endLongOperation: () => void;
 
+  // Fase 5/A04-R6: opt-in guard a page sets while it has unsaved edits it doesn't want silently
+  // discarded by a company switch or Sidebar navigation. Deliberately generic (not Predict-specific)
+  // and NOT persisted — a page must re-arm it after every mount/save, so a stale `true` can never
+  // survive past the page that set it. Default `false` makes this a no-op everywhere it isn't used.
+  unsavedChangesActive: boolean;
+  setUnsavedChangesActive: (active: boolean) => void;
+
   userId: string | null;
   userEmail: string | null;
   memberships: Membership[];
@@ -53,6 +60,9 @@ export const useGlobalStore = create<GlobalState>()(
       updateLongOperationProgress: (progress) =>
         set((state) => ({ longOperation: { ...state.longOperation, progress } })),
       endLongOperation: () => set({ longOperation: { active: false, label: null, progress: null } }),
+
+      unsavedChangesActive: false,
+      setUnsavedChangesActive: (active) => set({ unsavedChangesActive: active }),
 
       userId: null,
       userEmail: null,
@@ -87,7 +97,7 @@ export const useGlobalStore = create<GlobalState>()(
       // company — otherwise stale ids keep getting sent with the new X-Company-Id and
       // the backend correctly (but confusingly) 404s them.
       setActiveCompanyId: (companyId) =>
-        set({ activeCompanyId: companyId, datasetId: null, modelId: null }),
+        set({ activeCompanyId: companyId, datasetId: null, modelId: null, unsavedChangesActive: false }),
     }),
     {
       name: "aion-global-store",

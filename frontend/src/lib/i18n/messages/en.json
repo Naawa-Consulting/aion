@@ -4,10 +4,14 @@
     "cancel": "Cancel",
     "delete": "Delete",
     "close": "Close",
+    "skipToContent": "Skip to main content",
     "confirm": "Confirm",
     "loading": "Loading…",
     "total": "Total",
-    "readOnlyTooltip": "Read-only: your role is Viewer"
+    "readOnlyTooltip": "Read-only: your role is Viewer",
+    "unsavedChangesTitle": "Discard unsaved changes?",
+    "unsavedChangesBody": "You have unsaved changes on this page. If you continue, they'll be lost.",
+    "unsavedChangesConfirm": "Discard and continue"
   },
   "errors": {
     "unknown": "An unexpected error occurred.",
@@ -103,6 +107,7 @@
     "filters": {
       "dataset": "Dataset",
       "model": "Model",
+      "modelRoleTooltip": "Hero: the active model, used for this report. Challenger 1/2: alternative models saved for comparison.",
       "dateRange": "Period",
       "dateStart": "Start date",
       "dateEnd": "End date"
@@ -154,14 +159,33 @@
       "subtitle": "Each group's share of {yVar}",
       "empty": "No contribution data yet.",
       "baselineHint": "Baseline: seasonality and trend — not a channel you can invest in.",
+      "nonActionableHint": "The more transparent bars are seasonality/trend — not actionable by a planner.",
+      "actionableShare": "{percent} of total contribution ({value}) is actionable; the rest is seasonality or trend.",
       "tooltipValue": "Contribution",
       "tooltipPercent": "% of total",
       "tooltipDelta": "Step contribution",
       "totalLabel": "Total"
     },
+    "causalityNote": "This analysis shows statistical correlation estimated by the model, not guaranteed causality. Use it as guidance, not absolute certainty.",
+    "suspicious": {
+      "negativeContribution": "Double-check the model: {groups} is/are subtracting from the target variable, which is unusual for an actionable group."
+    },
+    "featured": {
+      "title": "Featured scenarios",
+      "subtitle": "Up to 3 scenarios starred as featured in Predict for this model.",
+      "empty": "This model has no featured scenarios yet.",
+      "cta": "Go to Predict",
+      "colName": "Scenario",
+      "colInvestment": "Investment",
+      "colRevenue": "Revenue",
+      "colRoi": "ROI",
+      "colDelta": "Incremental vs. BAU",
+      "colDeltaTooltip": "BAU = \"Business As Usual\" (no changes applied). Compares this scenario against the projected total without the plan."
+    },
     "toasts": {
       "loadDatasetsFailed": "Failed to load datasets",
-      "loadModelsFailed": "Failed to load models"
+      "loadModelsFailed": "Failed to load models",
+      "loadScenariosFailed": "Failed to load featured scenarios"
     }
   },
   "modeling": {
@@ -248,6 +272,7 @@
       "subtitle": "Manage hero and challengers",
       "colName": "Name",
       "colRole": "Role",
+      "roleTooltip": "Hero: the active model, used in Analysis, Predict, and the Executive Summary. Challenger 1/2: alternative models saved for comparison, not yet in production.",
       "colR2": "R²",
       "colAdjR2": "Adj R²",
       "colMae": "MAE",
@@ -358,6 +383,7 @@
     "filters": {
       "dataset": "Dataset",
       "model": "Model",
+      "modelRoleTooltip": "Hero: the active model, used for this report. Challenger 1/2: alternative models saved for comparison.",
       "dateRange": "Period",
       "dateStart": "Start date",
       "dateEnd": "End date"
@@ -404,6 +430,19 @@
       "legendValue": "Contribution",
       "legendPercent": "% of total"
     },
+    "insight": {
+      "single": "{group} explains {percent} of {yVar} over the selected period.",
+      "double": "{group} explains {percent} of {yVar}, followed by {group2} at {percent2}."
+    },
+    "compare": {
+      "title": "Compare models",
+      "subtitle": "Contribution and ROI side by side",
+      "selectLabel": "Compare with",
+      "currentModel": "Current model",
+      "totalContribution": "Total contribution",
+      "roi": "ROI",
+      "topGroups": "Top groups"
+    },
     "detail": {
       "show": "View technical detail",
       "hide": "Hide technical detail",
@@ -421,7 +460,8 @@
       "tooltipValue": "Contribution",
       "tooltipPercent": "% of total",
       "tooltipDelta": "Step contribution",
-      "baselineHint": "Baseline: seasonality and trend — not a channel you can invest in."
+      "baselineHint": "Baseline: seasonality and trend — not a channel you can invest in.",
+      "nonActionableHint": "The more transparent bars are seasonality/trend — not actionable by a planner."
     },
     "table": {
       "includeBaseline": "Include baseline",
@@ -507,10 +547,31 @@
   },
   "planner": {
     "budgetLabel": "Total budget",
+    "budgetCapLabel": "Spend cap (fallback)",
+    "objectiveLabel": "Optimization objective",
+    "objectives": {
+      "maxRevenue": "Maximize revenue",
+      "maxRoi": "Maximize ROI",
+      "minSpend": "Minimize spend",
+      "maxRevenueHint": "Spends the whole budget to maximize total revenue/contribution.",
+      "maxRoiHint": "Only spends while the next dollar still clears the marginal-return threshold — may not use the whole budget.",
+      "minSpendHint": "Finds the minimum spend needed to reach the target revenue/contribution."
+    },
+    "marginalRoiThresholdLabel": "Marginal ROI threshold (%)",
+    "targetRevenueLabel": "Target revenue",
+    "targetRevenueRequired": "Enter a target revenue greater than 0",
     "optimize": "Optimize budget",
     "optimizing": "Optimizing...",
     "apply": "Apply to scenario",
+    "currentStateTitle": "Current grid state — {value} total",
+    "currentSpend": "Current: {value}",
+    "mediaMixTitle": "Media mix: base vs. optimized",
+    "mediaMixBase": "Base (current grid)",
+    "mediaMixOptimized": "Optimized (this suggestion)",
     "suggestedSpend": "Suggested spend",
+    "historicalMax": "Historical max: {value}",
+    "outOfHistoricalRange": "Out of historical range",
+    "lowMarginalReturn": "Low marginal return",
     "projectedContribution": "Projected contribution: {value}",
     "projectedRevenue": "Projected revenue: {value}",
     "excluded": "Not optimized: {value}",
@@ -568,7 +629,8 @@
       "roi": "ROI",
       "roiTooltip": "(revenue − investment) / investment",
       "roas": "ROAS",
-      "roasTooltip": "revenue / investment"
+      "roasTooltip": "revenue / investment",
+      "moreDetails": "More detail"
     },
     "params": {
       "title": "Scenario parameters",
@@ -577,6 +639,8 @@
       "startDate": "Start date",
       "frequency": "Frequency",
       "frequencyFloorHint": "The dataset is {freq} — you can't plan finer than that.",
+      "frequencyConverted": "Horizon and values converted to {horizon} periods ({freq}) — values were summed across time.",
+      "frequencyConvertedEstimate": "Horizon and values converted to {horizon} periods ({freq}) — moving to a finer frequency split each value evenly (an estimate).",
       "scenarioName": "Scenario name",
       "scenarioNamePlaceholder": "Scenario name",
       "preview": "Preview scenario",
@@ -592,16 +656,26 @@
       "modePlanner": "Planner",
       "modeAdvanced": "Advanced view",
       "modeAbsolute": "Mode: absolute values",
+      "undo": "Undo",
+      "redo": "Redo",
       "reset": "Reset to base scenario",
       "resetConfirmTitle": "Reset to base scenario?",
       "resetConfirmBody": "This overwrites every current adjustment in the grid with the base scenario. This can't be undone.",
       "resetConfirmAction": "Reset",
       "export": "Export Excel",
       "exporting": "Exporting...",
+      "accessibleTableToggle": "Accessible table",
       "empty": "Select a model to load variables.",
       "colGroup": "Group",
       "colVariable": "Variable",
-      "invalidInput": "{count} cell(s) couldn't be pasted: the value isn't a number"
+      "invalidInput": "{count} cell(s) couldn't be pasted: the value isn't a number",
+      "investmentModeUnits": "Units",
+      "investmentModeDollars": "$",
+      "totalColumn": "Total",
+      "totalRow": "Total",
+      "fillRight": "Fill right",
+      "mediaSection": "Media",
+      "structuralSection": "Structural variables"
     },
     "totals": {
       "title": "Projected totals",
@@ -845,6 +919,9 @@
     "variablesCard": {
       "title": "Variables",
       "subtitle": "Search & drag to categorize",
+      "displayNameLabel": "Business name",
+      "unitLabel": "Unit",
+      "saveLabel": "Save",
       "searchPlaceholder": "Search variables",
       "dtypeFilterAria": "Filter by data type",
       "allDtypes": "All dtypes",

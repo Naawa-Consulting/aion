@@ -451,6 +451,9 @@ def economics_summary(
         roas = (rev / inv) if (rev is not None and inv > 0) else None
         share_inv = inv / total_investment if total_investment else 0.0
         share_contrib = (contrib / total_contribution) if (contrib is not None and total_contribution) else None
+        # Fase 6/A03-R7: $-per-unit rate for the saturation curve to plot in $ instead of raw
+        # predictor units — same resolution already used by the budget optimizer/Predict grid.
+        dollar_rate = resolve_channel_dollar_rate(ch, parse_channel_config(ch))
         channel_rows.append(
             ChannelEconomics(
                 id=ch.id,
@@ -467,6 +470,7 @@ def economics_summary(
                 roas=roas,
                 share_of_investment=share_inv,
                 share_of_contribution=share_contrib,
+                dollar_rate=dollar_rate,
             )
         )
 
@@ -529,6 +533,15 @@ def optimize_budget_endpoint(
         if dollar_rate is None:
             excluded.append(ExcludedChannel(channel_id=channel.id, name=channel.name, reason="no_dollar_rate"))
             continue
+        # Fase 5/A09-R6: max $ ever spent historically on this channel's proxy variable, so the
+        # optimizer/UI can flag a suggestion that extrapolates the Hill curve past anything it was
+        # actually fit against. None (not 0) when there's no usable history, so a thin/all-zero
+        # history doesn't get misread as "this channel must never receive spend."
+        historical_max_spend = None
+        if proxy in work.columns:
+            raw_max = pd.to_numeric(work[proxy], errors="coerce").max()
+            if pd.notna(raw_max) and raw_max > 0:
+                historical_max_spend = float(raw_max) * dollar_rate
         optimizable.append(
             OptimizableChannel(
                 channel_id=channel.id,
@@ -541,10 +554,17 @@ def optimize_budget_endpoint(
                 dollar_rate=dollar_rate,
                 conversion_rate=conversion_rate if economics_configured else None,
                 avg_value=avg_value if economics_configured else None,
+                historical_max_spend=historical_max_spend,
             )
         )
 
-    result = optimize_budget(optimizable, body.budget)
+    result = optimize_budget(
+        optimizable,
+        body.budget,
+        objective=body.objective,
+        marginal_roi_threshold=body.marginal_roi_threshold,
+        target_revenue=body.target_revenue,
+    )
     return BudgetOptimizationOut(
         allocations=[ChannelAllocation(**a) for a in result["allocations"]],
         excluded_channels=excluded,

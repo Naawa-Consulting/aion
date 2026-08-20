@@ -1,15 +1,18 @@
 "use client";
 
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useId, useRef, useState } from "react";
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import clsx from "clsx";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { useTranslations } from "next-intl";
 import { ChevronsLeft, ChevronsRight, LayoutDashboard, ShieldCheck, X } from "lucide-react";
 import { IconButton } from "@/components/ui/icon-button";
 import { Tooltip } from "@/components/ui/tooltip";
+import { Modal } from "@/components/ui/modal";
+import { Button } from "@/components/ui/button";
 import { useCanManageUsers, useIsPlatformAdmin } from "@/hooks/useCanEdit";
+import { useGlobalStore } from "@/lib/store";
 import type { PipelineContext } from "@/hooks/usePipelineContext";
 
 const PIPELINE = [
@@ -24,6 +27,9 @@ const EXECUTIVE_LINK = { href: "/executive-summary", key: "executiveSummary" as 
 const ADMIN_LINK = { href: "/admin", key: "admin" as const, Icon: ShieldCheck };
 
 const COLLAPSE_KEY = "aion-sidebar-collapsed";
+
+const DRAWER_FOCUSABLE_SELECTOR =
+  'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
 const INCOMPLETE_LABEL_KEY: Record<string, string> = {
   datasets: "incompleteDatasets",
@@ -54,9 +60,12 @@ type LinkItemProps = {
   Icon?: React.ComponentType<{ className?: string }>;
   incomplete?: boolean;
   incompleteLabel?: string;
+  // Fase 5/A04-R6: return true to intercept (block the default Link navigation and take over —
+  // e.g. show a confirm modal); false/undefined lets the click proceed normally.
+  onBeforeNavigate?: (href: string) => boolean;
 };
 
-function LinkItem({ href, label, scope, collapsed, onNavigate, step, Icon, incomplete, incompleteLabel }: LinkItemProps) {
+function LinkItem({ href, label, scope, collapsed, onNavigate, step, Icon, incomplete, incompleteLabel, onBeforeNavigate }: LinkItemProps) {
   const pathname = usePathname();
   const shouldReduceMotion = useReducedMotion();
   const active = pathname === href || pathname.startsWith(`${href}/`);
@@ -64,7 +73,13 @@ function LinkItem({ href, label, scope, collapsed, onNavigate, step, Icon, incom
   const content = (
     <Link
       href={href}
-      onClick={onNavigate}
+      onClick={(event) => {
+        if (onBeforeNavigate?.(href)) {
+          event.preventDefault();
+          return;
+        }
+        onNavigate?.();
+      }}
       aria-current={active ? "page" : undefined}
       className={clsx(
         "relative flex items-center gap-3 rounded-lg px-3 py-2 text-sm transition-colors",
@@ -111,11 +126,13 @@ function SidebarNav({
   collapsed,
   onNavigate,
   pipelineContext,
+  onBeforeNavigate,
 }: {
   scope: "desktop" | "mobile";
   collapsed?: boolean;
   onNavigate?: () => void;
   pipelineContext: PipelineContext;
+  onBeforeNavigate?: (href: string) => boolean;
 }) {
   const t = useTranslations("nav");
   const tSidebar = useTranslations("sidebar");
@@ -133,6 +150,7 @@ function SidebarNav({
           scope={scope}
           collapsed={collapsed}
           onNavigate={onNavigate}
+          onBeforeNavigate={onBeforeNavigate}
           step={item.step}
           incomplete={incomplete[item.key]}
           incompleteLabel={incomplete[item.key] ? tSidebar(INCOMPLETE_LABEL_KEY[item.key]) : undefined}
@@ -145,6 +163,7 @@ function SidebarNav({
         scope={scope}
         collapsed={collapsed}
         onNavigate={onNavigate}
+        onBeforeNavigate={onBeforeNavigate}
         Icon={EXECUTIVE_LINK.Icon}
       />
       {(isPlatformAdmin || canManageUsers) && (
@@ -154,6 +173,7 @@ function SidebarNav({
           scope={scope}
           collapsed={collapsed}
           onNavigate={onNavigate}
+          onBeforeNavigate={onBeforeNavigate}
           Icon={ADMIN_LINK.Icon}
         />
       )}
@@ -170,19 +190,68 @@ type SidebarProps = {
 export function Sidebar({ mobileOpen, onMobileClose, pipelineContext }: SidebarProps) {
   const [collapsed, setCollapsed] = useState(false);
   const tSidebar = useTranslations("sidebar");
+  const tCommon = useTranslations("common");
+  const router = useRouter();
+  const unsavedChangesActive = useGlobalStore((s) => s.unsavedChangesActive);
+  const setUnsavedChangesActive = useGlobalStore((s) => s.setUnsavedChangesActive);
+  const [pendingHref, setPendingHref] = useState<string | null>(null);
+  const drawerTitleId = useId();
+  const drawerRef = useRef<HTMLDivElement>(null);
+  const previouslyFocused = useRef<HTMLElement | null>(null);
+
+  // Fase 5/A04-R6: single shared interceptor for every nav link (desktop + mobile) — a page opts
+  // in by setting the store flag; everywhere else this always returns false (no-op, default Link
+  // navigation proceeds exactly as before).
+  const handleBeforeNavigate = (href: string): boolean => {
+    if (!unsavedChangesActive) return false;
+    setPendingHref(href);
+    return true;
+  };
+
+  const confirmNavigate = () => {
+    if (!pendingHref) return;
+    setUnsavedChangesActive(false);
+    onMobileClose();
+    router.push(pendingHref);
+    setPendingHref(null);
+  };
 
   useEffect(() => {
     const stored = window.localStorage.getItem(COLLAPSE_KEY);
     if (stored === "1") setCollapsed(true);
   }, []);
 
+  // A05-R1: mismo tratamiento de diálogo accesible que `Modal` — foco atrapado dentro del drawer,
+  // devuelto al botón de hamburguesa (u otro trigger) al cerrar.
   useEffect(() => {
     if (!mobileOpen) return;
+    previouslyFocused.current = document.activeElement as HTMLElement | null;
+    const firstFocusable = drawerRef.current?.querySelector<HTMLElement>(DRAWER_FOCUSABLE_SELECTOR);
+    (firstFocusable ?? drawerRef.current)?.focus();
+
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onMobileClose();
+      if (e.key === "Escape") {
+        onMobileClose();
+        return;
+      }
+      if (e.key !== "Tab" || !drawerRef.current) return;
+      const focusable = Array.from(drawerRef.current.querySelectorAll<HTMLElement>(DRAWER_FOCUSABLE_SELECTOR));
+      if (focusable.length === 0) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (e.shiftKey && document.activeElement === first) {
+        e.preventDefault();
+        last.focus();
+      } else if (!e.shiftKey && document.activeElement === last) {
+        e.preventDefault();
+        first.focus();
+      }
     };
     window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      previouslyFocused.current?.focus();
+    };
   }, [mobileOpen, onMobileClose]);
 
   function toggleCollapsed() {
@@ -217,7 +286,12 @@ export function Sidebar({ mobileOpen, onMobileClose, pipelineContext }: SidebarP
             {collapsed ? <ChevronsRight className="h-4 w-4" /> : <ChevronsLeft className="h-4 w-4" />}
           </IconButton>
         </div>
-        <SidebarNav scope="desktop" collapsed={collapsed} pipelineContext={pipelineContext} />
+        <SidebarNav
+          scope="desktop"
+          collapsed={collapsed}
+          pipelineContext={pipelineContext}
+          onBeforeNavigate={handleBeforeNavigate}
+        />
       </aside>
 
       {/* Móvil: drawer con overlay, mismo patrón de Modal (backdrop + Escape). Solo se monta
@@ -239,23 +313,47 @@ export function Sidebar({ mobileOpen, onMobileClose, pipelineContext }: SidebarP
               exit={{ opacity: 0 }}
             />
             <motion.aside
-              className="relative flex h-full w-64 flex-col bg-surface py-4 shadow-[var(--shadow-soft)]"
+              ref={drawerRef}
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby={drawerTitleId}
+              tabIndex={-1}
+              className="relative flex h-full w-64 flex-col bg-surface py-4 shadow-[var(--shadow-soft)] focus:outline-none"
               initial={{ x: "-100%" }}
               animate={{ x: 0 }}
               exit={{ x: "-100%" }}
               transition={{ type: "tween", duration: 0.2, ease: "easeOut" }}
             >
               <div className="mb-4 flex items-center justify-between px-3">
-                <span className="text-lg font-semibold tracking-tight text-ink">Aion</span>
+                <span id={drawerTitleId} className="text-lg font-semibold tracking-tight text-ink">
+                  Aion
+                </span>
                 <IconButton size="sm" aria-label={tSidebar("closeMenu")} onClick={onMobileClose}>
                   <X className="h-4 w-4" />
                 </IconButton>
               </div>
-              <SidebarNav scope="mobile" onNavigate={onMobileClose} pipelineContext={pipelineContext} />
+              <SidebarNav
+                scope="mobile"
+                onNavigate={onMobileClose}
+                pipelineContext={pipelineContext}
+                onBeforeNavigate={handleBeforeNavigate}
+              />
             </motion.aside>
           </motion.div>
         )}
       </AnimatePresence>
+
+      <Modal open={pendingHref !== null} onClose={() => setPendingHref(null)} title={tCommon("unsavedChangesTitle")}>
+        <p className="text-sm text-ink">{tCommon("unsavedChangesBody")}</p>
+        <div className="mt-5 flex justify-end gap-2">
+          <Button variant="ghost" onClick={() => setPendingHref(null)}>
+            {tCommon("cancel")}
+          </Button>
+          <Button variant="danger" onClick={confirmNavigate}>
+            {tCommon("unsavedChangesConfirm")}
+          </Button>
+        </div>
+      </Modal>
     </>
   );
 }

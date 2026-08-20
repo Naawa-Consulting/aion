@@ -6,9 +6,11 @@ import Link from "next/link";
 import { toast } from "sonner";
 import { useTranslations } from "next-intl";
 import { useTheme } from "next-themes";
+import { useLocaleToggle } from "@/components/providers/locale-provider";
 import { Info, Printer, Download } from "lucide-react";
 
 import { Card, CardHeader } from "@/components/ui/card";
+import { Table, TableHeader, TableRow, Th, TableCell } from "@/components/ui/table";
 import { WaterfallChart } from "@/components/charts/waterfall-chart";
 import { Select } from "@/components/ui/select";
 import { Input } from "@/components/ui/input";
@@ -22,17 +24,25 @@ import { Tooltip } from "@/components/ui/tooltip";
 import { FilterBar, FilterField } from "@/components/ui/filter-bar";
 import { apiFetch, ApiError } from "@/lib/api";
 import { EMPTY_VALUE } from "@/lib/format";
-import { formatChartNumber, formatChartPercent } from "@/lib/chart-format";
+import { formatChartNumber, formatChartPercent, formatCurrency } from "@/lib/chart-format";
 import { assignCategoricalColors } from "@/lib/chart-colors";
+import { buildContributionInsight } from "@/lib/insight-text";
 import { useGlobalStore } from "@/lib/store";
+import { useActiveCurrency } from "@/hooks/useActiveCompany";
 import { downloadBlob } from "@/lib/download";
 import { translateApiError } from "@/lib/error-messages";
 
 type Dataset = { id: string; display_name: string };
 type Model = { id: string; name: string; role: string | null; r2: number | null; adj_r2: number | null };
-type GroupContribution = { group_id: string | null; group_name: string | null; contribution: number; percent: number };
+type GroupContribution = {
+  group_id: string | null;
+  group_name: string | null;
+  contribution: number;
+  percent: number;
+  is_seasonal?: boolean;
+};
 type Summary = {
-  model: { id: string; name: string; y_var: string };
+  model: { id: string; name: string; y_var: string; y_var_display_name?: string | null; y_var_unit?: string | null };
   total_contribution: number;
   groups: GroupContribution[];
 };
@@ -45,6 +55,13 @@ type EconomicsTotals = {
 };
 type EconomicsSummary = { economics_configured: boolean; totals: EconomicsTotals };
 type DateBounds = { min: string | null; max: string | null };
+type FeaturedScenario = {
+  id: string;
+  name: string;
+  is_featured: boolean;
+  delta_pct_vs_base: number | null;
+  summary: { economics?: { total_investment: number; total_revenue: number | null; roi_total: number | null } | null };
+};
 
 const clampDateValue = (value: string | null, bounds: DateBounds): string | null => {
   if (!value) return null;
@@ -84,19 +101,33 @@ function SecondaryLink({ href, children }: { href: string; children: ReactNode }
   );
 }
 
-function InfoTooltip({ label, content }: { label: string; content: string }) {
+function InfoTooltip({
+  label,
+  content,
+  side,
+  align,
+  maxWidth = 220,
+}: {
+  label: string;
+  content: string;
+  side?: "top" | "bottom";
+  align?: "center" | "end";
+  maxWidth?: number;
+}) {
   return (
     <Tooltip
+      side={side}
+      align={align}
       content={
-        <span style={{ whiteSpace: "normal", display: "block", maxWidth: 220 }}>{content}</span>
+        <span style={{ whiteSpace: "normal", display: "block", width: "max-content", maxWidth }}>{content}</span>
       }
     >
       <button
         type="button"
         aria-label={label}
-        className="rounded-full p-0.5 text-muted transition hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+        className="-m-1.5 rounded-full p-1.5 text-muted transition hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
       >
-        <Info className="h-3.5 w-3.5" />
+        <Info className="h-3 w-3" />
       </button>
     </Tooltip>
   );
@@ -109,12 +140,15 @@ export default function ExecutiveSummaryPage() {
   const isDarkTheme = resolvedTheme === "dark";
   const mutedColor = isDarkTheme ? "#81858e" : "#6d7178";
   const { activeCompanyId } = useGlobalStore();
+  const currency = useActiveCurrency();
+  const { locale } = useLocaleToggle();
   const [datasets, setDatasets] = useState<Dataset[]>([]);
   const [selectedDataset, setSelectedDataset] = useState("");
   const [models, setModels] = useState<Model[]>([]);
   const [selectedModel, setSelectedModel] = useState("");
   const [summary, setSummary] = useState<Summary | null>(null);
   const [economics, setEconomics] = useState<EconomicsSummary | null>(null);
+  const [featuredScenarios, setFeaturedScenarios] = useState<FeaturedScenario[]>([]);
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState(false);
   const [dateBounds, setDateBounds] = useState<DateBounds>({ min: null, max: null });
@@ -221,6 +255,24 @@ export default function ExecutiveSummaryPage() {
     // created on every render, which would refetch even when the actual dates didn't change.
   }, [selectedModel, dateRange.start, dateRange.end, fetchKpis]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  const fetchFeaturedScenarios = useCallback(
+    async (modelId: string) => {
+      try {
+        const data = await apiFetch<FeaturedScenario[]>(`/predict/scenarios?model_id=${modelId}`);
+        setFeaturedScenarios(data.filter((s) => s.is_featured));
+      } catch (err) {
+        setFeaturedScenarios([]);
+        toast.error(err instanceof ApiError ? translateApiError(err, tErrors) : t("toasts.loadScenariosFailed"));
+      }
+    },
+    [t, tErrors]
+  );
+
+  useEffect(() => {
+    if (selectedModel) fetchFeaturedScenarios(selectedModel);
+    else setFeaturedScenarios([]);
+  }, [selectedModel, fetchFeaturedScenarios]);
+
   const updateDateField = (field: "start" | "end", value: string) => {
     setDateRange((prev) => clampRange({ ...prev, [field]: value || null }, dateBounds, field));
   };
@@ -232,6 +284,7 @@ export default function ExecutiveSummaryPage() {
       const params = new URLSearchParams();
       if (dateRange.start) params.set("start_date", dateRange.start);
       if (dateRange.end) params.set("end_date", dateRange.end);
+      params.set("lang", locale);
       const qs = params.toString() ? `?${params.toString()}` : "";
       const blob = await apiFetch<Blob>(`/analysis/${selectedModel}/executive-summary/export${qs}`, {
         responseType: "blob",
@@ -254,6 +307,8 @@ export default function ExecutiveSummaryPage() {
   const colorMap = assignCategoricalColors(colorOrder, isDarkTheme);
   const chartGroups = [...nonBaselineGroups].sort((a, b) => Math.abs(b.contribution) - Math.abs(a.contribution));
   const yVar = summary?.model?.y_var ?? "";
+  const yVarLabel = summary?.model?.y_var_display_name || yVar;
+  const yVarUnit = summary?.model?.y_var_unit ?? null;
 
   // Waterfall data (extracted to the shared `WaterfallChart`, Fase 8 A4): baseline first, then
   // groups sorted by magnitude with their assigned color — the component itself builds the
@@ -265,12 +320,33 @@ export default function ExecutiveSummaryPage() {
         contribution: baselineGroup.contribution,
         percent: baselineGroup.percent,
         color: mutedColor,
+        actionable: false,
       }
     : null;
   const waterfallSegments = chartGroups.map((g) => {
     const key = g.group_name || g.group_id || "";
-    return { key, name: g.group_name || key, contribution: g.contribution, percent: g.percent, color: colorMap[key] };
+    return {
+      key,
+      name: g.group_name || key,
+      contribution: g.contribution,
+      percent: g.percent,
+      color: colorMap[key],
+      actionable: !g.is_seasonal,
+    };
   });
+
+  // Fase 6/A03-R9: actionable = a planner could actually move this contribution (media/other
+  // non-seasonal groups); baseline and any Group.is_seasonal group are the floor, not a lever.
+  const actionableContribution = chartGroups
+    .filter((g) => !g.is_seasonal)
+    .reduce((sum, g) => sum + g.contribution, 0);
+  const totalContributionAbs = summary?.total_contribution ?? 0;
+  const actionableSharePct = totalContributionAbs ? (actionableContribution / totalContributionAbs) * 100 : null;
+
+  // Fase 6/A09-R4: flag an actionable group with negative contribution — economically odd
+  // (a media/investment group usually shouldn't subtract from the target) and worth a second
+  // look before trusting the model as-is.
+  const suspiciousGroups = chartGroups.filter((g) => !g.is_seasonal && g.contribution < 0);
 
   const fitBadge =
     selectedModelInfo?.r2 !== null && selectedModelInfo?.r2 !== undefined
@@ -288,23 +364,13 @@ export default function ExecutiveSummaryPage() {
         : { variant: "warning" as const, label: t("kpis.negative") }
       : null;
 
-  const yVarOrFallback = yVar || t("kpis.targetFallback");
-  let insight: string | null = null;
-  if (chartGroups.length >= 2) {
-    insight = t("insight.double", {
-      group: chartGroups[0].group_name || "",
-      percent: pctLabel(chartGroups[0].percent),
-      group2: chartGroups[1].group_name || "",
-      percent2: pctLabel(chartGroups[1].percent),
-      yVar: yVarOrFallback,
-    });
-  } else if (chartGroups.length === 1) {
-    insight = t("insight.single", {
-      group: chartGroups[0].group_name || "",
-      percent: pctLabel(chartGroups[0].percent),
-      yVar: yVarOrFallback,
-    });
-  }
+  const yVarOrFallback = yVarLabel || t("kpis.targetFallback");
+  const insight = buildContributionInsight(
+    chartGroups.map((g) => ({ label: g.group_name || "", percent: g.percent })),
+    yVarOrFallback,
+    t,
+    pctLabel
+  );
 
   return (
     <section className="space-y-6">
@@ -329,7 +395,7 @@ export default function ExecutiveSummaryPage() {
       <div className="print-only space-y-1 pb-4 border-b border-line">
         <h1 className="text-2xl font-semibold text-ink">{t("title")}</h1>
         <p className="text-sm text-muted">
-          {datasets.find((d) => d.id === selectedDataset)?.display_name} · {selectedModelInfo?.name} · {yVar}
+          {datasets.find((d) => d.id === selectedDataset)?.display_name} · {selectedModelInfo?.name} · {yVarLabel}
         </p>
         {(dateRange.start || dateRange.end) && (
           <p className="text-sm text-muted">
@@ -373,7 +439,15 @@ export default function ExecutiveSummaryPage() {
                 ))}
               </Select>
             </FilterField>
-            <FilterField label={t("filters.model")} className="w-[260px]">
+            <FilterField
+              label={
+                <span className="inline-flex items-center gap-1">
+                  {t("filters.model")}
+                  <InfoTooltip label={t("filters.model")} content={t("filters.modelRoleTooltip")} />
+                </span>
+              }
+              className="w-[260px]"
+            >
               <Select value={selectedModel} onChange={(e) => setSelectedModel(e.target.value)}>
                 {models.map((m) => (
                   <option key={m.id} value={m.id}>
@@ -438,7 +512,17 @@ export default function ExecutiveSummaryPage() {
                 <p className="text-md text-ink">{insight}</p>
               )}
 
-              <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4" aria-busy={loading}>
+              {suspiciousGroups.length > 0 && !loading && (
+                <div className="rounded-xl bg-warn-bg px-4 py-3 text-sm text-warn no-print">
+                  {t("suspicious.negativeContribution", {
+                    groups: suspiciousGroups.map((g) => g.group_name).join(", "),
+                  })}
+                </div>
+              )}
+
+              <p className="text-xs text-muted">{t("causalityNote")}</p>
+
+              <div className="grid grid-cols-2 gap-4 lg:grid-cols-4" aria-busy={loading} aria-live="polite">
                 {loading ? (
                   Array.from({ length: 4 }).map((_, i) => <Skeleton key={i} className="h-[104px]" />)
                 ) : (
@@ -462,7 +546,11 @@ export default function ExecutiveSummaryPage() {
                     />
                     <StatCard
                       label={t("kpis.totalContribution")}
-                      value={summary ? formatChartNumber(summary.total_contribution, 1) : EMPTY_VALUE}
+                      value={
+                        summary
+                          ? `${formatChartNumber(summary.total_contribution, 1)}${yVarUnit ? ` ${yVarUnit}` : ""}`
+                          : EMPTY_VALUE
+                      }
                       icon={
                         <InfoTooltip
                           label={t("kpis.totalContribution")}
@@ -499,7 +587,70 @@ export default function ExecutiveSummaryPage() {
                     tooltipDeltaLabel={t("groups.tooltipDelta")}
                     emptyLabel={t("groups.empty")}
                     baselineHint={t("groups.baselineHint")}
+                    nonActionableLabel={t("groups.nonActionableHint")}
                   />
+                )}
+                {!loading && actionableSharePct !== null && chartGroups.some((g) => g.is_seasonal) && (
+                  <p className="text-xs text-muted">
+                    {t("groups.actionableShare", {
+                      percent: pctLabel(actionableSharePct),
+                      value: formatChartNumber(actionableContribution, 1),
+                    })}
+                  </p>
+                )}
+              </Card>
+
+              <Card className="space-y-3">
+                <CardHeader as="h2" title={t("featured.title")} subtitle={t("featured.subtitle")} />
+                {featuredScenarios.length === 0 ? (
+                  <EmptyState
+                    title={t("featured.empty")}
+                    action={<SecondaryLink href="/predict">{t("featured.cta")}</SecondaryLink>}
+                  />
+                ) : (
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <Th>{t("featured.colName")}</Th>
+                        <Th className="text-right">{t("featured.colInvestment")}</Th>
+                        <Th className="text-right">{t("featured.colRevenue")}</Th>
+                        <Th className="text-right">{t("featured.colRoi")}</Th>
+                        <Th className="text-right">
+                          <span className="inline-flex items-center justify-end gap-1">
+                            {t("featured.colDelta")}
+                            <InfoTooltip
+                              label={t("featured.colDelta")}
+                              content={t("featured.colDeltaTooltip")}
+                              side="bottom"
+                              align="end"
+                              maxWidth={320}
+                            />
+                          </span>
+                        </Th>
+                      </TableRow>
+                    </TableHeader>
+                    <tbody>
+                      {featuredScenarios.map((s) => (
+                        <TableRow key={s.id}>
+                          <TableCell className="font-medium">{s.name}</TableCell>
+                          <TableCell className="text-right tabular-nums">
+                            {s.summary.economics ? formatCurrency(s.summary.economics.total_investment, currency, 0) : EMPTY_VALUE}
+                          </TableCell>
+                          <TableCell className="text-right tabular-nums">
+                            {s.summary.economics?.total_revenue != null
+                              ? formatCurrency(s.summary.economics.total_revenue, currency, 0)
+                              : EMPTY_VALUE}
+                          </TableCell>
+                          <TableCell className="text-right tabular-nums">
+                            {s.summary.economics?.roi_total != null ? pctLabel(s.summary.economics.roi_total * 100) : EMPTY_VALUE}
+                          </TableCell>
+                          <TableCell className="text-right tabular-nums">
+                            {s.delta_pct_vs_base != null ? pctLabel(s.delta_pct_vs_base) : EMPTY_VALUE}
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                    </tbody>
+                  </Table>
                 )}
               </Card>
             </>

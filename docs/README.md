@@ -47,12 +47,12 @@ fallback, just not localized).
   - `GET /variables?dataset_id=...&search=&dtype=&derived=&include_excluded=false` supports filtering; excluded
     variables (see below) are hidden by default, pass `include_excluded=true` to see them.
   - `POST /variables/transform` returns `{ variable, preview[] }` for preview sparklines; history saved per variable.
-  - `PATCH /variables/{id}/categorization` sets group/subgroup (subgroup optional, validates parent group) and/or
-    `is_excluded` (all fields independently optional — a field is only touched when the request body actually
-    includes its key, tracked via Pydantic's `model_fields_set`, not by truthiness; omitting `group_id`/
-    `subgroup_id` entirely leaves the existing category untouched, while sending `group_id: null` explicitly
-    still clears it — this fixed a real bug found in Fase 3 where a request with only `is_excluded` would have
-    silently wiped the variable's group).
+  - `PATCH /variables/{id}/categorization` sets group/subgroup (subgroup optional, validates parent group),
+    `is_excluded`, and/or `display_name`/`unit` (Fase 6, see below) — all fields independently optional, a
+    field is only touched when the request body actually includes its key, tracked via Pydantic's
+    `model_fields_set`, not by truthiness; omitting `group_id`/`subgroup_id` entirely leaves the existing
+    category untouched, while sending `group_id: null` explicitly still clears it — this fixed a real bug found
+    in Fase 3 where a request with only `is_excluded` would have silently wiped the variable's group).
   - `PATCH /variables/bulk-categorize` — body `{variable_ids: string[], group_id?, subgroup_id?, is_excluded?}`,
     same independently-optional-field semantics as the single endpoint above but resolves `group`/`subgroup`
     once for the whole batch (not per id); returns `VariableOut[]` in the same order as `variable_ids`. UI:
@@ -65,6 +65,17 @@ fallback, just not localized).
   listing (Transform/Modeling selectors) without deleting it — set via `PATCH /variables/{id}/categorization`
   or the bulk endpoint above. Surfaced in both `/transform` (bulk hide/unhide toolbar) and `/datasets` (per-column
   toggle in the summary modal, Module 1).
+- **Business-friendly variable name/unit (Fase 6, A03-R8)**: `Variable.display_name`/`unit` (both nullable
+  `str`), editable inline in `/transform`'s variable row (pencil icon → 2 inputs + Save), same
+  `PATCH /variables/{id}/categorization` endpoint as above. `backend/app/utils/variable_labels.py` centralizes
+  resolution used by every consumer: `resolve_label(name, channel_map, var_map)` priority is curated
+  `InvestmentChannel.name` (existing economics-layer label, Module 4) → `Variable.display_name` → raw column
+  name; `resolve_unit(name, var_map)` returns the unit or `None`. Wired into `GET /analysis/{id}/summary`
+  (`variables[].display_name`/`unit`, `model.y_var_display_name`/`y_var_unit`), `GET /models/{id}/summary`
+  (`CoefficientItem.display_name` — previously "intentionally" raw per Fase 7.9, revisited here since the
+  tornado chart is a business-facing view), and `predict.py`'s `_compute_contributions` (`variables[].display_name`/
+  `unit`, feeds the Predict grid). `models.py`'s raw coefficients/correlations table (statistical detail, Fase
+  7.6) deliberately still shows the raw name — that one's modelador-facing, not a business screen.
 - **Manual Hill/Adstock transforms**: `TransformOp` (`schemas.py`) gained `hill`/`adstock` alongside the existing
   `lag|decay|log|add|sub|mul|div`. `POST /variables/transform` (`TransformRequest`) accepts `column` + `k`/`s`
   for `hill`, `column` + `decay` for `adstock`; `POST /variables/transform/preview` accepts the same via its
@@ -241,14 +252,43 @@ decay/half-life/K/S inline. The Hill-curve chart itself moved to `/analysis` in 
     affect every model on every dataset in the company.
 - Stacked contributions: `GET /analysis/{model_id}/stacked?time_col=...&freq=day|week|month&by=group|subgroup&include_intercept=bool&as_percent=bool` uses the same date-filtered sums per period; Excel download: `GET /analysis/{model_id}/export/stacked.xlsx`.
 - Frontend `/analysis` now offers dashboard cards (total, baseline, top groups), value/% toggles, stacked area chart, and download buttons with icons.
-- **Business-friendly variable names (Fase 7.9)**: each row in `GET /analysis/{model_id}/summary`'s
-  `variables[]` now also carries `display_name` — the `InvestmentChannel.name` a user picked in Transform, if
-  that `Variable.name` is some channel's `proxy_variable` (see `routers/analysis.py::_channel_label_map`), else
-  the raw column name unchanged. Lets query screens show "Facebook Ads" instead of
-  `dig_ctv_branding_impresiones` without a new mapping table — the channel↔variable link already existed for
-  the economic layer. Scoped to `analysis.py` only; `models.py`'s coefficient/correlation lists (Modeling) still
-  show the raw predictor name, which is intentional there (modelador-facing technical detail, Fase 7.6's
-  detail toggle). `POST /analysis/summary/export`'s `"variable"` mode uses `display_name` too.
+- **Business-friendly variable names (Fase 7.9, extended Fase 6)**: each row in
+  `GET /analysis/{model_id}/summary`'s `variables[]` carries `display_name`/`unit`, resolved via
+  `utils/variable_labels.py` (Module 2) — priority is a curated `InvestmentChannel.name` (Transform's
+  economics layer), then `Variable.display_name`, then the raw column name unchanged. The response's
+  `model` block also carries `y_var_display_name`/`y_var_unit` for the dependent variable. Lets query
+  screens show "Facebook Ads" (or "150.3 conversiones" for the target) instead of a raw column name.
+  `POST /analysis/summary/export`'s `"variable"` mode uses `display_name` too. As of Fase 6 this is no
+  longer scoped to `analysis.py` only — `GET /models/{model_id}/summary`'s `CoefficientItem.display_name`
+  feeds Modeling's tornado chart (a business-facing view, unlike the raw coefficients/correlations
+  table next to it, which stays technical/modelador-facing on purpose — Fase 7.6's detail toggle).
+- **Actionable vs. non-actionable groups (Fase 6, A03-R9)**: `group_rows` in
+  `GET /analysis/{model_id}/summary` gained `is_seasonal: bool` (from `Group.is_seasonal`, `false` for
+  baseline/"Other"). Frontend: `components/charts/waterfall-chart.tsx`'s `WaterfallSegment` gained
+  `actionable?: boolean` (baseline and any `is_seasonal` group render at reduced opacity + a legend
+  note) — used by both Executive Summary and `/analysis` (same shared component). Executive Summary
+  also shows an "X% of total contribution is actionable" callout from the same split.
+- **Shared insight sentence (Fase 6, A06-R9+A08-R8)**: `frontend/src/lib/insight-text.ts::buildContributionInsight`
+  extracts the "{group} explains {pct}% of {yVar}..." sentence previously inline only in Executive
+  Summary; `/analysis` now renders the same sentence from its own group data.
+- **Non-causality note + suspicious-result check (Fase 6, A09-R4)**: Executive Summary shows a fixed
+  disclaimer ("statistical correlation, not guaranteed causality") and flags any actionable
+  (non-baseline, non-seasonal) group with negative contribution as a warning — both frontend-only,
+  reusing data `/summary` already returns.
+- **Saturation curve in $ (Fase 6, A03-R7)**: `GET /economics/{model_id}/summary`'s per-channel
+  `ChannelEconomics` gained `dollar_rate` (reuses `services/economics.py::resolve_channel_dollar_rate`,
+  already used by the budget optimizer and Predict's $ mode). `SaturationCurveChart` (`/analysis`)
+  rescales `k`/`raw_mean`/domain/plotted points by that rate before rendering when a channel/rate is
+  resolvable (the Hill math itself still runs on raw units — only the displayed x-axis changes),
+  falling back to raw units otherwise.
+- **Hero/challenger explainer (Fase 6, A06-R8)**: an info tooltip next to "Rol"/"Role" in Modeling's
+  models table, and next to "Modelo"/"Model" in Executive Summary's and Analysis's model selectors
+  (`components/ui/filter-bar.tsx::FilterField.label` widened from `string` to `ReactNode` to allow
+  this — backward compatible). No prior copy explained hero vs. challenger anywhere in the UI.
+- **Compare 2 models (Fase 6, A10-R7)**: `/analysis` gained a "Compare with" model selector (defaults
+  to the best-ranked model other than the one selected), fetching a second
+  `/analysis/{id}/summary` + `/economics/{id}/summary` pair and rendering a compact side-by-side card
+  (total contribution, ROI, top 3 groups). No backend change — both endpoints already existed.
 
 ### Exports (Fase 4)
 
@@ -381,18 +421,45 @@ continuous view now. `economics-section.tsx`'s old responsibilities moved as fol
 
 ### Budget optimizer (Fase 6 — shared by Predict's Planner mode and Resumen Ejecutivo)
 
-`POST /economics/{model_id}/optimize-budget` with `{budget: float}` → `{allocations: [{channel_id,
-name, proxy_variable, suggested_spend, dollar_rate, projected_contribution, projected_revenue}], excluded_channels:
-[{channel_id, name, reason: "not_modeled"|"no_transform_params"|"no_dollar_rate"}], total_budget,
-total_projected_contribution, total_projected_revenue, economics_configured}`. One engine
+`POST /economics/{model_id}/optimize-budget` with `{budget: float, objective?, marginal_roi_threshold?,
+target_revenue?}` → `{allocations: [{channel_id, name, proxy_variable, suggested_spend, dollar_rate,
+projected_contribution, projected_revenue, historical_max_spend, out_of_historical_range,
+low_marginal_return}], excluded_channels: [{channel_id, name, reason: "not_modeled"|"no_transform_params"|"no_dollar_rate"}],
+total_budget, total_projected_contribution, total_projected_revenue, economics_configured}`. One engine
 (`backend/app/services/budget_optimizer.py`), two frontend consumers (Predict's Planner mode,
-`/executive-summary`'s "presupuesto inverso") — see `BITACORA.md` Fase 6 for the design decisions
-(v1 scope: single objective, no per-channel bounds). `suggested_spend` is in dollars (steady-state
+`/executive-summary`'s "presupuesto inverso"). `suggested_spend` is in dollars (steady-state
 total across the whole horizon); `dollar_rate` (dollars per unit of `proxy_variable`) is exposed so
 callers can convert to the model variable's native units before writing an allocation into a
 scenario — see Planner mode below (added 2026-08-13 after a real unit-mismatch bug: writing
 `suggested_spend` directly into a scenario's raw model-variable value inflated the projected
 Investment KPI by orders of magnitude).
+
+- **Three objectives (Fase 5/P5, D2)**: `objective: "max_revenue"|"max_roi"|"min_spend"` (default
+  `max_revenue`, the original v1 behavior below — unchanged). `"max_roi"` is a **greedy marginal
+  allocator**, not a single SLSQP call — "aggregate ROI" is a ratio of sums, not a smooth scalar
+  objective, and its stopping rule ("next dollar no longer clears `marginal_roi_threshold`", a new
+  optional request field, default 0) is inherently a marginal/greedy decision, not a continuous
+  optimization target. It hands the next small spend increment to whichever channel currently has
+  the best marginal ROI and stops once nothing clears the threshold or `budget` runs out — spend
+  sums to AT MOST `budget`, and can legitimately be far less. `"min_spend"` minimizes total spend
+  subject to reaching `target_revenue` (new required field for this objective) — a real SLSQP call
+  with an inequality constraint; `budget` is unused for the optimization itself, only as a
+  per-channel fallback bound. When the target is unreachable even at every channel's own historical
+  cap, it falls back to spending at the caps rather than silently understating what's needed (the
+  shortfall shows up as `total_projected_revenue < target_revenue` in the response).
+- **Historical spend ceiling + zero-allocation reason (Fase 5, A09-R6/A09-R8)**: each channel now
+  carries a `historical_max_spend` (max observed raw spend for its `proxy_variable` from `work`,
+  the historical dataframe × its `dollar_rate`; `None`, not 0, when there's no usable history).
+  `"max_roi"`/`"min_spend"` use it as a genuine per-channel upper bound during optimization;
+  `"max_revenue"` deliberately does **not** — forcing spend to sum to exactly `budget` while
+  respecting per-channel historical caps can be infeasible, and the equality-constraint's existing
+  clip+rescale-to-`budget` step would just push spend back over the cap to preserve that guarantee.
+  Every objective instead gets a **post-hoc, read-only flag** per channel:
+  `out_of_historical_range` (`suggested_spend > historical_max_spend`) and `low_marginal_return`
+  (this channel got ~$0 while at least one other channel received positive spend — distinguishes
+  "lost out on marginal return" from "budget was zero"). Both surface as badges in
+  `components/predict/PlannerView.tsx`, which also gained the objective selector (segmented
+  control) and the conditional threshold/target inputs.
 
 - **Steady-state, not a per-period plan**: allocates one constant spend per channel for the whole
   horizon, by simulating `STEADY_STATE_PERIODS=500` steps of constant spend through the existing
@@ -457,6 +524,48 @@ which is the *original* 7-phase redesign's Fase 4; see BITACORA "Rediseño UI/UX
 - Preview endpoint: `POST /predict/scenarios/preview` with `{ model_id, horizon, start_date, freq, adjustments }` returns `{ periods, total, average_per_period, groups, subgroups, series }` for instant UI feedback.
 - **Frequency default/floor from the dataset (Fase 5, P1)**: frontend-only — `predict/page.tsx` maps the selected dataset's `frequency` (`"daily"|"weekly"|"monthly"`) to the scenario's own `freq` literal (`"day"|"week"|"month"`, different strings for the same concept) and uses it both as the default when starting a fresh scenario and as a floor: options finer than the dataset's own frequency are disabled in the `freq` `Select` (a monthly dataset can't be planned week-by-week). No backend change — `ScenarioBase.freq` still accepts any of the three values, this is a UI guardrail only.
 - Scenario CRUD: `POST /predict/scenarios` saves a scenario, `GET /predict/scenarios?model_id=...` lists them, `GET /predict/scenarios/{id}` fetches one, `PATCH /predict/scenarios/{id}` renames/updates adjustments, and `DELETE /predict/scenarios/{id}` removes it. All responses carry the summary block described above.
+- **Seasonal per-period baseline exposed to the grid (Fase 5, P2)**: `_compute_plan` now also
+  returns `ScenarioSummary.variable_baselines: {variable_name: {period_label: raw_value}}` — the
+  exact same seasonal-bucketed (or flat, for non-`is_seasonal` variables) baseline the backend
+  actually simulates a multiplier against, computed from `calendar_buckets` (already built for the
+  simulation itself) with a RAW mean from `work` as fallback — deliberately not the existing
+  `baseline_means` local var in the same function, which is a mean of `X` (identical to `work` for
+  structural variables, but the *transformed* adstock+Hill series for media ones — wrong basis for
+  a grid that always edits raw units). Frontend: `ScenarioSheetGlide`/`ScenarioSheetTable` gained a
+  `baselineByPeriod` field per row (falls back to the old flat `baselineMean` before the first
+  preview response arrives), fixing a real bug where the grid's displayed multiplier-mode value
+  could silently disagree with what got simulated whenever a variable had `is_seasonal=true`.
+- **$ investment mode + totals (Fase 5, P8)**: `/predict/{model_id}/simulate` now returns
+  `dollar_rate: float | null` per variable row (same `resolve_channel_dollar_rate` resolution as
+  the budget optimizer/scenario economics, keyed by variable name instead of channel). The grid's
+  previously-dead `editMode` prop (typed `"multipliers" | "absolute"`, never branched on) is
+  repurposed as `"units" | "dollars"` and actually implemented: a toggle next to "Vista avanzada"
+  (shown only when at least one variable has a `dollar_rate`) converts display/input to $ for rows
+  with a resolvable rate — `adjustments` sent to the backend are always in the variable's native
+  unit regardless of the toggle, conversion is display-only. Both grids gained a read-only totals
+  row (sum per period) and totals column (sum per variable across the horizon).
+- **Business-friendly variable name in the grid (Fase 6 — Narrativa ejecutiva)**: the same
+  `/simulate` response also carries `display_name`/`unit` per variable row (see Module 2/4's
+  `utils/variable_labels.py`) and `model.y_var_display_name`/`y_var_unit`. `ScenarioSheetGlide`/
+  `ScenarioSheetTable` render `displayName` (falling back to the raw name) in the "Variable" column
+  — lookups/edits by key still use the raw `name`, only the label changed.
+- **Separate media from structural variables (Fase 5, A07-R2)**: the grid is no longer one flat
+  table — `predict/page.tsx` splits variables by whether they resolve a `dollar_rate` into two
+  independent `ScenarioSheetGlide`/`ScenarioSheetTable` instances ("Medios" / "Variables
+  estructurales"), both writing into the same shared `adjustments` state.
+  `handleGridMultipliersChange` merges each grid's (partial, subset-only) callback payload onto the
+  full current multipliers/absolute maps by variable name rather than rebuilding `adjustments` from
+  the partial payload directly — otherwise every variable in the *other* section would silently
+  reset to its default multiplier on every edit.
+- **Visible "fill right" (Fase 5, A07-R6)**: a real button per row (Glide: one toolbar button
+  operating on the currently-selected row; Table: one button per row) copies period 1's value
+  across the rest of the horizon for that row. Found and fixed during QA: the first implementation
+  called the single-cell write helper once per period in a loop, and since each call replaces the
+  caller's `adjustments` state wholesale (not a functional update), only the *last* period's write
+  actually survived — every earlier one in the same click was silently discarded. Fixed by batching
+  all of a row's period writes into one `onMultipliersChange` call (`writeRawBatch` in
+  `ScenarioSheetTable.tsx`; `ScenarioSheetGlide.tsx`'s already-correct paste-handling pattern,
+  `applyAbsoluteChanges(updates[])`, was reused rather than re-derived).
 - **Duplicate scenario (Fase 5, A10-R5)**: `POST /predict/scenarios/{id}/duplicate` copies the definition (adjustments + cached summary) under a new id and a `"{name} - copy"`/`"{name} - copy (2)"` unique name (`_generate_unique_scenario_name`, same collision-suffix pattern as `routers/models.py::_generate_unique_name`), subject to the same 5-per-model cap as a manual save. The copy never inherits `is_featured` — it always starts `false`.
 - **Featured scenarios (Fase 5, P6/D4)**: `Scenario.is_featured: bool`, settable via `PATCH /predict/scenarios/{id}` with `{ is_featured: bool }` (mixable with a normal name/adjustments update in the same call). Capped at 3 featured per model (`_ensure_featured_capacity`, independent of and on top of the 5-scenario total cap) — a 4th attempt 400s with `{code: "FEATURED_LIMIT_REACHED", limit: 3}`. Exists specifically so `visualizador` (who never opens Predict) can see a curated set from Resumen Ejecutivo — not consumed there yet (Fase 6 item).
 - Time series + exports: `GET /predict/scenarios/{id}/timeseries` provides per-period `{ y_pred, by_group, by_subgroup }`. Import a CSV plan via `POST /predict/scenarios/{id}/import` (columns: period, variable, mode, value) and export CSV/XLSX with `GET /predict/scenarios/{id}/export?format=csv|xlsx`.
@@ -497,6 +606,49 @@ which is the *original* 7-phase redesign's Fase 4; see BITACORA "Rediseño UI/UX
   would be `periodCount × budget`) and by `dollar_rate` second (else it isn't in the variable's
   native units at all). New Investment/Revenue/ROI/ROAS KPI cards render above the toggle when
   `preview.economics` is present.
+- **Bidirectional grid ↔ optimizer + media mix (Fase 5, P4/P7)**: `PlannerView` previously always
+  started from a blank budget and never knew what the grid already had allocated. `predict/page.tsx`
+  now computes `currentMediaAllocations` — for each media variable, the steady-state $ total implied
+  by the grid's OWN current state across the whole horizon (same unit as `suggested_spend`) — and
+  passes it down as a new `currentAllocations` prop. `PlannerView` precharges its budget input from
+  this exactly once (never overwrites a budget the user already typed), shows a "current grid
+  state" summary before the first optimize call, and a "Current: $X" line per channel once results
+  exist, alongside the existing suggested-spend input. A new `MediaMixComparison` (plain
+  proportional div bars, not a new chart dependency — this is a simple 2-series % comparison, not
+  worth pulling in recharts for) renders Base (current grid) vs. Optimized (this suggestion, live —
+  reflects in-panel edits to `suggested_spend`) once both a result and a nonzero current total
+  exist.
+- **Undo/redo, unsaved-changes guard, multi-frequency view, two-tier KPIs (Fase 5, A07-R3/A04-R6/P3/A08-R2)**:
+  - *Undo/redo*: a local, in-memory snapshot stack over `adjustments` (capped at 50 entries), Ctrl+Z/Ctrl+Shift+Z/Ctrl+Y
+    plus visible toolbar buttons. Reset on model change (a different model's variable set makes old
+    entries meaningless) and re-seeded (not appended to) on scenario load.
+  - *Unsaved-changes guard*: `lib/store.ts` gained a generic, NOT persisted `unsavedChangesActive`
+    flag any page can opt into (default `false` — a no-op everywhere else). Predict sets it whenever
+    `adjustments` differs from the last saved scenario (or, for a fresh unsaved scenario, from the
+    all-multiplier-1 default) via an order-independent comparison key (`stableAdjustmentsKey` — a
+    raw `JSON.stringify` would false-positive whenever the backend's object key order differs from
+    the frontend's own, which happens on every save/load round-trip). `CompanySwitcher` and
+    `Sidebar`'s nav links both check this flag before navigating and show a shared confirm `Modal`
+    (`common.unsavedChangesTitle/Body/Confirm`) if it's set; a `beforeunload` listener covers
+    browser close/refresh/back.
+  - *Frequency conversion (revised after user feedback — the first cut was a redundant read-only
+    view next to a table that already existed)*: changing the `freq` `Select` in "Parámetros del
+    escenario" now converts the scenario itself instead of offering a separate view. `horizon`
+    follows a calendar-based ratio (`FREQ_DAY_LENGTH`: "52 weeks = 12 months", not a strict
+    day-count year, so conversions land on the round numbers a business user expects — 12
+    months→52 weeks, 4 weeks→1 month) via `convertHorizon`. Every variable's grid values are
+    re-gridded onto the new period count via `regridSeries` — a single proportional-overlap
+    algorithm on a normalized `[0,1]` timeline that handles both directions with the same math and
+    preserves the total exactly: aggregating (coarser target) collapses to an exact sum,
+    disaggregating (finer target) assumes activity is spread evenly within each old period, an
+    estimate always surfaced via a toast (adstock/Hill are non-linear, so this is not a model
+    refit at the new grain). Every reprojected cell becomes an explicit absolute override
+    (`mode: "value"`) rather than trying to preserve multiplier semantics, which are tied to the
+    old frequency's calendar bucketing and wouldn't carry meaning at the new one.
+  - *Two-tier KPIs*: `kpiItems`/`economicsKpiItems` split into a primary tier (total, average,
+    ROI, ROAS — always visible) and a secondary tier (baseline, group slices, other, investment,
+    revenue) inside a `Disclosure`, open by default for `modelador`/`admin_compania` and closed for
+    `visualizador`.
 - **Visual redesign (Fase 7.7, frontend-only)**: Planner is now the default `viewMode` (was
   "Vista avanzada") per the Direction C thesis — the raw grid is opt-in, not the landing state.
   The grid itself (`ScenarioSheetGlide.tsx`, `@glideapps/glide-data-grid`, canvas-based) now gets a
@@ -577,11 +729,34 @@ dataset/model selectors, not the global store's `datasetId`/`modelId`).
   already available in Predict's Planner mode (see Module 5) with no `onApply`/scenario flow to
   attach it to on this page, so it added a redundant control rather than a distinct capability.
   `PlannerView` (`components/predict/PlannerView.tsx`) is Predict-only now.
-- **Excel export (Fase 7.9)**: `GET /analysis/{model_id}/executive-summary/export?start_date=&end_date=` returns
-  an `.xlsx` (via the shared `utils/excel.py::excel_response`) with two sheets — `KPIs` (fit R², total
-  contribution, and — only when the dataset's economic layer is configured — total investment/revenue/ROI/ROAS)
-  and `Groups` (per-group contribution + % of total, same rows as the bar chart). Reuses `summary()`'s and
-  `economics.py::economics_summary()`'s already-cached numbers rather than recomputing them (lazy-imports
-  `economics_summary` inside the endpoint body to avoid a circular import, since `economics.py` imports from
-  `analysis.py` at module load time). The existing print button (`window.print()` + `.no-print`/`.print-only`)
-  remains the PDF path — this only adds the Excel one.
+- **Excel export (Fase 7.9, extended in the 8-phase plan's Fase 6 — Narrativa ejecutiva, not to be
+  confused with this module's own origin phase in the parenthetical above)**:
+  `GET /analysis/{model_id}/executive-summary/export?start_date=&end_date=&lang=es|en` returns an
+  `.xlsx` (via the shared `utils/excel.py::excel_response`) with three sheets — `KPIs` (fit R², total
+  contribution, and — only when the dataset's economic layer is configured — total investment/revenue/ROI/ROAS),
+  `Groups` (per-group contribution + % of total, same rows as the bar chart), and a 3rd "Cómo leer
+  esto"/"How to read this" sheet (fixed explanatory bullets + the same non-causality note shown on
+  the page). `lang` picks `routers/analysis.py::_EXECUTIVE_SUMMARY_LABELS` — a small self-contained
+  `{es, en}` dict for the sheet headers, deliberately not bridged to the frontend's i18n JSON (only
+  ~15 strings; building shared-string infra for that would be disproportionate). Reuses `summary()`'s
+  and `economics.py::economics_summary()`'s already-cached numbers rather than recomputing them
+  (lazy-imports `economics_summary` inside the endpoint body to avoid a circular import, since
+  `economics.py` imports from `analysis.py` at module load time). The existing print button
+  (`window.print()` + `.no-print`/`.print-only`) remains the PDF path — this only adds the Excel one.
+- **Featured scenarios (Fase 6 — Narrativa ejecutiva)**: a "Escenarios destacados" card lists the
+  model's up-to-3 `Scenario.is_featured` scenarios (see Module 5), filtered client-side from the
+  existing `GET /predict/scenarios?model_id=` — no new backend endpoint. Shows name, investment,
+  revenue, ROI, and incremental vs. BAU (`ScenarioOut.delta_pct_vs_base`), all already computed per
+  scenario. Empty state links to `/predict`. This surfaced a real pre-existing bug (see BITACORA):
+  `_load_summary` (`routers/predict.py`) dropped `economics`/`variable_baselines` when
+  reconstructing a scenario from its cached `results_json`, so every scenario read from cache
+  showed blank investment/revenue/ROI regardless of freshness. Fixed by reconstructing both fields
+  from the cached payload, plus a self-healing check in `_scenario_out_from_record`: a cached
+  summary with `economics: null` is only trusted as "genuinely not configured" if the dataset has
+  zero investment channels — otherwise it's treated as stale and recomputed (and persisted back),
+  so already-affected scenarios repair themselves on next read without a manual fix.
+- **Insight sentence, non-causality note, actionable/non-actionable waterfall split**: see Module 4's
+  Fase 6 bullets — shared components/helpers (`lib/insight-text.ts`, `WaterfallChart`'s `actionable`
+  segment flag) also used on `/analysis`, described there rather than duplicated here. Executive
+  Summary additionally shows an "X% of total contribution is actionable" callout and a warning banner
+  for any actionable group with negative contribution.

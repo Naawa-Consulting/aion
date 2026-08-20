@@ -12,7 +12,7 @@ from sqlmodel import Session, select
 from ..auth import CurrentMembership, get_current_membership
 from ..db import get_session
 from ..errors import api_error
-from ..models import Dataset, InvestmentChannel, Model, ModelMetrics, Variable, Subgroup, Group, utcnow
+from ..models import Dataset, Model, ModelMetrics, Variable, Subgroup, Group, utcnow
 from ..schemas import SummaryTableExportRequest
 from ..services.analysis import (
     AnalysisCacheKey,
@@ -24,6 +24,8 @@ from ..services.model_fit import build_design_matrix, load_transform_params, res
 from ..tenancy import get_scoped
 from ..utils.excel import excel_response
 from ..utils.datasets import load_dataset_frame
+from ..utils.variable_labels import channel_label_map as _channel_label_map
+from ..utils.variable_labels import resolve_label, resolve_unit, variable_label_map
 
 
 router = APIRouter()
@@ -149,21 +151,6 @@ def _group_maps(session: Session, dataset_id: str, company_id: str):
     return var_map, sg_map, g_map
 
 
-def _channel_label_map(session: Session, dataset_id: str, company_id: str) -> dict[str, str]:
-    """Maps a raw Variable.name to the business-friendly name of the InvestmentChannel it's
-    the proxy for, so query screens can show "Facebook Ads" instead of
-    "dig_ctv_branding_impresiones". Variables with no associated channel are absent from the
-    map — callers should fall back to the raw name."""
-    channels = session.exec(
-        select(InvestmentChannel).where(
-            InvestmentChannel.dataset_id == dataset_id,
-            InvestmentChannel.company_id == company_id,
-            InvestmentChannel.proxy_variable.is_not(None),
-        )
-    ).all()
-    return {c.proxy_variable: c.name for c in channels}
-
-
 def _baseline_predictor_names(var_map: dict, g_map: dict, sg_map: dict) -> set[str]:
     """Variable names whose Group (directly, or via Subgroup) is flagged Group.is_baseline —
     their contribution gets folded into the intercept instead of reported as its own line."""
@@ -228,6 +215,7 @@ def summary(
     var_map, sg_map, g_map = _group_maps(session, ds.id, membership.company_id)
     baseline_predictors = _baseline_predictor_names(var_map, g_map, sg_map)
     channel_label_map = _channel_label_map(session, ds.id, membership.company_id)
+    var_label_map = variable_label_map(session, ds.id, membership.company_id)
 
     time_field = getattr(ds, "time_variable", None)
     contrib_result = compute_contributions(
@@ -293,7 +281,8 @@ def summary(
         rows.append(
             {
                 "name": name,
-                "display_name": channel_label_map.get(name, name),
+                "display_name": resolve_label(name, channel_label_map, var_label_map),
+                "unit": resolve_unit(name, var_label_map),
                 "coef": coef,
                 "mean": float(series.mean()) if len(series) else 0.0,
                 "contribution": contrib,
@@ -349,6 +338,10 @@ def summary(
                     else (other_label if gid == other_group_key else None)
                 )
             ),
+            # Fase 6/A03-R9: lets the frontend waterfall distinguish actionable (investable
+            # media) groups from non-actionable ones — baseline (gid not in g_map) and any
+            # group flagged Group.is_seasonal both read as not actionable.
+            "is_seasonal": bool(g_map[gid].is_seasonal) if gid in g_map else False,
             "contribution": float(val),
             "percent": percent(val),
         }
@@ -411,6 +404,8 @@ def summary(
             "name": m.name,
             "dataset_id": m.dataset_id,
             "y_var": m.y_var,
+            "y_var_display_name": resolve_label(m.y_var, channel_label_map, var_label_map),
+            "y_var_unit": resolve_unit(m.y_var, var_label_map),
             "x_vars": json.loads(m.x_vars_json),
         },
         "include_intercept": include_intercept,
@@ -617,19 +612,66 @@ def export_summary(
     )
 
 
+_EXECUTIVE_SUMMARY_LABELS = {
+    "es": {
+        "metric": "Métrica",
+        "value": "Valor",
+        "fit": "Ajuste (R²)",
+        "total_contribution": "Contribución total",
+        "total_investment": "Inversión total",
+        "total_revenue": "Ingreso total",
+        "roi": "ROI",
+        "roas": "ROAS",
+        "group": "Grupo",
+        "contribution": "Contribución",
+        "percent_of_total": "% del total",
+        "how_to_read_title": "Cómo leer este reporte",
+        "how_to_read": [
+            "KPIs: indicadores clave del modelo y, si están configurados, de la economía (inversión/ingreso/ROI/ROAS) para el periodo seleccionado.",
+            "Groups: contribución de cada grupo de variables a la variable objetivo, ordenada de mayor a menor magnitud. 'Baseline' es la estacionalidad/tendencia — no es un canal en el que se pueda invertir.",
+            "Este análisis muestra correlación estadística estimada por el modelo, no causalidad garantizada. Úsalo como guía, no como certeza absoluta.",
+        ],
+    },
+    "en": {
+        "metric": "Metric",
+        "value": "Value",
+        "fit": "Fit (R²)",
+        "total_contribution": "Total contribution",
+        "total_investment": "Total investment",
+        "total_revenue": "Total revenue",
+        "roi": "ROI",
+        "roas": "ROAS",
+        "group": "Group",
+        "contribution": "Contribution",
+        "percent_of_total": "% of total",
+        "how_to_read_title": "How to read this report",
+        "how_to_read": [
+            "KPIs: key model indicators and, if configured, economics (investment/revenue/ROI/ROAS) for the selected period.",
+            "Groups: each variable group's contribution to the target variable, sorted from largest to smallest magnitude. 'Baseline' is seasonality/trend — not a channel you can invest in.",
+            "This analysis shows statistical correlation estimated by the model, not guaranteed causality. Use it as guidance, not absolute certainty.",
+        ],
+    },
+}
+
+
 @router.get("/{model_id}/executive-summary/export")
 def export_executive_summary(
     model_id: str,
     start_date: Optional[str] = Query(default=None),
     end_date: Optional[str] = Query(default=None),
+    lang: str = Query(default="es"),
     membership: CurrentMembership = Depends(get_current_membership),
     session: Session = Depends(get_session),
 ):
     """Excel export for the Resumen Ejecutivo page — reuses summary()'s contribution numbers
     and economics_summary()'s investment/revenue/ROI totals rather than recomputing them.
     Lazy-imports economics.py to avoid a circular import (economics.py imports helpers from
-    this module at module load time)."""
+    this module at module load time). Fase 6/A06-R2: `lang` picks the sheet's own label dict
+    (self-contained — no shared-string bridge with the frontend's i18n JSON) so the export
+    reads in whichever language the app was in, and gains a 3rd "how to read this" sheet."""
     from .economics import economics_summary
+
+    labels = _EXECUTIVE_SUMMARY_LABELS.get(lang, _EXECUTIVE_SUMMARY_LABELS["es"])
 
     data = summary(model_id, True, False, start_date, end_date, membership, session)
     econ = economics_summary(model_id, start_date, end_date, membership, session)
@@ -638,28 +680,34 @@ def export_executive_summary(
     mm = session.get(ModelMetrics, m.id)
 
     kpi_rows = [
-        {"Metric": "Fit (R²)", "Value": float(mm.r2) if mm else None},
-        {"Metric": "Total contribution", "Value": data["total_contribution"]},
+        {labels["metric"]: labels["fit"], labels["value"]: float(mm.r2) if mm else None},
+        {labels["metric"]: labels["total_contribution"], labels["value"]: data["total_contribution"]},
     ]
     if econ["economics_configured"]:
         kpi_rows += [
-            {"Metric": "Total investment", "Value": econ["totals"]["investment"]},
-            {"Metric": "Total revenue", "Value": econ["totals"]["revenue"]},
-            {"Metric": "ROI", "Value": econ["totals"]["roi"]},
-            {"Metric": "ROAS", "Value": econ["totals"]["roas"]},
+            {labels["metric"]: labels["total_investment"], labels["value"]: econ["totals"]["investment"]},
+            {labels["metric"]: labels["total_revenue"], labels["value"]: econ["totals"]["revenue"]},
+            {labels["metric"]: labels["roi"], labels["value"]: econ["totals"]["roi"]},
+            {labels["metric"]: labels["roas"], labels["value"]: econ["totals"]["roas"]},
         ]
 
     group_rows = [
         {
-            "Group": row.get("group_name") or "-",
-            "Contribution": row.get("contribution"),
-            "% of total": row.get("percent"),
+            labels["group"]: row.get("group_name") or "-",
+            labels["contribution"]: row.get("contribution"),
+            labels["percent_of_total"]: row.get("percent"),
         }
         for row in data["groups"]
     ]
 
+    how_to_read_rows = [{labels["how_to_read_title"]: line} for line in labels["how_to_read"]]
+
     return excel_response(
-        {"KPIs": pd.DataFrame(kpi_rows), "Groups": pd.DataFrame(group_rows)},
+        {
+            "KPIs": pd.DataFrame(kpi_rows),
+            "Groups": pd.DataFrame(group_rows),
+            "How to read this" if lang == "en" else "Cómo leer esto": pd.DataFrame(how_to_read_rows),
+        },
         f"executive_summary_{model_id}.xlsx",
     )
 

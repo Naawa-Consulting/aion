@@ -14,6 +14,10 @@ export type WaterfallSegment = {
   contribution: number;
   percent: number;
   color: string;
+  // Fase 6/A03-R9: false for a segment a planner can't act on (seasonality/trend) — rendered
+  // with reduced opacity so the waterfall visually distinguishes investable groups from ones
+  // that just describe the calendar. Undefined/true both render as fully actionable.
+  actionable?: boolean;
 };
 
 type WaterfallChartProps = {
@@ -27,6 +31,7 @@ type WaterfallChartProps = {
   baselineHint?: string;
   heightClassName?: string;
   yAxisLabel?: string;
+  nonActionableLabel?: string;
 };
 
 type WaterfallDatum = WaterfallSegment & {
@@ -46,6 +51,7 @@ export function WaterfallChart({
   baselineHint,
   heightClassName = "h-chart-md",
   yAxisLabel,
+  nonActionableLabel,
 }: WaterfallChartProps) {
   const { resolvedTheme } = useTheme();
   const isDarkTheme = resolvedTheme === "dark";
@@ -86,7 +92,7 @@ export function WaterfallChart({
     <>
       <div className={heightClassName}>
         <ResponsiveContainer width="100%" height="100%">
-          <BarChart data={data} margin={{ top: 24, bottom: 8, left: yAxisLabel ? 12 : 0 }}>
+          <BarChart accessibilityLayer data={data} margin={{ top: 24, bottom: 8, left: yAxisLabel ? 12 : 0 }}>
             <CartesianGrid vertical={false} stroke={lineColor} />
             <XAxis
               type="category"
@@ -133,7 +139,7 @@ export function WaterfallChart({
             <Bar dataKey="base" stackId="waterfall" fill="transparent" isAnimationActive={false} />
             <Bar dataKey="range" stackId="waterfall" radius={[4, 4, 0, 0]} barSize={40}>
               {data.map((d) => (
-                <Cell key={d.key} fill={d.color} />
+                <Cell key={d.key} fill={d.color} fillOpacity={!d.isTotal && d.actionable === false ? 0.45 : 1} />
               ))}
               <LabelList
                 dataKey="percent"
@@ -156,6 +162,9 @@ export function WaterfallChart({
         </ResponsiveContainer>
       </div>
       {baseline && baselineHint && <p className="text-xs text-muted">{baselineHint}</p>}
+      {nonActionableLabel && segments.some((s) => s.actionable === false) && (
+        <p className="text-xs text-muted">{nonActionableLabel}</p>
+      )}
     </>
   );
 }

@@ -4,10 +4,14 @@
     "cancel": "Cancelar",
     "delete": "Eliminar",
     "close": "Cerrar",
+    "skipToContent": "Saltar al contenido principal",
     "confirm": "Confirmar",
     "loading": "Cargando…",
     "total": "Total",
-    "readOnlyTooltip": "Solo lectura: tu rol es Visualizador"
+    "readOnlyTooltip": "Solo lectura: tu rol es Visualizador",
+    "unsavedChangesTitle": "¿Descartar cambios sin guardar?",
+    "unsavedChangesBody": "Tienes cambios sin guardar en esta página. Si continúas, se perderán.",
+    "unsavedChangesConfirm": "Descartar y continuar"
   },
   "errors": {
     "unknown": "Ocurrió un error inesperado.",
@@ -103,6 +107,7 @@
     "filters": {
       "dataset": "Dataset",
       "model": "Modelo",
+      "modelRoleTooltip": "Hero: el modelo activo, usado para este reporte. Challenger 1/2: modelos alternativos guardados para comparar.",
       "dateRange": "Periodo",
       "dateStart": "Fecha de inicio",
       "dateEnd": "Fecha de fin"
@@ -154,14 +159,33 @@
       "subtitle": "Participación de cada grupo sobre {yVar}",
       "empty": "Sin datos de contribución todavía.",
       "baselineHint": "Baseline: estacionalidad y tendencia — no es un canal en el que se pueda invertir.",
+      "nonActionableHint": "Las barras más transparentes son estacionalidad/tendencia — no son accionables por un planeador.",
+      "actionableShare": "{percent} de la contribución total ({value}) es accionable; el resto es estacionalidad o tendencia.",
       "tooltipValue": "Contribución",
       "tooltipPercent": "% del total",
       "tooltipDelta": "Aporte al total",
       "totalLabel": "Total"
     },
+    "causalityNote": "Este análisis muestra correlación estadística estimada por el modelo, no causalidad garantizada. Úsalo como guía, no como certeza absoluta.",
+    "suspicious": {
+      "negativeContribution": "Revisa el modelo: {groups} está(n) restando a la variable objetivo, lo cual es inusual para un grupo accionable."
+    },
+    "featured": {
+      "title": "Escenarios destacados",
+      "subtitle": "Los hasta 3 escenarios marcados como destacados en Predict para este modelo.",
+      "empty": "Este modelo todavía no tiene escenarios destacados.",
+      "cta": "Ir a Predict",
+      "colName": "Escenario",
+      "colInvestment": "Inversión",
+      "colRevenue": "Ingreso",
+      "colRoi": "ROI",
+      "colDelta": "Incremental vs. BAU",
+      "colDeltaTooltip": "BAU = \"Business As Usual\" (seguir sin cambios). Compara este escenario contra el total proyectado sin aplicar el plan."
+    },
     "toasts": {
       "loadDatasetsFailed": "No se pudieron cargar los datasets",
-      "loadModelsFailed": "No se pudieron cargar los modelos"
+      "loadModelsFailed": "No se pudieron cargar los modelos",
+      "loadScenariosFailed": "No se pudieron cargar los escenarios destacados"
     }
   },
   "modeling": {
@@ -248,6 +272,7 @@
       "subtitle": "Gestiona hero y challengers",
       "colName": "Nombre",
       "colRole": "Rol",
+      "roleTooltip": "Hero: el modelo activo, usado en Análisis, Predict y el Resumen Ejecutivo. Challenger 1/2: modelos alternativos guardados para comparar, todavía no en producción.",
       "colR2": "R²",
       "colAdjR2": "Adj R²",
       "colMae": "MAE",
@@ -358,6 +383,7 @@
     "filters": {
       "dataset": "Dataset",
       "model": "Modelo",
+      "modelRoleTooltip": "Hero: el modelo activo, usado para este reporte. Challenger 1/2: modelos alternativos guardados para comparar.",
       "dateRange": "Periodo",
       "dateStart": "Fecha de inicio",
       "dateEnd": "Fecha de fin"
@@ -404,6 +430,19 @@
       "legendValue": "Contribución",
       "legendPercent": "% del total"
     },
+    "insight": {
+      "single": "{group} explica el {percent} de {yVar} en el periodo seleccionado.",
+      "double": "{group} explica el {percent} de {yVar}, seguido de {group2} con {percent2}."
+    },
+    "compare": {
+      "title": "Comparar modelos",
+      "subtitle": "Contribución y ROI lado a lado",
+      "selectLabel": "Comparar con",
+      "currentModel": "Modelo actual",
+      "totalContribution": "Contribución total",
+      "roi": "ROI",
+      "topGroups": "Grupos principales"
+    },
     "detail": {
       "show": "Ver detalle técnico",
       "hide": "Ocultar detalle técnico",
@@ -421,7 +460,8 @@
       "tooltipValue": "Contribución",
       "tooltipPercent": "% del total",
       "tooltipDelta": "Aporte al total",
-      "baselineHint": "Baseline: estacionalidad y tendencia — no es un canal en el que se pueda invertir."
+      "baselineHint": "Baseline: estacionalidad y tendencia — no es un canal en el que se pueda invertir.",
+      "nonActionableHint": "Las barras más transparentes son estacionalidad/tendencia — no son accionables por un planeador."
     },
     "table": {
       "includeBaseline": "Incluir baseline",
@@ -507,10 +547,31 @@
   },
   "planner": {
     "budgetLabel": "Presupuesto total",
+    "budgetCapLabel": "Tope de gasto (respaldo)",
+    "objectiveLabel": "Objetivo de optimización",
+    "objectives": {
+      "maxRevenue": "Maximizar ingreso",
+      "maxRoi": "Maximizar ROI",
+      "minSpend": "Minimizar gasto",
+      "maxRevenueHint": "Gasta todo el presupuesto para maximizar el ingreso/contribución total.",
+      "maxRoiHint": "Gasta solo mientras el siguiente dólar siga superando el umbral de retorno marginal — puede no usar todo el presupuesto.",
+      "minSpendHint": "Encuentra el gasto mínimo necesario para alcanzar el ingreso/contribución objetivo."
+    },
+    "marginalRoiThresholdLabel": "Umbral de ROI marginal (%)",
+    "targetRevenueLabel": "Ingreso objetivo",
+    "targetRevenueRequired": "Ingresa un ingreso objetivo mayor a 0",
     "optimize": "Optimizar presupuesto",
     "optimizing": "Optimizando...",
     "apply": "Aplicar al escenario",
+    "currentStateTitle": "Estado actual del grid — {value} en total",
+    "currentSpend": "Actual: {value}",
+    "mediaMixTitle": "Mezcla de medios: base vs. optimizado",
+    "mediaMixBase": "Base (grid actual)",
+    "mediaMixOptimized": "Optimizado (esta sugerencia)",
     "suggestedSpend": "Gasto sugerido",
+    "historicalMax": "Máximo histórico: {value}",
+    "outOfHistoricalRange": "Fuera de rango histórico",
+    "lowMarginalReturn": "Retorno marginal bajo",
     "projectedContribution": "Contribución proyectada: {value}",
     "projectedRevenue": "Ingreso proyectado: {value}",
     "excluded": "Sin optimizar: {value}",
@@ -568,7 +629,8 @@
       "roi": "ROI",
       "roiTooltip": "(ingreso − inversión) / inversión",
       "roas": "ROAS",
-      "roasTooltip": "ingreso / inversión"
+      "roasTooltip": "ingreso / inversión",
+      "moreDetails": "Más detalle"
     },
     "params": {
       "title": "Parámetros del escenario",
@@ -577,6 +639,8 @@
       "startDate": "Fecha de inicio",
       "frequency": "Frecuencia",
       "frequencyFloorHint": "El dataset es {freq} — no se puede planear más fino que eso.",
+      "frequencyConverted": "Horizonte y valores convertidos a {horizon} periodos ({freq}) — los valores se sumaron en el tiempo.",
+      "frequencyConvertedEstimate": "Horizonte y valores convertidos a {horizon} periodos ({freq}) — al pasar a una frecuencia más fina, los valores se repartieron en partes iguales (estimación).",
       "scenarioName": "Nombre del escenario",
       "scenarioNamePlaceholder": "Nombre del escenario",
       "preview": "Previsualizar escenario",
@@ -592,16 +656,26 @@
       "modePlanner": "Planner",
       "modeAdvanced": "Vista avanzada",
       "modeAbsolute": "Modo: valores absolutos",
+      "undo": "Deshacer",
+      "redo": "Rehacer",
       "reset": "Restablecer al escenario base",
       "resetConfirmTitle": "¿Restablecer al escenario base?",
       "resetConfirmBody": "Esto sobrescribe todos los ajustes actuales de la cuadrícula con el escenario base. No se puede deshacer.",
       "resetConfirmAction": "Restablecer",
       "export": "Exportar Excel",
       "exporting": "Exportando...",
+      "accessibleTableToggle": "Tabla accesible",
       "empty": "Selecciona un modelo para cargar las variables.",
       "colGroup": "Grupo",
       "colVariable": "Variable",
-      "invalidInput": "{count} celda(s) no se pudieron pegar: el valor no es un número"
+      "invalidInput": "{count} celda(s) no se pudieron pegar: el valor no es un número",
+      "investmentModeUnits": "Unidades",
+      "investmentModeDollars": "$",
+      "totalColumn": "Total",
+      "totalRow": "Total",
+      "fillRight": "Rellenar a la derecha",
+      "mediaSection": "Medios",
+      "structuralSection": "Variables estructurales"
     },
     "totals": {
       "title": "Totales proyectados",
@@ -845,6 +919,9 @@
     "variablesCard": {
       "title": "Variables",
       "subtitle": "Busca y arrastra para categorizar",
+      "displayNameLabel": "Nombre de negocio",
+      "unitLabel": "Unidad",
+      "saveLabel": "Guardar",
       "searchPlaceholder": "Buscar variables",
       "dtypeFilterAria": "Filtrar por tipo de dato",
       "allDtypes": "Todos los tipos",

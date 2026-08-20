@@ -681,7 +681,7 @@ export default function DatasetsPage() {
           <Button
             onClick={() => document.getElementById("dataset-upload-input")?.click()}
             disabled={!canEdit}
-            title={!canEdit ? readOnlyTitle : undefined}
+            disabledReason={!canEdit ? readOnlyTitle : undefined}
           >
             <Upload className="mr-2 h-4 w-4" /> {t("upload")}
           </Button>
@@ -946,7 +946,7 @@ export default function DatasetsPage() {
                       size="sm"
                       onClick={handleSaveTimeVariable}
                       disabled={!canEdit || !currentDataset || timeSaving}
-                      title={!canEdit ? readOnlyTitle : undefined}
+                      disabledReason={!canEdit ? readOnlyTitle : undefined}
                     >
                       {timeSaving ? t("timeVariable.saving") : t("timeVariable.save")}
                     </Button>
@@ -955,7 +955,7 @@ export default function DatasetsPage() {
                       size="sm"
                       onClick={handleClearTimeVariable}
                       disabled={!canEdit || !currentDataset?.time_variable || timeSaving}
-                      title={!canEdit ? readOnlyTitle : undefined}
+                      disabledReason={!canEdit ? readOnlyTitle : undefined}
                     >
                       {t("timeVariable.clear")}
                     </Button>
@@ -1067,7 +1067,7 @@ export default function DatasetsPage() {
                       size="sm"
                       onClick={requestApplySample}
                       disabled={!canEdit || !canApplySample || sampleUpdating}
-                      title={!canEdit ? readOnlyTitle : undefined}
+                      disabledReason={!canEdit ? readOnlyTitle : undefined}
                     >
                       {t("sample.apply")}
                     </Button>
@@ -1256,7 +1256,7 @@ export default function DatasetsPage() {
           <Button
             onClick={submitDatasetUpdate}
             disabled={!canEdit || !updateState.file || updateState.uploading}
-            title={!canEdit ? readOnlyTitle : undefined}
+            disabledReason={!canEdit ? readOnlyTitle : undefined}
           >
             {updateState.uploading ? t("updateModal.uploading") : t("updateModal.uploadReplace")}
           </Button>
@@ -1316,7 +1316,7 @@ export default function DatasetsPage() {
           <Button
             onClick={handleRename}
             disabled={!canEdit || !renameState.value.trim()}
-            title={!canEdit ? readOnlyTitle : undefined}
+            disabledReason={!canEdit ? readOnlyTitle : undefined}
           >
             {tCommon("save")}
           </Button>
@@ -1359,7 +1359,7 @@ export default function DatasetsPage() {
                 variant="danger"
                 onClick={handleDelete}
                 disabled={!canEdit}
-                title={!canEdit ? readOnlyTitle : undefined}
+                disabledReason={!canEdit ? readOnlyTitle : undefined}
               >
                 {tCommon("delete")}
               </Button>

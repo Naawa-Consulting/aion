@@ -111,6 +111,8 @@ def _variable_to_out(var: Variable, g_map: dict, sg_map: dict) -> VariableOut:
         group_id=g.id if g else None,
         group_name=g.name if g else None,
         is_excluded=var.is_excluded,
+        display_name=var.display_name,
+        unit=var.unit,
         created_at=var.created_at,
     )
 
@@ -362,6 +364,10 @@ def categorize_variable(
         var.subgroup_id = subgroup.id if subgroup else None
     if body.is_excluded is not None:
         var.is_excluded = body.is_excluded
+    if "display_name" in body.model_fields_set:
+        var.display_name = body.display_name or None
+    if "unit" in body.model_fields_set:
+        var.unit = body.unit or None
     session.add(var)
     session.commit()
 
@@ -396,6 +402,10 @@ def bulk_categorize_variables(
             var.subgroup_id = subgroup.id if subgroup else None
         if body.is_excluded is not None:
             var.is_excluded = body.is_excluded
+        if "display_name" in body.model_fields_set:
+            var.display_name = body.display_name or None
+        if "unit" in body.model_fields_set:
+            var.unit = body.unit or None
         session.add(var)
     session.commit()
 

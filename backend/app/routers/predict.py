@@ -25,6 +25,7 @@ from ..services.media_transform import apply_media_transform
 from ..services.model_fit import load_transform_params, resolve_seasonal_flags
 from ..tenancy import get_scoped
 from ..utils.excel import excel_response
+from ..utils.variable_labels import channel_label_map, resolve_label, resolve_unit, variable_label_map
 from ..schemas import (
     Adjustment,
     SimulationRequest,
@@ -51,11 +52,24 @@ router = APIRouter()
 def _compute_contributions(session: Session, model_id: str, company_id: str, adjustments: dict[str, float]):
     m, ds, work, X, Xc, y, params, _ = _fit_from_model(session, model_id, company_id)
     var_map, sg_map, g_map = _group_maps(session, ds.id, company_id)
+    ch_label_map = channel_label_map(session, ds.id, company_id)
+    var_label_map = variable_label_map(session, ds.id, company_id)
     transform_params = load_transform_params(session, m.id, company_id)
 
     contrib_rows = []
     group_totals: Dict[str, float] = {}
     subgroup_totals: Dict[str, float] = {}
+
+    # Fase 5/P8: $-per-unit rate for whichever variables are an InvestmentChannel's proxy, so the
+    # Predict grid can offer a $ investment editing mode alongside raw units — same resolution as
+    # the budget optimizer/scenario economics (services/economics.py), just keyed by variable name.
+    dollar_rate_by_variable: Dict[str, float] = {}
+    for channel in _load_channels(session, company_id, ds.id):
+        if not channel.proxy_variable:
+            continue
+        rate = resolve_channel_dollar_rate(channel, parse_channel_config(channel))
+        if rate is not None:
+            dollar_rate_by_variable[channel.proxy_variable] = rate
 
     UNASSIGNED = "_unassigned_"
 
@@ -87,6 +101,8 @@ def _compute_contributions(session: Session, model_id: str, company_id: str, adj
         g = g_map.get(gid) if gid else (g_map.get(sg.group_id) if sg else None)
         contrib_rows.append({
             "name": name,
+            "display_name": resolve_label(name, ch_label_map, var_label_map),
+            "unit": resolve_unit(name, var_label_map),
             "coef": coef,
             "baseline_mean": mean,
             "multiplier": mult,
@@ -96,6 +112,7 @@ def _compute_contributions(session: Session, model_id: str, company_id: str, adj
             "group_name": g.name if g else None,
             "subgroup_id": sg.id if sg else None,
             "subgroup_name": sg.name if sg else None,
+            "dollar_rate": dollar_rate_by_variable.get(name),
         })
         if sg:
             subgroup_totals[sg.id] = subgroup_totals.get(sg.id, 0.0) + contribution
@@ -143,6 +160,8 @@ def _compute_contributions(session: Session, model_id: str, company_id: str, adj
             "name": m.name,
             "dataset_id": m.dataset_id,
             "y_var": m.y_var,
+            "y_var_display_name": resolve_label(m.y_var, ch_label_map, var_label_map),
+            "y_var_unit": resolve_unit(m.y_var, var_label_map),
             "x_vars": json.loads(m.x_vars_json),
         },
         "intercept": intercept,
@@ -325,6 +344,17 @@ def _load_summary(record: Scenario) -> ScenarioSummary | None:
     if not isinstance(payload, dict):
         return None
     try:
+        raw_economics = payload.get("economics")
+        economics = None
+        if raw_economics:
+            economics = ScenarioEconomics(
+                channels=[ScenarioChannelEconomics(**row) for row in raw_economics.get("channels", [])],
+                total_investment=float(raw_economics.get("total_investment", 0.0)),
+                total_revenue=raw_economics.get("total_revenue"),
+                roi_total=raw_economics.get("roi_total"),
+                roas_total=raw_economics.get("roas_total"),
+                economics_configured=bool(raw_economics.get("economics_configured", False)),
+            )
         return ScenarioSummary(
             periods=payload.get("periods", []),
             total=float(payload.get("total", 0.0)),
@@ -332,6 +362,8 @@ def _load_summary(record: Scenario) -> ScenarioSummary | None:
             groups=[ContributionSlice(**row) for row in payload.get("groups", [])],
             subgroups=[ContributionSlice(**row) for row in payload.get("subgroups", [])],
             series=[ScenarioSeriesPoint(**row) for row in payload.get("series", [])],
+            economics=economics,
+            variable_baselines=payload.get("variable_baselines"),
         )
     except Exception:
         return None
@@ -678,7 +710,19 @@ def _dataframe_response(df: pd.DataFrame, sheet_name: str, filename: str) -> Str
 def _scenario_out_from_record(record: Scenario, session: Session, company_id: str, summary: ScenarioSummary | None = None) -> ScenarioOut:
     definition = _load_definition(record)
     summary_data = summary or _load_summary(record)
-    if summary_data is None:
+    # Fase 6: a cached `results_json` with no `economics` block is ambiguous — it might mean the
+    # dataset genuinely has no investment channels (nothing to compute), or it might mean the
+    # scenario was last saved *before* channels/conversion settings were configured (or before a
+    # channel's proxy_variable was set) and has been stale ever since, since nothing invalidates
+    # Scenario.results_json when those change. Only pay for a fresh recompute in the second case —
+    # cheap enough to check (a channel-count query) to avoid re-fitting every scenario on every
+    # list/get call for datasets that truly have no economics layer.
+    stale_economics = (
+        summary_data is not None
+        and summary_data.economics is None
+        and bool(_load_channels(session, company_id, record.dataset_id))
+    )
+    if summary_data is None or stale_economics:
         summary_data, _ = _compute_plan(
             session,
             record.model_id,

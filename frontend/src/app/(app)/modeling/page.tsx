@@ -44,7 +44,7 @@ import { SelectedPredictorsQuickView } from "@/components/modeling/SelectedPredi
 import { FilterBar, FilterField } from "@/components/ui/filter-bar";
 import { apiFetch, ApiError } from "@/lib/api";
 import { translateApiError } from "@/lib/error-messages";
-import { useCanEdit } from "@/hooks/useCanEdit";
+import { useCanEdit, useActiveRole } from "@/hooks/useCanEdit";
 import { useGlobalStore } from "@/lib/store";
 import { chartColor } from "@/lib/chart-colors";
 import { formatChartNumber } from "@/lib/chart-format";
@@ -90,6 +90,7 @@ type ModelSummary = {
 };
 type Coefficient = {
   name: string;
+  display_name?: string | null;
   coef: number;
   std_err: number;
   t_value: number;
@@ -167,15 +168,29 @@ function SecondaryLink({ href, children }: { href: string; children: React.React
   );
 }
 
-function InfoTooltip({ label, content }: { label: string; content: string }) {
+function InfoTooltip({
+  label,
+  content,
+  side,
+  align,
+}: {
+  label: string;
+  content: string;
+  side?: "top" | "bottom";
+  align?: "center" | "end";
+}) {
   return (
-    <InfoPopover content={<span style={{ whiteSpace: "normal", display: "block", maxWidth: 220 }}>{content}</span>}>
+    <InfoPopover
+      side={side}
+      align={align}
+      content={<span style={{ whiteSpace: "normal", display: "block", width: "max-content", maxWidth: 220 }}>{content}</span>}
+    >
       <button
         type="button"
         aria-label={label}
-        className="rounded-full p-0.5 text-muted transition hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+        className="-m-1.5 rounded-full p-1.5 text-muted transition hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
       >
-        <Info className="h-3.5 w-3.5" />
+        <Info className="h-3 w-3" />
       </button>
     </InfoPopover>
   );
@@ -209,6 +224,14 @@ export default function ModelingPage() {
   const [summary, setSummary] = useState<ModelSummary | null>(null);
   const [predictions, setPredictions] = useState<Predictions | null>(null);
   const [showResiduals, setShowResiduals] = useState(false);
+  // A03-R5: aislar una serie con clic en la leyenda — recharts no lo hace solo; `hide` en
+  // `Bar`/`Line` sí lo soporta, solo falta el estado y el `onClick` de `Legend` que lo alternen.
+  const [hiddenComparisonKeys, setHiddenComparisonKeys] = useState<string[]>([]);
+  const toggleComparisonKey = (key: string) =>
+    setHiddenComparisonKeys((prev) => (prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key]));
+  const [hiddenDiagnosticsKeys, setHiddenDiagnosticsKeys] = useState<string[]>([]);
+  const toggleDiagnosticsKey = (key: string) =>
+    setHiddenDiagnosticsKeys((prev) => (prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key]));
   const [editSummary, setEditSummary] = useState<ModelSummary | null>(null);
   const [loading, setLoading] = useState(false);
   const [initializing, setInitializing] = useState(true);
@@ -224,6 +247,17 @@ export default function ModelingPage() {
   // model has scenarios — never omitted just because the count hasn't arrived yet.
   const [deleteScenarioCount, setDeleteScenarioCount] = useState<number | null>(null);
   const [detailOpen, setDetailOpen] = useState(false);
+  // A08-R6: abierto por defecto para `modelador`/`admin_compania`, cerrado para `visualizador` —
+  // sincronizado una sola vez cuando `useActiveRole()` deja de ser `null` (mismo criterio que
+  // Analysis), en vez de fijarlo como valor inicial de `useState` (el rol real puede resolver
+  // después del primer render).
+  const activeRole = useActiveRole();
+  const detailOpenSyncedRef = useRef(false);
+  useEffect(() => {
+    if (detailOpenSyncedRef.current || activeRole === null) return;
+    detailOpenSyncedRef.current = true;
+    setDetailOpen(activeRole === "modelador" || activeRole === "admin_compania");
+  }, [activeRole]);
   const [activeTab, setActiveTab] = useState("models");
   const autoOpenedRef = useRef(false);
 
@@ -693,7 +727,7 @@ export default function ModelingPage() {
     if (!summary) return [];
     return summary.coefficients
       .filter((c): c is Coefficient & { beta_std: number } => c.beta_std != null && Number.isFinite(c.beta_std))
-      .map((c) => ({ name: c.name, value: c.beta_std }))
+      .map((c) => ({ name: c.display_name ?? c.name, value: c.beta_std }))
       .sort((a, b) => Math.abs(b.value) - Math.abs(a.value));
   }, [summary]);
 
@@ -964,7 +998,7 @@ export default function ModelingPage() {
                 onClick={handleSubmit}
                 disabled={!canEdit}
                 loading={loading}
-                title={!canEdit ? tCommon("readOnlyTooltip") : undefined}
+                disabledReason={!canEdit ? tCommon("readOnlyTooltip") : undefined}
               >
                 {loading ? t("builder.saving") : editingModelId ? t("builder.submitUpdate") : t("builder.submitCreate")}
               </Button>
@@ -975,7 +1009,7 @@ export default function ModelingPage() {
             <CardHeader title={t("builder.qualityTitle")} subtitle={t("builder.qualitySubtitle")} />
             {editingModel ? (
               <>
-                <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">{renderQualityStats(editingModel)}</div>
+                <div className="grid grid-cols-2 gap-4 lg:grid-cols-5">{renderQualityStats(editingModel)}</div>
                 {editSummary ? renderCoefficientsTable(editSummary) : <Skeleton className="h-48" />}
               </>
             ) : (
@@ -997,7 +1031,12 @@ export default function ModelingPage() {
               <TableHeader className="sticky top-0 z-10">
                 <TableRow>
                   <Th>{t("models.colName")}</Th>
-                  <Th>{t("models.colRole")}</Th>
+                  <Th>
+                    <span className="inline-flex items-center gap-1">
+                      {t("models.colRole")}
+                      <InfoTooltip label={t("models.colRole")} content={t("models.roleTooltip")} side="bottom" />
+                    </span>
+                  </Th>
                   <Th className="text-right">{t("models.colR2")}</Th>
                   <Th className="text-right">{t("models.colAdjR2")}</Th>
                   <Th className="text-right">{t("models.colMae")}</Th>
@@ -1043,7 +1082,7 @@ export default function ModelingPage() {
                             <DropdownItem
                               onClick={() => setRole(m, "hero")}
                               disabled={!canEdit}
-                              title={!canEdit ? tCommon("readOnlyTooltip") : undefined}
+                              disabledReason={!canEdit ? tCommon("readOnlyTooltip") : undefined}
                             >
                               {t("models.setHero")}
                             </DropdownItem>
@@ -1052,7 +1091,7 @@ export default function ModelingPage() {
                             <DropdownItem
                               onClick={() => setRole(m, "challenger1")}
                               disabled={!canEdit}
-                              title={!canEdit ? tCommon("readOnlyTooltip") : undefined}
+                              disabledReason={!canEdit ? tCommon("readOnlyTooltip") : undefined}
                             >
                               {t("models.setChallenger1")}
                             </DropdownItem>
@@ -1061,7 +1100,7 @@ export default function ModelingPage() {
                             <DropdownItem
                               onClick={() => setRole(m, "challenger2")}
                               disabled={!canEdit}
-                              title={!canEdit ? tCommon("readOnlyTooltip") : undefined}
+                              disabledReason={!canEdit ? tCommon("readOnlyTooltip") : undefined}
                             >
                               {t("models.setChallenger2")}
                             </DropdownItem>
@@ -1069,21 +1108,21 @@ export default function ModelingPage() {
                           <DropdownItem
                             onClick={() => handleDuplicateModel(m)}
                             disabled={!canEdit || duplicateLoadingId === m.id}
-                            title={!canEdit ? tCommon("readOnlyTooltip") : undefined}
+                            disabledReason={!canEdit ? tCommon("readOnlyTooltip") : undefined}
                           >
                             {duplicateLoadingId === m.id ? t("models.actionDuplicating") : t("models.actionDuplicate")}
                           </DropdownItem>
                           <DropdownItem
                             onClick={() => handleBestModel(m)}
                             disabled={!canEdit || bestLoadingId === m.id}
-                            title={!canEdit ? tCommon("readOnlyTooltip") : undefined}
+                            disabledReason={!canEdit ? tCommon("readOnlyTooltip") : undefined}
                           >
                             {bestLoadingId === m.id ? t("models.actionBestRunning") : t("models.actionBest")}
                           </DropdownItem>
                           <DropdownItem
                             onClick={() => openDeleteModal(m)}
                             disabled={!canEdit}
-                            title={!canEdit ? tCommon("readOnlyTooltip") : undefined}
+                            disabledReason={!canEdit ? tCommon("readOnlyTooltip") : undefined}
                             className="text-bad"
                           >
                             {t("models.actionDelete")}
@@ -1158,7 +1197,11 @@ export default function ModelingPage() {
                   <p className="mb-2 text-2xs font-medium uppercase tracking-wide text-muted">{t("comparison.errorChartTitle")}</p>
                   <div className="h-chart-sm">
                     <ResponsiveContainer width="100%" height="100%">
-                      <BarChart data={comparisonChartData} margin={{ top: 10, right: 16, left: 0, bottom: 0 }}>
+                      <BarChart
+                        accessibilityLayer
+                        data={comparisonChartData}
+                        margin={{ top: 10, right: 16, left: 0, bottom: 0 }}
+                      >
                         <CartesianGrid strokeDasharray="3 3" stroke={lineColor} />
                         <XAxis dataKey="model" tick={{ fill: mutedColor, fontSize: 11 }} axisLine={{ stroke: lineColor }} />
                         <YAxis
@@ -1170,9 +1213,27 @@ export default function ModelingPage() {
                           formatter={(value: number) => formatChartNumber(value, 3)}
                           contentStyle={{ background: surfaceColor, borderColor: lineColor, fontSize: 12 }}
                         />
-                        <Legend wrapperStyle={{ fontSize: 12, color: mutedColor }} />
-                        <Bar dataKey="mae" name={t("comparison.metrics.mae")} radius={[6, 6, 0, 0]} fill={chartColor(1, isDarkTheme)} />
-                        <Bar dataKey="rmse" name={t("comparison.metrics.rmse")} radius={[6, 6, 0, 0]} fill={chartColor(2, isDarkTheme)} />
+                        <Legend
+                          wrapperStyle={{ fontSize: 12, color: mutedColor, cursor: "pointer" }}
+                          formatter={(value: string, entry: any) => (
+                            <span style={{ opacity: hiddenComparisonKeys.includes(entry.dataKey) ? 0.4 : 1 }}>{value}</span>
+                          )}
+                          onClick={(entry: any) => toggleComparisonKey(entry.dataKey)}
+                        />
+                        <Bar
+                          dataKey="mae"
+                          name={t("comparison.metrics.mae")}
+                          radius={[6, 6, 0, 0]}
+                          fill={chartColor(1, isDarkTheme)}
+                          hide={hiddenComparisonKeys.includes("mae")}
+                        />
+                        <Bar
+                          dataKey="rmse"
+                          name={t("comparison.metrics.rmse")}
+                          radius={[6, 6, 0, 0]}
+                          fill={chartColor(2, isDarkTheme)}
+                          hide={hiddenComparisonKeys.includes("rmse")}
+                        />
                       </BarChart>
                     </ResponsiveContainer>
                   </div>
@@ -1181,7 +1242,11 @@ export default function ModelingPage() {
                   <p className="mb-2 text-2xs font-medium uppercase tracking-wide text-muted">{t("comparison.r2ChartTitle")}</p>
                   <div className="h-chart-sm">
                     <ResponsiveContainer width="100%" height="100%">
-                      <BarChart data={comparisonChartData} margin={{ top: 10, right: 16, left: 0, bottom: 0 }}>
+                      <BarChart
+                        accessibilityLayer
+                        data={comparisonChartData}
+                        margin={{ top: 10, right: 16, left: 0, bottom: 0 }}
+                      >
                         <CartesianGrid strokeDasharray="3 3" stroke={lineColor} />
                         <XAxis dataKey="model" tick={{ fill: mutedColor, fontSize: 11 }} axisLine={{ stroke: lineColor }} />
                         <YAxis
@@ -1233,7 +1298,7 @@ export default function ModelingPage() {
             <div className="h-chart-lg">
               <ResponsiveContainer width="100%" height="100%">
                 {showResiduals ? (
-                  <BarChart data={predictionSeries}>
+                  <BarChart accessibilityLayer data={predictionSeries}>
                     <CartesianGrid strokeDasharray="3 3" stroke={lineColor} />
                     <XAxis
                       dataKey="label"
@@ -1261,7 +1326,7 @@ export default function ModelingPage() {
                     </Bar>
                   </BarChart>
                 ) : (
-                  <LineChart data={predictionSeries}>
+                  <LineChart accessibilityLayer data={predictionSeries}>
                     <CartesianGrid strokeDasharray="3 3" stroke={lineColor} />
                     <XAxis
                       dataKey="label"
@@ -1281,9 +1346,29 @@ export default function ModelingPage() {
                       formatter={(value: number, name) => [value.toFixed(4), name]}
                       contentStyle={{ background: surfaceColor, borderColor: lineColor, fontSize: 12 }}
                     />
-                    <Legend wrapperStyle={{ fontSize: 12, color: mutedColor }} />
-                    <Line type="monotone" dataKey="y_true" stroke={chartColor(0, isDarkTheme)} dot={false} name={t("diagnostics.seriesActual")} />
-                    <Line type="monotone" dataKey="y_pred" stroke={chartColor(2, isDarkTheme)} dot={false} name={t("diagnostics.seriesModel")} />
+                    <Legend
+                      wrapperStyle={{ fontSize: 12, color: mutedColor, cursor: "pointer" }}
+                      formatter={(value: string, entry: any) => (
+                        <span style={{ opacity: hiddenDiagnosticsKeys.includes(entry.dataKey) ? 0.4 : 1 }}>{value}</span>
+                      )}
+                      onClick={(entry: any) => toggleDiagnosticsKey(entry.dataKey)}
+                    />
+                    <Line
+                      type="monotone"
+                      dataKey="y_true"
+                      stroke={chartColor(0, isDarkTheme)}
+                      dot={false}
+                      name={t("diagnostics.seriesActual")}
+                      hide={hiddenDiagnosticsKeys.includes("y_true")}
+                    />
+                    <Line
+                      type="monotone"
+                      dataKey="y_pred"
+                      stroke={chartColor(2, isDarkTheme)}
+                      dot={false}
+                      name={t("diagnostics.seriesModel")}
+                      hide={hiddenDiagnosticsKeys.includes("y_pred")}
+                    />
                   </LineChart>
                 )}
               </ResponsiveContainer>
@@ -1365,7 +1450,7 @@ export default function ModelingPage() {
           </FilterBar>
 
           {/* Resumen: siempre visible — la vitrina del hero model. */}
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4" aria-busy={modelsLoading}>
+          <div className="grid grid-cols-2 gap-4 lg:grid-cols-5" aria-busy={modelsLoading} aria-live="polite">
             {modelsLoading ? (
               Array.from({ length: 5 }).map((_, i) => <Skeleton key={i} className="h-[104px]" />)
             ) : heroModel ? (
@@ -1390,7 +1475,12 @@ export default function ModelingPage() {
                 <>
                   <div style={{ height: tornadoHeight }}>
                     <ResponsiveContainer width="100%" height="100%">
-                      <BarChart data={tornadoData} layout="vertical" margin={{ top: 8, right: 24, left: 8, bottom: 8 }}>
+                      <BarChart
+                        accessibilityLayer
+                        data={tornadoData}
+                        layout="vertical"
+                        margin={{ top: 8, right: 24, left: 8, bottom: 8 }}
+                      >
                         <CartesianGrid strokeDasharray="3 3" stroke={lineColor} horizontal={false} />
                         <XAxis
                           type="number"

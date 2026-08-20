@@ -83,6 +83,9 @@ aportan contexto). Convenciones y arquitectura conceptual completas en `CLAUDE.m
   + parseo de columna temporal. Usar siempre esta función, no leer el storage directo.
 - `app/utils/storage.py` — cliente mínimo de Supabase Storage vía `httpx` (`read_bytes`,
   `write_bytes`, `delete`, `move`, `stat`).
+- `app/utils/variable_labels.py` (Fase 6) — `channel_label_map`/`variable_label_map`/`resolve_label`/
+  `resolve_unit`: resuelve el nombre de negocio de una variable con prioridad canal curado >
+  `Variable.display_name` > nombre crudo. Usado por `analysis.py`, `models.py` y `predict.py`.
 - `alembic/` — migraciones de esquema (reemplaza los `ALTER TABLE` manuales que existían antes).
 - `Dockerfile`, `.dockerignore` — imagen para desplegar en Render (`alembic upgrade head &&
   uvicorn ...`).
@@ -129,6 +132,8 @@ aportan contexto). Convenciones y arquitectura conceptual completas en `CLAUDE.m
 - `src/lib/roles.ts` — labels/badge-variant por rol.
 - `src/lib/error-messages.ts` — `translateApiError()`: traduce `ApiError.code` (Fase 7.9) al
   namespace i18n `errors`, con fallback al `message` crudo del backend.
+- `src/lib/insight-text.ts` (Fase 6) — `buildContributionInsight()`: frase "{grupo} explica el {pct}%
+  de {yVar}...", compartida entre Resumen Ejecutivo y `/analysis`.
 - `src/hooks/useCanEdit.ts` — `useCanEdit()`/`useActiveRole()`/`useIsPlatformAdmin()`/
   `useCanManageUsers()`: gating de UI por rol de la compañía activa / platform admin.
 - `src/hooks/useActiveCompany.ts` — `useActiveCurrency()`: moneda (`Company.currency_code`,

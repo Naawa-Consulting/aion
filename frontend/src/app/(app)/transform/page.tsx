@@ -53,6 +53,8 @@ type Variable = {
   group_name?: string | null;
   subgroup_id?: string | null;
   subgroup_name?: string | null;
+  display_name?: string | null;
+  unit?: string | null;
   created_at?: string | null;
 };
 
@@ -743,6 +745,20 @@ export default function TransformPage() {
     }
   };
 
+  const handleUpdateLabel = async (variableId: string, displayName: string, unit: string) => {
+    try {
+      const updated = await apiFetch<Variable>(`/variables/${variableId}/categorization`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ display_name: displayName || null, unit: unit || null }),
+      });
+      setVariables((prev) => prev.map((v) => (v.id === updated.id ? updated : v)));
+      toast.success(t("toasts.categorized"));
+    } catch (err: any) {
+      toast.error(err instanceof ApiError ? translateApiError(err, tErrors) : t("toasts.categorizeFailed"));
+    }
+  };
+
   const toggleSelected = (variableId: string) => {
     setSelectedIds((prev) => {
       const next = new Set(prev);
@@ -877,7 +893,7 @@ export default function TransformPage() {
               size="sm"
               onClick={handleUndo}
               disabled={!canEdit}
-              title={!canEdit ? readOnlyTitle : undefined}
+              disabledReason={!canEdit ? readOnlyTitle : undefined}
             >
               {t("undo")}
             </Button>
@@ -1091,7 +1107,7 @@ export default function TransformPage() {
           </div>
           <p className="text-2xs text-muted">{t("builder.requiredLegend")}</p>
           <div className="flex justify-end">
-            <Button onClick={handleTransform} disabled={!canEdit || loading || !newName} title={!canEdit ? readOnlyTitle : undefined}>
+            <Button onClick={handleTransform} disabled={!canEdit || loading || !newName} disabledReason={!canEdit ? readOnlyTitle : undefined}>
               {loading ? t("builder.creating") : t("builder.create")}
             </Button>
           </div>
@@ -1221,13 +1237,13 @@ export default function TransformPage() {
                     </option>
                   ))}
                 </Select>
-                <Button size="sm" onClick={handleBulkAssign} disabled={!canEdit || bulkApplying} title={!canEdit ? readOnlyTitle : undefined}>
+                <Button size="sm" onClick={handleBulkAssign} disabled={!canEdit || bulkApplying} disabledReason={!canEdit ? readOnlyTitle : undefined}>
                   {t("variablesCard.assign")}
                 </Button>
-                <Button size="sm" variant="secondary" onClick={() => handleBulkToggleExcluded(true)} disabled={!canEdit || bulkApplying} title={!canEdit ? readOnlyTitle : undefined}>
+                <Button size="sm" variant="secondary" onClick={() => handleBulkToggleExcluded(true)} disabled={!canEdit || bulkApplying} disabledReason={!canEdit ? readOnlyTitle : undefined}>
                   {t("variablesCard.hide")}
                 </Button>
-                <Button size="sm" variant="secondary" onClick={() => handleBulkToggleExcluded(false)} disabled={!canEdit || bulkApplying} title={!canEdit ? readOnlyTitle : undefined}>
+                <Button size="sm" variant="secondary" onClick={() => handleBulkToggleExcluded(false)} disabled={!canEdit || bulkApplying} disabledReason={!canEdit ? readOnlyTitle : undefined}>
                   {t("variablesCard.unhide")}
                 </Button>
                 <Button size="sm" variant="ghost" onClick={() => setSelectedIds(new Set())}>
@@ -1259,6 +1275,11 @@ export default function TransformPage() {
                   onDragEnd={() => setDraggingVar(null)}
                   onHistory={() => openHistory(variable)}
                   historyLabel={t("variablesCard.history")}
+                  onSaveLabel={(displayName, unit) => handleUpdateLabel(variable.id, displayName, unit)}
+                  canEdit={canEdit}
+                  displayNameLabel={t("variablesCard.displayNameLabel")}
+                  unitLabel={t("variablesCard.unitLabel")}
+                  saveLabel={t("variablesCard.saveLabel")}
                 />
               ))
             )}
@@ -1280,7 +1301,7 @@ export default function TransformPage() {
                   <Button
                     size="sm"
                     disabled={!canEdit}
-                    title={!canEdit ? readOnlyTitle : undefined}
+                    disabledReason={!canEdit ? readOnlyTitle : undefined}
                     onClick={async () => {
                       if (!newGroupName.trim()) return;
                       try {
@@ -1327,7 +1348,7 @@ export default function TransformPage() {
                     size="sm"
                     className="shrink-0"
                     disabled={!canEdit}
-                    title={!canEdit ? readOnlyTitle : undefined}
+                    disabledReason={!canEdit ? readOnlyTitle : undefined}
                     onClick={async () => {
                       if (!newSubgroupParent || !newSubgroupName.trim()) return;
                       try {
@@ -1416,16 +1437,28 @@ export default function TransformPage() {
                           </div>
                         ) : (
                           <div className="flex items-center gap-2">
-                            <button
-                              type="button"
-                              className="flex items-center gap-2 group cursor-pointer text-left disabled:cursor-not-allowed disabled:opacity-60"
-                              onClick={() => startGroupRename(group)}
-                              disabled={!canEdit}
-                              title={!canEdit ? readOnlyTitle : undefined}
-                            >
-                              <span className="font-medium text-ink truncate max-w-[220px]">{group.name}</span>
-                              <Pencil size={14} className="text-muted opacity-0 group-hover:opacity-100 transition" />
-                            </button>
+                            {!canEdit ? (
+                              <InfoPopover content={readOnlyTitle}>
+                                <button
+                                  type="button"
+                                  className="flex items-center gap-2 group cursor-pointer text-left disabled:cursor-not-allowed disabled:opacity-60"
+                                  onClick={() => startGroupRename(group)}
+                                  disabled
+                                >
+                                  <span className="font-medium text-ink truncate max-w-[220px]">{group.name}</span>
+                                  <Pencil size={14} className="text-muted opacity-0 group-hover:opacity-100 transition" />
+                                </button>
+                              </InfoPopover>
+                            ) : (
+                              <button
+                                type="button"
+                                className="flex items-center gap-2 group cursor-pointer text-left disabled:cursor-not-allowed disabled:opacity-60"
+                                onClick={() => startGroupRename(group)}
+                              >
+                                <span className="font-medium text-ink truncate max-w-[220px]">{group.name}</span>
+                                <Pencil size={14} className="text-muted opacity-0 group-hover:opacity-100 transition" />
+                              </button>
+                            )}
                             <IconButton
                               size="sm"
                               className="!text-bad hover:!bg-bad-bg"
@@ -1435,7 +1468,7 @@ export default function TransformPage() {
                                 setGroupDeleteError("");
                               }}
                               disabled={!canEdit}
-                              title={!canEdit ? readOnlyTitle : undefined}
+                              disabledReason={!canEdit ? readOnlyTitle : undefined}
                             >
                               <Trash2 size={14} />
                             </IconButton>
@@ -1520,16 +1553,28 @@ export default function TransformPage() {
                             </div>
                           ) : (
                             <div className="flex items-center justify-between gap-2">
-                              <button
-                                type="button"
-                                className="flex-1 flex items-center gap-2 group text-left disabled:cursor-not-allowed disabled:opacity-60"
-                                onClick={() => startSubgroupRename(group.id, sub)}
-                                disabled={!canEdit}
-                                title={!canEdit ? readOnlyTitle : undefined}
-                              >
-                                <span className="truncate text-ink">{sub.name}</span>
-                                <Pencil size={14} className="text-muted opacity-0 group-hover:opacity-100 transition" />
-                              </button>
+                              {!canEdit ? (
+                                <InfoPopover content={readOnlyTitle} triggerClassName="flex-1">
+                                  <button
+                                    type="button"
+                                    className="flex-1 flex items-center gap-2 group text-left disabled:cursor-not-allowed disabled:opacity-60"
+                                    onClick={() => startSubgroupRename(group.id, sub)}
+                                    disabled
+                                  >
+                                    <span className="truncate text-ink">{sub.name}</span>
+                                    <Pencil size={14} className="text-muted opacity-0 group-hover:opacity-100 transition" />
+                                  </button>
+                                </InfoPopover>
+                              ) : (
+                                <button
+                                  type="button"
+                                  className="flex-1 flex items-center gap-2 group text-left disabled:cursor-not-allowed disabled:opacity-60"
+                                  onClick={() => startSubgroupRename(group.id, sub)}
+                                >
+                                  <span className="truncate text-ink">{sub.name}</span>
+                                  <Pencil size={14} className="text-muted opacity-0 group-hover:opacity-100 transition" />
+                                </button>
+                              )}
                               <label className="flex items-center gap-1 text-3xs uppercase text-muted shrink-0">
                                 <input
                                   type="checkbox"
@@ -1559,7 +1604,7 @@ export default function TransformPage() {
                                   setSubgroupDeleteError("");
                                 }}
                                 disabled={!canEdit}
-                                title={!canEdit ? readOnlyTitle : undefined}
+                                disabledReason={!canEdit ? readOnlyTitle : undefined}
                               >
                                 <Trash2 size={14} />
                               </IconButton>
@@ -1614,7 +1659,7 @@ export default function TransformPage() {
           <Button variant="ghost" onClick={closeGroupDeleteModal} disabled={groupDeleteLoading}>
             {tCommon("cancel")}
           </Button>
-          <Button variant="danger" onClick={confirmDeleteGroup} disabled={!canEdit || groupDeleteLoading} title={!canEdit ? readOnlyTitle : undefined}>
+          <Button variant="danger" onClick={confirmDeleteGroup} disabled={!canEdit || groupDeleteLoading} disabledReason={!canEdit ? readOnlyTitle : undefined}>
             {groupDeleteLoading ? t("groups.deleting") : t("groups.deleteConfirm")}
           </Button>
         </div>
@@ -1677,7 +1722,7 @@ export default function TransformPage() {
             variant="danger"
             onClick={confirmDeleteSubgroup}
             disabled={!canEdit || subgroupDeleteLoading}
-            title={!canEdit ? readOnlyTitle : undefined}
+            disabledReason={!canEdit ? readOnlyTitle : undefined}
           >
             {subgroupDeleteLoading ? t("groups.deleting") : t("groups.deleteSubgroupConfirm")}
           </Button>
@@ -1695,6 +1740,11 @@ function VariableRow({
   onDragEnd,
   onHistory,
   historyLabel,
+  onSaveLabel,
+  canEdit,
+  displayNameLabel,
+  unitLabel,
+  saveLabel,
 }: {
   variable: Variable;
   selected: boolean;
@@ -1703,7 +1753,16 @@ function VariableRow({
   onDragEnd: () => void;
   onHistory: () => void;
   historyLabel: string;
+  onSaveLabel: (displayName: string, unit: string) => void;
+  canEdit: boolean;
+  displayNameLabel: string;
+  unitLabel: string;
+  saveLabel: string;
 }) {
+  const [editingLabel, setEditingLabel] = useState(false);
+  const [draftDisplayName, setDraftDisplayName] = useState(variable.display_name ?? "");
+  const [draftUnit, setDraftUnit] = useState(variable.unit ?? "");
+
   return (
     <div
       className="rounded-xl border border-line p-3 text-sm bg-surface cursor-grab active:cursor-grabbing"
@@ -1712,7 +1771,7 @@ function VariableRow({
       onDragEnd={onDragEnd}
     >
       <div className="flex items-center justify-between">
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 min-w-0">
           <GripVertical className="h-4 w-4 shrink-0 text-muted" aria-hidden />
           <input
             type="checkbox"
@@ -1721,9 +1780,27 @@ function VariableRow({
             onChange={onToggleSelect}
             aria-label={variable.name}
           />
-          <div>
-            <p className="font-medium text-ink">{variable.name}</p>
-            <p className="text-xs text-muted">{variable.dtype}</p>
+          <div className="min-w-0">
+            <div className="flex items-center gap-1">
+              <p className="truncate font-medium text-ink">{variable.display_name || variable.name}</p>
+              {canEdit && (
+                <button
+                  type="button"
+                  aria-label={displayNameLabel}
+                  className="shrink-0 rounded p-0.5 text-muted hover:text-ink"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setEditingLabel((v) => !v);
+                  }}
+                >
+                  <Pencil size={12} />
+                </button>
+              )}
+            </div>
+            <p className="text-xs text-muted">
+              {variable.name} · {variable.dtype}
+              {variable.unit ? ` · ${variable.unit}` : ""}
+            </p>
           </div>
         </div>
         <div className="flex items-center gap-1">
@@ -1738,6 +1815,36 @@ function VariableRow({
           )}
         </div>
       </div>
+      {editingLabel && (
+        <div
+          className="mt-2 flex flex-wrap items-center gap-2"
+          draggable={false}
+          onDragStart={(e) => e.stopPropagation()}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <Input
+            value={draftDisplayName}
+            onChange={(e) => setDraftDisplayName(e.target.value)}
+            placeholder={displayNameLabel}
+            className="h-control-sm w-[180px]"
+          />
+          <Input
+            value={draftUnit}
+            onChange={(e) => setDraftUnit(e.target.value)}
+            placeholder={unitLabel}
+            className="h-control-sm w-[110px]"
+          />
+          <Button
+            size="sm"
+            onClick={() => {
+              onSaveLabel(draftDisplayName.trim(), draftUnit.trim());
+              setEditingLabel(false);
+            }}
+          >
+            {saveLabel}
+          </Button>
+        </div>
+      )}
     </div>
   );
 }
@@ -1798,7 +1905,7 @@ function PreviewChart({
   return (
     <div className="w-full">
       <ResponsiveContainer width="100%" height={240}>
-        <ComposedChart data={chartData}>
+        <ComposedChart accessibilityLayer data={chartData}>
           <CartesianGrid strokeDasharray="3 3" />
           <XAxis dataKey="time" tick={{ fontSize: 10 }} minTickGap={20} />
           <YAxis yAxisId="left" tick={{ fontSize: 10 }} hide={!hasOriginal} />
@@ -1829,13 +1936,13 @@ function PreviewChart({
 
 function InfoTooltip({ label, content }: { label: string; content: string }) {
   return (
-    <InfoPopover content={<span style={{ whiteSpace: "normal", display: "block", maxWidth: 220 }}>{content}</span>}>
+    <InfoPopover content={<span style={{ whiteSpace: "normal", display: "block", width: "max-content", maxWidth: 220 }}>{content}</span>}>
       <button
         type="button"
         aria-label={label}
-        className="rounded-full p-0.5 text-muted transition hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+        className="-m-1.5 rounded-full p-1.5 text-muted transition hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
       >
-        <Info className="h-3.5 w-3.5" />
+        <Info className="h-3 w-3" />
       </button>
     </InfoPopover>
   );

@@ -32,6 +32,7 @@ from ..services.model_fit import (
 from ..tenancy import get_scoped
 from ..utils.datasets import load_dataset_frame
 from ..utils.excel import excel_response
+from ..utils.variable_labels import channel_label_map, resolve_label, variable_label_map
 from ..schemas import (
     CorrelationResponse,
     CorrelationItem,
@@ -675,6 +676,8 @@ def model_summary(
     ds = get_scoped(session, Dataset, m.dataset_id, membership.company_id)
     df = _load_df(ds)
     x_vars = json.loads(m.x_vars_json)
+    ch_map = channel_label_map(session, m.dataset_id, membership.company_id)
+    var_map = variable_label_map(session, m.dataset_id, membership.company_id)
     transform_params = load_transform_params(session, m.id, membership.company_id)
     work, y, X, used_params = _build_matrix(
         session, membership.company_id, m.dataset_id, df, m.y_var, x_vars,
@@ -723,6 +726,7 @@ def model_summary(
         coefficients.append(
             CoefficientItem(
                 name=var,
+                display_name=resolve_label(var, ch_map, var_map),
                 coef=float(result.params.get(var, 0.0)),
                 std_err=float(result.bse.get(var, 0.0)),
                 t_value=float(result.tvalues.get(var, 0.0)),

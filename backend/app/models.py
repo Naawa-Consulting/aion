@@ -63,6 +63,8 @@ class Variable(SQLModel, table=True):
     group_id: Optional[str] = None
     subgroup_id: Optional[str] = None
     is_excluded: bool = Field(default=False, nullable=False)
+    display_name: str | None = Field(default=None, nullable=True)  # Fase 6: business-friendly label
+    unit: str | None = Field(default=None, nullable=True)  # Fase 6: e.g. "conversiones", "$", "visitas"
     created_at: datetime = Field(default_factory=datetime.utcnow, nullable=False)
 
 

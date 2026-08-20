@@ -154,6 +154,8 @@ class VariableOut(BaseModel):
     group_id: Optional[str] = None
     group_name: Optional[str] = None
     is_excluded: bool = False
+    display_name: Optional[str] = None
+    unit: Optional[str] = None
     created_at: Optional[datetime] = None
 
 
@@ -267,6 +269,8 @@ class CategorizeRequest(BaseModel):
     group_id: Optional[str] = None
     subgroup_id: Optional[str] = None
     is_excluded: Optional[bool] = None
+    display_name: Optional[str] = None
+    unit: Optional[str] = None
 
 
 class BulkCategorizeRequest(BaseModel):
@@ -274,6 +278,8 @@ class BulkCategorizeRequest(BaseModel):
     group_id: Optional[str] = None
     subgroup_id: Optional[str] = None
     is_excluded: Optional[bool] = None
+    display_name: Optional[str] = None
+    unit: Optional[str] = None
 
 
 # Modeling
@@ -362,6 +368,7 @@ class ModelRoleRequest(BaseModel):
 
 class CoefficientItem(BaseModel):
     name: str
+    display_name: Optional[str] = None
     coef: float
     std_err: float
     t_value: float
@@ -592,6 +599,7 @@ class ChannelEconomics(BaseModel):
     roas: Optional[float] = None
     share_of_investment: float
     share_of_contribution: Optional[float] = None
+    dollar_rate: Optional[float] = None
 
 
 class EconomicsTotals(BaseModel):
@@ -650,8 +658,23 @@ class EconomicsSummaryResponse(BaseModel):
 
 
 # Budget optimizer (Fase 6 — Planner mode / Resumen Ejecutivo, shared engine)
+BudgetObjective = Literal["max_revenue", "max_roi", "min_spend"]
+
+
 class BudgetOptimizationRequest(BaseModel):
     budget: float = Field(gt=0)
+    """Fase 5/P5 (D2): meaning depends on `objective`. "max_revenue": spend sums to EXACTLY this
+    (equality). "max_roi": ceiling — spend sums to AT MOST this. "min_spend": ignored for the
+    optimization itself, used only as a per-channel fallback upper bound when a channel has no
+    usable historical max."""
+    objective: BudgetObjective = "max_revenue"
+    marginal_roi_threshold: Optional[float] = Field(default=None, ge=0)
+    """"max_roi" only: minimum marginal ROI (e.g. 0.2 = 20%) required to keep allocating the next
+    dollar to a channel. Omitted/None defaults to 0 — stop once the next dollar stops paying for
+    itself."""
+    target_revenue: Optional[float] = Field(default=None, gt=0)
+    """"min_spend" only: required — the revenue (or contribution, if economics isn't configured)
+    floor to reach while spending as little as possible."""
 
 
 class ChannelAllocation(BaseModel):
@@ -665,6 +688,15 @@ class ChannelAllocation(BaseModel):
     since the model/scenario pipeline works in the variable's native units, not dollars."""
     projected_contribution: float
     projected_revenue: Optional[float] = None
+    historical_max_spend: Optional[float] = None
+    """Fase 5/A09-R6: max $ ever spent on this channel historically (raw unit max × dollar_rate).
+    None when it couldn't be computed — treat as "no known ceiling", not zero."""
+    out_of_historical_range: bool = False
+    """True when `suggested_spend` exceeds `historical_max_spend` — the model is extrapolating the
+    Hill curve beyond any spend level it was actually fit against."""
+    low_marginal_return: bool = False
+    """Fase 5/A09-R8: true when this channel got ~$0 while at least one other channel received a
+    positive allocation — i.e. it lost out on marginal return, not merely "budget was zero"."""
 
 
 class ExcludedChannel(BaseModel):

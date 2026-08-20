@@ -20,14 +20,16 @@ Resumen por módulo (detalle técnico completo — endpoints y contratos — en 
    apiladas por periodo, export a Excel. Capa económica: catálogo de canales de inversión
    (por-dataset, configurado en `/transform`) + tasa de conversión/valor promedio por modelo
    (`/modeling`) alimentan una vista de Economía/ROI en `/analysis` (cards, tabla por canal,
-   serie de tiempo inversión vs. ingreso).
+   serie de tiempo inversión vs. ingreso, curva de saturación en $). Waterfall distingue grupos
+   accionables de estacionalidad/tendencia; comparación lado a lado de 2 modelos (contribución/ROI).
 5. **Predict** — funcional (MVP). Escenarios time-phased, comparación, import/export CSV/XLSX.
    Modo Planner (toggle junto a la grilla): optimizador de presupuesto (steady-state, un solo
    objetivo v1 — maximizar retorno dado un presupuesto) + KPIs de ROI/ROAS sobre el escenario
    proyectado.
 6. **Resumen Ejecutivo** (`/executive-summary`) — vista de nivel superior para decisiones rápidas:
-   KPIs agregados (contribución, fit del modelo, ROI/ROAS) reusando lo ya calculado en Analysis, y
-   un "presupuesto inverso" (mismo motor de optimización que el modo Planner de Predict).
+   KPIs agregados (contribución, fit del modelo, ROI/ROAS) reusando lo ya calculado en Analysis,
+   tabla de hasta 3 escenarios destacados (marcados en Predict), nota de no-causalidad, y export a
+   Excel bilingüe (ES/EN) con hoja "cómo leer esto".
 7. **Configuración** (paleta de color, usuarios) — usuarios ya cubierto por auth multi-company
    (ver abajo); paleta de color pendiente.
 8. **Perfil** (password) — cubierto por Supabase Auth (`/reset-password`).
@@ -51,6 +53,13 @@ ruta) en las 5 páginas de producto + Resumen Ejecutivo + Admin + Login. Primiti
 tooltip, etc.), tokens de color/tipografía/radio/altura de la Dirección C, paleta de gráficas
 compartida y estable (`lib/chart-colors.ts`), `prefers-reduced-motion` respetado, responsive
 verificado a 1440/1024/390.
+
+Pasada de accesibilidad y densidad (Fase 8/Fase 7, 2026-08-19 — detalle en `BITACORA.md`): diálogos
+(`Modal`, drawer móvil) con foco atrapado y devuelto al cerrar, `accessibilityLayer` en las 11
+gráficas de recharts, `MotionConfig` respetando `prefers-reduced-motion` también para Framer Motion,
+skip link, tabla accesible de Predict pedible manualmente en escritorio, explicación visible (no
+`title` nativo) en controles deshabilitados por rol, KPIs en 2 columnas desde móvil, y aislar una
+serie de una gráfica con clic en su leyenda.
 
 ## Estructura del repo
 

@@ -21,7 +21,7 @@ export function FilterBar({ children, className }: FilterBarProps) {
 }
 
 type FilterFieldProps = {
-  label: string;
+  label: React.ReactNode;
   children: React.ReactNode;
   className?: string;
 };

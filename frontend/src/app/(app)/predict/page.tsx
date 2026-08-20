@@ -23,7 +23,7 @@ import { ErrorText } from "@/components/ui/error-text";
 import { Select } from "@/components/ui/select";
 import { Input } from "@/components/ui/input";
 import { Eyebrow } from "@/components/ui/eyebrow";
-import { Info, Star, Copy } from "lucide-react";
+import { Info, Star, Copy, Undo2, Redo2 } from "lucide-react";
 import { PageHeader } from "@/components/ui/page-header";
 import { FilterBar, FilterField } from "@/components/ui/filter-bar";
 import { EmptyState } from "@/components/ui/empty-state";
@@ -34,6 +34,7 @@ import { ToggleChip } from "@/components/ui/toggle-chip";
 import { Badge } from "@/components/ui/badge";
 import { Table, TableHeader, TableRow, Th, TableCell } from "@/components/ui/table";
 import { Modal } from "@/components/ui/modal";
+import { Disclosure } from "@/components/ui/disclosure";
 import ScenarioSheetGlide, { type MultipliersMap } from "@/components/predict/ScenarioSheetGlide";
 import ScenarioSheetTable from "@/components/predict/ScenarioSheetTable";
 import PlannerView, { type ChannelAllocation } from "@/components/predict/PlannerView";
@@ -41,6 +42,7 @@ import { apiFetch, ApiError } from "@/lib/api";
 import { translateApiError } from "@/lib/error-messages";
 import { useCanEdit } from "@/hooks/useCanEdit";
 import { useMediaQuery } from "@/hooks/useMediaQuery";
+import { useKeyboardShortcut } from "@/hooks/useKeyboardShortcut";
 import { chartColor, useStableCategoricalColor } from "@/lib/chart-colors";
 import { formatChartNumber, formatChartPercent, formatCurrency } from "@/lib/chart-format";
 import { EMPTY_VALUE } from "@/lib/format";
@@ -65,9 +67,11 @@ type Model = {
 
 type VariableRow = {
   name: string;
+  display_name?: string | null;
   baseline_mean: number;
   group_name?: string | null;
   subgroup_name?: string | null;
+  dollar_rate?: number | null;
 };
 
 type PeriodValue = {
@@ -106,6 +110,7 @@ type ScenarioSummary = {
   subgroups: ContributionSlice[];
   series: ScenarioSeriesPoint[];
   economics?: ScenarioEconomics | null;
+  variable_baselines?: Record<string, Record<string, number>> | null;
 };
 
 type Scenario = {
@@ -151,13 +156,13 @@ function SecondaryLink({ href, children }: { href: string; children: React.React
 
 function InfoTooltip({ label, content }: { label: string; content: string }) {
   return (
-    <InfoPopover content={<span style={{ whiteSpace: "normal", display: "block", maxWidth: 220 }}>{content}</span>}>
+    <InfoPopover content={<span style={{ whiteSpace: "normal", display: "block", width: "max-content", maxWidth: 220 }}>{content}</span>}>
       <button
         type="button"
         aria-label={label}
-        className="rounded-full p-0.5 text-muted transition hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+        className="-m-1.5 rounded-full p-1.5 text-muted transition hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
       >
-        <Info className="h-3.5 w-3.5" />
+        <Info className="h-3 w-3" />
       </button>
     </InfoPopover>
   );
@@ -175,6 +180,21 @@ function formatSignedPercent(delta: number, formatter: Intl.NumberFormat) {
   return `${sign}${formatter.format(delta)}`;
 }
 
+// Fase 5/A04-R6: order-independent comparison key for `adjustments` — a plain `JSON.stringify`
+// would false-positive as "dirty" whenever the backend's period/variable key order differs from
+// the frontend's (e.g. right after a save/load round-trip), since JS object key order follows
+// insertion order and isn't guaranteed to match between two independently-built objects holding
+// the same data.
+function stableAdjustmentsKey(adjustments: Record<string, Record<string, PeriodValue>>): string {
+  const periods = Object.keys(adjustments).sort();
+  return JSON.stringify(
+    periods.map((period) => {
+      const vars = Object.keys(adjustments[period] || {}).sort();
+      return [period, vars.map((name) => [name, adjustments[period][name].mode, Number(adjustments[period][name].value)])];
+    })
+  );
+}
+
 export default function PredictPage() {
   const t = useTranslations("predict");
   const tCommon = useTranslations("common");
@@ -188,6 +208,7 @@ export default function PredictPage() {
     setModelId: setStoredModelId,
     startLongOperation,
     endLongOperation,
+    setUnsavedChangesActive,
   } = useGlobalStore();
   const currency = useActiveCurrency();
   const { resolvedTheme } = useTheme();
@@ -202,7 +223,78 @@ export default function PredictPage() {
   const [selectedModel, setSelectedModel] = useState("");
 
   const [variables, setVariables] = useState<VariableRow[]>([]);
+  const [yVarLabel, setYVarLabel] = useState<string | null>(null);
   const [adjustments, setAdjustments] = useState<Record<string, Record<string, PeriodValue>>>({});
+
+  // Fase 5/A07-R3: local undo/redo over `adjustments` — a plain stack of full snapshots (ref, not
+  // state, so pushing on every edit doesn't itself trigger a render) capped at 50 entries.
+  // `suppressHistoryPushRef` is set right before undo/redo/load rewrite `adjustments` themselves,
+  // so the generic "record every change" effect below doesn't re-push the state it just restored.
+  const historyStackRef = useRef<Record<string, Record<string, PeriodValue>>[]>([]);
+  const historyIndexRef = useRef(-1);
+  const suppressHistoryPushRef = useRef(false);
+  const [canUndo, setCanUndo] = useState(false);
+  const [canRedo, setCanRedo] = useState(false);
+
+  useEffect(() => {
+    if (suppressHistoryPushRef.current) {
+      suppressHistoryPushRef.current = false;
+      return;
+    }
+    const truncated = historyStackRef.current.slice(0, historyIndexRef.current + 1);
+    truncated.push(cloneAdjustments(adjustments));
+    historyStackRef.current = truncated.length > 50 ? truncated.slice(truncated.length - 50) : truncated;
+    historyIndexRef.current = historyStackRef.current.length - 1;
+    setCanUndo(historyIndexRef.current > 0);
+    setCanRedo(false);
+  }, [adjustments]);
+
+  const undo = useCallback(() => {
+    if (historyIndexRef.current <= 0) return;
+    historyIndexRef.current -= 1;
+    suppressHistoryPushRef.current = true;
+    setAdjustments(cloneAdjustments(historyStackRef.current[historyIndexRef.current]));
+    setCanUndo(historyIndexRef.current > 0);
+    setCanRedo(true);
+  }, []);
+
+  const redo = useCallback(() => {
+    if (historyIndexRef.current >= historyStackRef.current.length - 1) return;
+    historyIndexRef.current += 1;
+    suppressHistoryPushRef.current = true;
+    setAdjustments(cloneAdjustments(historyStackRef.current[historyIndexRef.current]));
+    setCanUndo(true);
+    setCanRedo(historyIndexRef.current < historyStackRef.current.length - 1);
+  }, []);
+
+  // Ctrl+Z alone must NOT also fire when Shift is held — `useKeyboardShortcut`'s `options.shift`
+  // only requires shift to be down when set, it doesn't require it to be UP when unset, so without
+  // this guard Ctrl+Shift+Z would fire both this and the redo shortcut below in the same keystroke.
+  useKeyboardShortcut(
+    "z",
+    (event) => {
+      if (event.shiftKey) return;
+      event.preventDefault();
+      undo();
+    },
+    { ctrl: true }
+  );
+  useKeyboardShortcut(
+    "z",
+    (event) => {
+      event.preventDefault();
+      redo();
+    },
+    { ctrl: true, shift: true }
+  );
+  useKeyboardShortcut(
+    "y",
+    (event) => {
+      event.preventDefault();
+      redo();
+    },
+    { ctrl: true }
+  );
 
   const [horizon, setHorizon] = useState(12);
   const [startDate, setStartDate] = useState(() => new Date().toISOString().slice(0, 10));
@@ -221,6 +313,12 @@ export default function PredictPage() {
   const [heroLoading, setHeroLoading] = useState(false);
   const [showProjectedTable, setShowProjectedTable] = useState(false);
   const [viewMode, setViewMode] = useState<"advanced" | "planner">("planner");
+  const [investmentMode, setInvestmentMode] = useState<"units" | "dollars">("units");
+  // A05-R5: el grid en <canvas> (ScenarioSheetGlide) hoy solo cede a la tabla HTML accesible por
+  // debajo de `lg` (hooks/useMediaQuery.ts). No hay forma de pedirla en escritorio — p.ej. lector
+  // de pantalla, zoom alto, o simple preferencia — sin achicar la ventana. Toggle manual, además
+  // (no en vez) del fallback automático.
+  const [forceAccessibleTable, setForceAccessibleTable] = useState(false);
   const [assumptionsExporting, setAssumptionsExporting] = useState(false);
   const [totalsExporting, setTotalsExporting] = useState(false);
   const [initializing, setInitializing] = useState(true);
@@ -254,11 +352,20 @@ export default function PredictPage() {
     () =>
       variables.map((variable) => ({
         name: variable.name,
+        displayName: variable.display_name ?? variable.name,
         baselineMean: variable.baseline_mean,
+        // Fase 5/P2: seasonal per-period baseline from the last preview — falls back to the
+        // flat mean (inside the grid components) until a preview has actually run.
+        baselineByPeriod: preview?.variable_baselines?.[variable.name],
+        dollarRate: variable.dollar_rate,
         group: variable.group_name ?? "Other",
       })),
-    [variables]
+    [variables, preview]
   );
+  // Fase 5/A07-R2: media channels (resolvable $/unit rate) rendered as their own section,
+  // separate from structural/control variables — two grid instances, not one flat table.
+  const mediaGridVariables = useMemo(() => gridVariables.filter((v) => v.dollarRate != null), [gridVariables]);
+  const structuralGridVariables = useMemo(() => gridVariables.filter((v) => v.dollarRate == null), [gridVariables]);
   const multipliersByVariable = useMemo(
     () => buildMultipliersFromAdjustments(variables, editablePeriods, adjustments),
     [variables, editablePeriods, adjustments]
@@ -267,6 +374,65 @@ export default function PredictPage() {
     () => buildAbsoluteValuesFromAdjustments(variables, editablePeriods, adjustments),
     [variables, editablePeriods, adjustments]
   );
+  // Fase 5/P4: current $ spend implied by the grid's own state, in the SAME unit the optimizer
+  // works in (steady-state $ total across the whole horizon, see PlannerView's `suggested_spend`
+  // doc comment) — lets PlannerView precharge its budget input and show "current vs. suggested"
+  // instead of always starting from a blank/zero state.
+  const currentMediaAllocations = useMemo(
+    () =>
+      mediaGridVariables
+        .filter((v) => v.dollarRate)
+        .map((v) => {
+          const totalRaw = editablePeriods.reduce((sum, period) => {
+            const override = absoluteValuesByVariable[v.name]?.[period];
+            const baseline = v.baselineByPeriod?.[period] ?? v.baselineMean;
+            const multiplier = multipliersByVariable[v.name]?.[period] ?? 1;
+            const raw = override != null && Number.isFinite(override) ? override : baseline * multiplier;
+            return sum + raw;
+          }, 0);
+          return { proxy_variable: v.name, name: v.name, current_spend: totalRaw * (v.dollarRate as number) };
+        }),
+    [mediaGridVariables, editablePeriods, absoluteValuesByVariable, multipliersByVariable]
+  );
+
+  // Fase 5/A04-R6: "dirty" = differs from the last saved scenario's adjustments (or, for a fresh
+  // unsaved scenario, from the all-multiplier-1 default `ensureAdjustmentDefaults` establishes).
+  // A ref, not state — updated on save/load without needing its own re-render.
+  const savedAdjustmentsKeyRef = useRef<string | null>(null);
+  const defaultAdjustmentsKey = useMemo(() => {
+    const next: Record<string, Record<string, PeriodValue>> = {};
+    editablePeriods.forEach((period) => {
+      const periodValues: Record<string, PeriodValue> = {};
+      variables.forEach((variable) => {
+        periodValues[variable.name] = { mode: "multiplier", value: DEFAULT_MULTIPLIER };
+      });
+      next[period] = periodValues;
+    });
+    return stableAdjustmentsKey(next);
+  }, [editablePeriods, variables]);
+  const isDirty = useMemo(() => {
+    const baseline = currentScenarioId ? savedAdjustmentsKeyRef.current : defaultAdjustmentsKey;
+    if (baseline === null) return false;
+    return stableAdjustmentsKey(adjustments) !== baseline;
+  }, [adjustments, currentScenarioId, defaultAdjustmentsKey]);
+
+  useEffect(() => {
+    setUnsavedChangesActive(isDirty);
+  }, [isDirty, setUnsavedChangesActive]);
+  // Clear the guard on unmount — otherwise navigating AWAY from Predict via something other than
+  // the Sidebar/company-switcher (e.g. a deep link, browser back) would leave the flag armed for
+  // whatever page loads next.
+  useEffect(() => () => setUnsavedChangesActive(false), [setUnsavedChangesActive]);
+
+  useEffect(() => {
+    if (!isDirty) return;
+    const handler = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", handler);
+    return () => window.removeEventListener("beforeunload", handler);
+  }, [isDirty]);
   const selectedModelInfo = useMemo(
     () => models.find((model) => model.id === selectedModel),
     [models, selectedModel]
@@ -278,9 +444,9 @@ export default function PredictPage() {
   // P1: Dataset.frequency acts as the default AND the floor for a scenario's own granularity —
   // a dataset detected/set as "monthly" shouldn't let a scenario plan week-by-week off it.
   const freqFloor = selectedDatasetInfo?.frequency ? FREQ_FLOOR_MAP[selectedDatasetInfo.frequency] : null;
-  const dependentLabel = selectedModelInfo?.y_var ?? "Y";
+  const dependentLabel = yVarLabel || selectedModelInfo?.y_var || "Y";
   const freqLabel = t(`freq.${freq}`);
-  const editMode: "absolute" = "absolute";
+  const hasDollarRateVariable = gridVariables.some((v) => v.dollarRate != null);
   const reachedScenarioLimit = !currentScenarioId && scenarios.length >= SCENARIO_LIMIT;
   const reachedFeaturedLimit = scenarios.filter((scenario) => scenario.is_featured).length >= FEATURED_LIMIT;
   const saveButtonLabel = currentScenarioId ? t("params.saveChanges") : t("params.save");
@@ -389,9 +555,11 @@ export default function PredictPage() {
           body: JSON.stringify({ adjustments: [] }),
         });
         setVariables(data.variables || []);
+        setYVarLabel(data.model?.y_var_display_name || null);
         fetchPreview();
       } catch (err) {
         setVariables([]);
+        setYVarLabel(null);
         setVariablesError(true);
         toast.error(err instanceof ApiError ? translateApiError(err, tErrors) : t("toasts.loadVariablesFailed"));
       }
@@ -432,6 +600,13 @@ export default function PredictPage() {
     setScenarioName("Scenario 1");
     // P1: default a fresh scenario's granularity to the dataset's own detected/set frequency.
     if (freqFloor) setFreq(freqFloor);
+    // A07-R3: a different model has a different variable set — old undo/redo entries would
+    // reference variables that don't exist here, so start a clean stack (the next
+    // `ensureAdjustmentDefaults` write naturally becomes its first entry).
+    historyStackRef.current = [];
+    historyIndexRef.current = -1;
+    setCanUndo(false);
+    setCanRedo(false);
   }, [selectedModel, freqFloor]);
 
   useEffect(() => {
@@ -465,11 +640,20 @@ export default function PredictPage() {
 
   const handleGridMultipliersChange = useCallback(
     (nextMultipliers: MultipliersMap, absoluteOverrides?: Record<string, Record<string, number>>) => {
-      setAdjustments(
-        multipliersToAdjustments(nextMultipliers, editablePeriods, variables, absoluteOverrides)
-      );
+      // Fase 5/A07-R2 split the grid into a media section and a structural section, each its own
+      // component instance — each only knows its own subset of variable names, so its callback's
+      // `nextMultipliers`/`absoluteOverrides` only cover that subset. Merge by variable name (top
+      // level) onto the FULL current maps rather than rebuild `adjustments` from the partial map
+      // directly — otherwise every variable in the *other* section would silently reset to its
+      // default multiplier (1.0) on every edit, wiping any adjustment already made there.
+      const mergedMultipliers: MultipliersMap = { ...multipliersByVariable, ...nextMultipliers };
+      const mergedAbsolute: Record<string, Record<string, number>> = {
+        ...absoluteValuesByVariable,
+        ...absoluteOverrides,
+      };
+      setAdjustments(multipliersToAdjustments(mergedMultipliers, editablePeriods, variables, mergedAbsolute));
     },
-    [editablePeriods, variables]
+    [editablePeriods, variables, multipliersByVariable, absoluteValuesByVariable]
   );
   const handleInvalidGridInput = useCallback(
     (count: number) => {
@@ -519,6 +703,36 @@ export default function PredictPage() {
     setResetConfirmOpen(false);
   }, [editablePeriods, variables]);
 
+  // Fase 5/P3 (revised): changing frequency converts the scenario itself — horizon follows a
+  // calendar-based ratio (12 months <-> 52 weeks) and every variable's grid values are re-gridded
+  // (aggregated exactly when going coarser, distributed as an estimate when going finer) — see
+  // `convertHorizon`/`retimeAdjustments` below the component. Only fires for a real user-driven
+  // change (the `freq` <Select>), never for the P1 default-on-model-switch, which starts a fresh
+  // scenario with nothing to convert.
+  const handleFreqChange = useCallback(
+    (nextFreq: "day" | "week" | "month") => {
+      if (nextFreq === freq) return;
+      const nextHorizon = convertHorizon(horizon, freq, nextFreq);
+      const oldPeriods = editablePeriods.length ? editablePeriods : periodLabels;
+      const newPeriods = buildPeriodLabels(startDate, nextHorizon, nextFreq);
+      const nextAdjustments = retimeAdjustments(gridVariables, oldPeriods, adjustments, newPeriods);
+      setFreq(nextFreq);
+      setHorizon(nextHorizon);
+      setAdjustments(nextAdjustments);
+      const isFiner = FREQ_RANK[nextFreq] < FREQ_RANK[freq];
+      const message = t(isFiner ? "params.frequencyConvertedEstimate" : "params.frequencyConverted", {
+        horizon: nextHorizon,
+        freq: t(`freq.${nextFreq}`),
+      });
+      if (isFiner) {
+        toast.info(message);
+      } else {
+        toast.success(message);
+      }
+    },
+    [freq, horizon, editablePeriods, periodLabels, startDate, gridVariables, adjustments, t]
+  );
+
   const handleSaveScenario = async () => {
     if (!selectedModel) {
       toast.error(t("toasts.selectModelFirst"));
@@ -551,13 +765,21 @@ export default function PredictPage() {
       setHorizon(data.horizon);
       setStartDate(data.start_date);
       setFreq(data.freq);
-      setAdjustments(cloneAdjustments(data.adjustments));
+      const savedAdjustments = cloneAdjustments(data.adjustments);
+      setAdjustments(savedAdjustments);
+      savedAdjustmentsKeyRef.current = stableAdjustmentsKey(savedAdjustments);
       setPreview(data.summary);
+      // Fase 5/A04-R6 fallout: refetch `scenarios` BEFORE setting `currentScenarioId` — a brand
+      // new scenario's id isn't in the (still-stale) `scenarios` list yet, and the effect below
+      // that clears `currentScenarioId` when it's missing from `scenarios` (meant for "this
+      // scenario was deleted elsewhere") would otherwise fire immediately and incorrectly null it
+      // right back out, which in turn made the unsaved-changes guard compare against the "brand
+      // new scenario" default forever — the just-saved scenario always looked dirty.
+      if (selectedModel) await fetchScenarios(selectedModel);
       setCurrentScenarioId(data.id);
       setRenamingScenarioId(null);
       setRenameValue("");
       toast.success(currentScenarioId ? t("toasts.scenarioUpdated") : t("toasts.scenarioSaved"));
-      await fetchScenarios(selectedModel);
     } catch (error) {
       toast.error(error instanceof ApiError ? translateApiError(error, tErrors) : t("toasts.saveFailed"));
     } finally {
@@ -570,7 +792,14 @@ export default function PredictPage() {
     setHorizon(scenario.horizon);
     setStartDate(scenario.start_date);
     setFreq(scenario.freq);
-    setAdjustments(cloneAdjustments(scenario.adjustments));
+    const loadedAdjustments = cloneAdjustments(scenario.adjustments);
+    suppressHistoryPushRef.current = true;
+    historyStackRef.current = [cloneAdjustments(loadedAdjustments)];
+    historyIndexRef.current = 0;
+    setCanUndo(false);
+    setCanRedo(false);
+    setAdjustments(loadedAdjustments);
+    savedAdjustmentsKeyRef.current = stableAdjustmentsKey(loadedAdjustments);
     setCurrentScenarioId(scenario.id);
     setRenamingScenarioId(null);
     setRenameValue("");
@@ -857,6 +1086,21 @@ export default function PredictPage() {
     ];
   }, [economics, t, currency]);
 
+  // Fase 5/A08-R2: ~10 KPIs (2 base + up to 4 group slices + baseline + other + 4 economics) is
+  // too many to show at equal weight — split into a primary tier (always visible: the headline
+  // total/average, plus ROI/ROAS when economics is configured) and a secondary tier (everything
+  // else) tucked behind a Disclosure, open by default for `modelador` (the role that actually acts
+  // on this detail) and closed for `visualizador`.
+  const primaryKpiItems = useMemo(() => {
+    const roi = economicsKpiItems.find((item) => item.key === "roi");
+    const roas = economicsKpiItems.find((item) => item.key === "roas");
+    return [kpiItems[0], kpiItems[1], roi, roas].filter((item): item is KpiItem => Boolean(item));
+  }, [kpiItems, economicsKpiItems]);
+  const secondaryKpiItems = useMemo(() => {
+    const primaryKeys = new Set(primaryKpiItems.map((item) => item.key));
+    return [...kpiItems, ...economicsKpiItems].filter((item) => !primaryKeys.has(item.key));
+  }, [kpiItems, economicsKpiItems, primaryKpiItems]);
+
   const chartData = useMemo(() => {
     const map = new Map<string, { hero?: number | null; scenario?: number | null }>();
     scenarioSeries.forEach((point) => {
@@ -885,6 +1129,7 @@ export default function PredictPage() {
     });
   }, [scenarioSeries, heroSeries, displayPeriods]);
   const hasChartData = chartData.some((row) => row.hero !== null || row.scenario !== null);
+
   const renderTimeseriesTooltip = useCallback(
     ({ active, payload, label }: any) => {
       if (!active || !payload?.length) return null;
@@ -923,7 +1168,10 @@ export default function PredictPage() {
         start_date: startDate,
         freq,
         adjustments,
-        mode: editMode,
+        // Always exports absolute per-cell values — unrelated to the grid's units/$ display
+        // toggle (`investmentMode`), which only affects on-screen editing, never what's sent
+        // to the backend (adjustments are always stored/exported in the variable's native unit).
+        mode: "absolute" as const,
         scenario_name: scenarioName || dependentLabel,
       };
       const blob = await apiFetch<Blob>("/predict/scenarios/assumptions/export", {
@@ -947,7 +1195,6 @@ export default function PredictPage() {
     startDate,
     freq,
     adjustments,
-    editMode,
     scenarioName,
     dependentLabel,
     t,
@@ -1072,23 +1319,33 @@ export default function PredictPage() {
                 </div>
               )}
 
-              <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4" aria-busy={previewLoading}>
+              <div className="grid grid-cols-2 gap-4 lg:grid-cols-4" aria-busy={previewLoading} aria-live="polite">
                 {modelsLoading || (previewLoading && !preview) ? (
                   Array.from({ length: 4 }).map((_, i) => <Skeleton key={i} className="h-[104px]" />)
                 ) : (
-                  <>
-                    {kpiItems.map((item) => (
-                      <StatCard key={item.key} label={item.label} value={item.value} icon={item.icon} trend={item.trend} />
-                    ))}
-                    {economicsKpiItems.map((item) => (
-                      <StatCard key={item.key} label={item.label} value={item.value} icon={item.icon} trend={item.trend} />
-                    ))}
-                  </>
+                  primaryKpiItems.map((item) => (
+                    <StatCard key={item.key} label={item.label} value={item.value} icon={item.icon} trend={item.trend} />
+                  ))
                 )}
               </div>
 
+              {!modelsLoading && secondaryKpiItems.length > 0 && (
+                <Disclosure
+                  as="h3"
+                  title={t("kpis.moreDetails")}
+                  defaultOpen={canEdit}
+                  className="rounded-xl border border-line p-4"
+                >
+                  <div className="grid grid-cols-2 gap-4 pt-2 lg:grid-cols-4" aria-busy={previewLoading} aria-live="polite">
+                    {secondaryKpiItems.map((item) => (
+                      <StatCard key={item.key} label={item.label} value={item.value} icon={item.icon} trend={item.trend} />
+                    ))}
+                  </div>
+                </Disclosure>
+              )}
+
               <Card className="space-y-4">
-                <CardHeader title={t("params.title")} subtitle={t("params.subtitle")} />
+                <CardHeader as="h2" title={t("params.title")} subtitle={t("params.subtitle")} />
                 <div className="flex flex-wrap gap-4">
                   <div className="w-28 space-y-2">
                     <Eyebrow htmlFor="predict-horizon">{t("params.horizon")}</Eyebrow>
@@ -1115,7 +1372,7 @@ export default function PredictPage() {
                       id="predict-freq"
                       wrapperClassName="w-auto"
                       value={freq}
-                      onChange={(e) => setFreq(e.target.value as any)}
+                      onChange={(e) => handleFreqChange(e.target.value as "day" | "week" | "month")}
                     >
                       <option value="day" disabled={freqFloor ? FREQ_RANK.day < FREQ_RANK[freqFloor] : false}>
                         {t("freq.day")}
@@ -1150,7 +1407,7 @@ export default function PredictPage() {
                     variant="secondary"
                     onClick={handleSaveScenario}
                     disabled={!canEdit || saving || !selectedModel || reachedScenarioLimit}
-                    title={!canEdit ? tCommon("readOnlyTooltip") : undefined}
+                    disabledReason={!canEdit ? tCommon("readOnlyTooltip") : undefined}
                   >
                     {saving ? t("params.saving") : saveButtonLabel}
                   </Button>
@@ -1162,7 +1419,7 @@ export default function PredictPage() {
 
               <Card className="space-y-4">
                 <div className="flex flex-wrap items-center justify-between gap-3">
-                  <CardHeader title={t("builder.title")} subtitle={t("builder.subtitle")} />
+                  <CardHeader as="h2" title={t("builder.title")} subtitle={t("builder.subtitle")} />
                   <div className="inline-flex gap-1">
                     <ToggleChip active={viewMode === "planner"} onClick={() => setViewMode("planner")}>
                       {t("builder.modePlanner")}
@@ -1175,6 +1432,22 @@ export default function PredictPage() {
                 {viewMode === "advanced" && (
                   <div className="flex flex-wrap items-center gap-2">
                     <Eyebrow>{t("builder.modeAbsolute")}</Eyebrow>
+                    {hasDollarRateVariable && (
+                      <div className="inline-flex gap-1">
+                        <ToggleChip active={investmentMode === "units"} onClick={() => setInvestmentMode("units")}>
+                          {t("builder.investmentModeUnits")}
+                        </ToggleChip>
+                        <ToggleChip active={investmentMode === "dollars"} onClick={() => setInvestmentMode("dollars")}>
+                          {t("builder.investmentModeDollars")}
+                        </ToggleChip>
+                      </div>
+                    )}
+                    <Button variant="ghost" size="sm" onClick={undo} disabled={!canUndo} title={t("builder.undo")}>
+                      <Undo2 className="mr-1 h-3 w-3" /> {t("builder.undo")}
+                    </Button>
+                    <Button variant="ghost" size="sm" onClick={redo} disabled={!canRedo} title={t("builder.redo")}>
+                      <Redo2 className="mr-1 h-3 w-3" /> {t("builder.redo")}
+                    </Button>
                     <Button variant="ghost" size="sm" onClick={() => setResetConfirmOpen(true)}>
                       {t("builder.reset")}
                     </Button>
@@ -1186,6 +1459,11 @@ export default function PredictPage() {
                     >
                       {assumptionsExporting ? t("builder.exporting") : t("builder.export")}
                     </Button>
+                    {isDesktop && (
+                      <ToggleChip active={forceAccessibleTable} onClick={() => setForceAccessibleTable((v) => !v)}>
+                        {t("builder.accessibleTableToggle")}
+                      </ToggleChip>
+                    )}
                   </div>
                 )}
                 {variablesError ? (
@@ -1200,30 +1478,86 @@ export default function PredictPage() {
                 ) : !variables.length ? (
                   <p className="text-sm text-muted">{t("builder.empty")}</p>
                 ) : viewMode === "planner" ? (
-                  <PlannerView modelId={selectedModel} onApply={handleApplyAllocations} />
-                ) : isDesktop ? (
-                  <ScenarioSheetGlide
-                    variables={gridVariables}
-                    periods={editablePeriods}
-                    multipliers={multipliersByVariable}
-                    absoluteValues={absoluteValuesByVariable}
-                    editMode={editMode}
-                    onMultipliersChange={handleGridMultipliersChange}
-                    groupColumnLabel={t("builder.colGroup")}
-                    variableColumnLabel={t("builder.colVariable")}
-                    onInvalidInput={handleInvalidGridInput}
+                  <PlannerView
+                    modelId={selectedModel}
+                    onApply={handleApplyAllocations}
+                    currentAllocations={currentMediaAllocations}
                   />
                 ) : (
-                  <ScenarioSheetTable
-                    variables={gridVariables}
-                    periods={editablePeriods}
-                    multipliers={multipliersByVariable}
-                    absoluteValues={absoluteValuesByVariable}
-                    onMultipliersChange={handleGridMultipliersChange}
-                    groupColumnLabel={t("builder.colGroup")}
-                    variableColumnLabel={t("builder.colVariable")}
-                    onInvalidInput={handleInvalidGridInput}
-                  />
+                  <div className="space-y-6">
+                    {mediaGridVariables.length > 0 && (
+                      <div className="space-y-2">
+                        <Eyebrow>{t("builder.mediaSection")}</Eyebrow>
+                        {isDesktop && !forceAccessibleTable ? (
+                          <ScenarioSheetGlide
+                            variables={mediaGridVariables}
+                            periods={editablePeriods}
+                            multipliers={multipliersByVariable}
+                            absoluteValues={absoluteValuesByVariable}
+                            editMode={investmentMode}
+                            onMultipliersChange={handleGridMultipliersChange}
+                            groupColumnLabel={t("builder.colGroup")}
+                            variableColumnLabel={t("builder.colVariable")}
+                            totalColumnLabel={t("builder.totalColumn")}
+                            totalRowLabel={t("builder.totalRow")}
+                            fillRightLabel={t("builder.fillRight")}
+                            onInvalidInput={handleInvalidGridInput}
+                          />
+                        ) : (
+                          <ScenarioSheetTable
+                            variables={mediaGridVariables}
+                            periods={editablePeriods}
+                            multipliers={multipliersByVariable}
+                            absoluteValues={absoluteValuesByVariable}
+                            editMode={investmentMode}
+                            onMultipliersChange={handleGridMultipliersChange}
+                            groupColumnLabel={t("builder.colGroup")}
+                            variableColumnLabel={t("builder.colVariable")}
+                            totalColumnLabel={t("builder.totalColumn")}
+                            totalRowLabel={t("builder.totalRow")}
+                            fillRightLabel={t("builder.fillRight")}
+                            onInvalidInput={handleInvalidGridInput}
+                          />
+                        )}
+                      </div>
+                    )}
+                    {structuralGridVariables.length > 0 && (
+                      <div className="space-y-2">
+                        <Eyebrow>{t("builder.structuralSection")}</Eyebrow>
+                        {isDesktop && !forceAccessibleTable ? (
+                          <ScenarioSheetGlide
+                            variables={structuralGridVariables}
+                            periods={editablePeriods}
+                            multipliers={multipliersByVariable}
+                            absoluteValues={absoluteValuesByVariable}
+                            editMode="units"
+                            onMultipliersChange={handleGridMultipliersChange}
+                            groupColumnLabel={t("builder.colGroup")}
+                            variableColumnLabel={t("builder.colVariable")}
+                            totalColumnLabel={t("builder.totalColumn")}
+                            totalRowLabel={t("builder.totalRow")}
+                            fillRightLabel={t("builder.fillRight")}
+                            onInvalidInput={handleInvalidGridInput}
+                          />
+                        ) : (
+                          <ScenarioSheetTable
+                            variables={structuralGridVariables}
+                            periods={editablePeriods}
+                            multipliers={multipliersByVariable}
+                            absoluteValues={absoluteValuesByVariable}
+                            editMode="units"
+                            onMultipliersChange={handleGridMultipliersChange}
+                            groupColumnLabel={t("builder.colGroup")}
+                            variableColumnLabel={t("builder.colVariable")}
+                            totalColumnLabel={t("builder.totalColumn")}
+                            totalRowLabel={t("builder.totalRow")}
+                            fillRightLabel={t("builder.fillRight")}
+                            onInvalidInput={handleInvalidGridInput}
+                          />
+                        )}
+                      </div>
+                    )}
+                  </div>
                 )}
               </Card>
 
@@ -1240,7 +1574,11 @@ export default function PredictPage() {
                   <>
                     <div className="h-chart-lg w-full">
                       <ResponsiveContainer width="100%" height="100%">
-                        <ComposedChart data={chartData} margin={{ top: 10, right: 20, bottom: 10, left: 0 }}>
+                        <ComposedChart
+                          accessibilityLayer
+                          data={chartData}
+                          margin={{ top: 10, right: 20, bottom: 10, left: 0 }}
+                        >
                           <CartesianGrid strokeDasharray="3 3" stroke={lineColor} />
                           <XAxis dataKey="period" tick={{ fill: mutedColor, fontSize: 11 }} axisLine={{ stroke: lineColor }} />
                           <YAxis
@@ -1342,7 +1680,7 @@ export default function PredictPage() {
               </Card>
 
               <Card className="space-y-4">
-                <CardHeader title={t("scenarios.title")} subtitle={t("scenarios.subtitle", { limit: SCENARIO_LIMIT })} />
+                <CardHeader as="h2" title={t("scenarios.title")} subtitle={t("scenarios.subtitle", { limit: SCENARIO_LIMIT })} />
                 <p className="text-xs text-muted">{t("scenarios.featuredHint", { limit: FEATURED_LIMIT })}</p>
                 {scenarios.length ? (
                   <div className="grid gap-4 md:grid-cols-3">
@@ -1421,7 +1759,7 @@ export default function PredictPage() {
                               size="sm"
                               onClick={() => handleDuplicateScenario(scenario)}
                               disabled={!canEdit || scenarios.length >= SCENARIO_LIMIT}
-                              title={!canEdit ? tCommon("readOnlyTooltip") : undefined}
+                              disabledReason={!canEdit ? tCommon("readOnlyTooltip") : undefined}
                             >
                               <Copy className="mr-1 h-3 w-3" /> {t("scenarios.duplicate")}
                             </Button>
@@ -1430,7 +1768,7 @@ export default function PredictPage() {
                               size="sm"
                               onClick={() => setDeleteTarget(scenario)}
                               disabled={!canEdit}
-                              title={!canEdit ? tCommon("readOnlyTooltip") : undefined}
+                              disabledReason={!canEdit ? tCommon("readOnlyTooltip") : undefined}
                               className="!text-bad hover:!bg-bad-bg"
                             >
                               {t("scenarios.delete")}
@@ -1514,6 +1852,79 @@ function labelForDate(value: Date, freq: "day" | "week" | "month") {
     return `${year}-W${String(week).padStart(2, "0")}`;
   }
   return `${value.getFullYear()}-${String(value.getMonth() + 1).padStart(2, "0")}`;
+}
+
+// Fase 5/P3 (revised per user feedback): changing frequency now converts the scenario itself —
+// horizon and the grid's own values — instead of offering a separate read-only view (redundant
+// with the "Mostrar tabla" table already above the chart).
+//
+// Calendar-based day-length per unit — deliberately "52 weeks = 12 months" (how a business person
+// thinks about it), not a strict day-count year, so month<->week horizon conversions land on the
+// round numbers users expect (12 months -> 52 weeks, 4 weeks -> 1 month).
+const FREQ_DAY_LENGTH: Record<"day" | "week" | "month", number> = {
+  day: 1,
+  week: 7,
+  month: (7 * 52) / 12,
+};
+
+function convertHorizon(horizon: number, fromFreq: "day" | "week" | "month", toFreq: "day" | "week" | "month"): number {
+  if (fromFreq === toFreq) return horizon;
+  const days = horizon * FREQ_DAY_LENGTH[fromFreq];
+  return Math.max(1, Math.round(days / FREQ_DAY_LENGTH[toFreq]));
+}
+
+// Re-grids a raw-unit series of length `oldN` onto `newN` periods, preserving the total exactly
+// via proportional overlap on a normalized [0,1] timeline. The same math handles both directions
+// — aggregating (newN < oldN, e.g. week->month: this collapses to an exact sum) and disaggregating
+// (newN > oldN, e.g. month->week: this assumes activity is spread evenly within each old period,
+// an estimate — adstock/Hill are non-linear, so this is not a model refit at the new grain).
+function regridSeries(values: number[], newN: number): number[] {
+  const oldN = values.length;
+  if (oldN === 0) return new Array(newN).fill(0);
+  if (newN === oldN) return values.slice();
+  const result = new Array(newN).fill(0);
+  for (let i = 0; i < oldN; i += 1) {
+    const start = i / oldN;
+    const end = (i + 1) / oldN;
+    for (let j = 0; j < newN; j += 1) {
+      const jStart = j / newN;
+      const jEnd = (j + 1) / newN;
+      const overlap = Math.min(end, jEnd) - Math.max(start, jStart);
+      if (overlap > 0) result[j] += values[i] * overlap * oldN;
+    }
+  }
+  return result;
+}
+
+// Rebuilds `adjustments` for every variable against `newPeriods`, converting each variable's raw
+// (native-unit) series from the old period grid to the new one via `regridSeries`. Every
+// reprojected cell becomes an explicit absolute override (`mode: "value"`) — a multiplier only
+// means something relative to a period's own seasonal baseline, and that baseline is tied to the
+// OLD frequency's calendar bucketing, not the new one, so preserving multipliers across a
+// frequency change would silently change what they mean.
+function retimeAdjustments(
+  variables: { name: string; baselineMean: number; baselineByPeriod?: Record<string, number> }[],
+  oldPeriods: string[],
+  adjustments: Record<string, Record<string, PeriodValue>>,
+  newPeriods: string[]
+): Record<string, Record<string, PeriodValue>> {
+  const next: Record<string, Record<string, PeriodValue>> = {};
+  newPeriods.forEach((period) => {
+    next[period] = {};
+  });
+  variables.forEach((variable) => {
+    const oldRaw = oldPeriods.map((period) => {
+      const entry = adjustments[period]?.[variable.name];
+      const baseline = variable.baselineByPeriod?.[period] ?? variable.baselineMean;
+      if (!entry) return baseline;
+      return entry.mode === "value" ? entry.value : baseline * entry.value;
+    });
+    const newRaw = regridSeries(oldRaw, newPeriods.length);
+    newPeriods.forEach((period, idx) => {
+      next[period][variable.name] = { mode: "value", value: Number((newRaw[idx] ?? 0).toFixed(2)) };
+    });
+  });
+  return next;
 }
 
 function sanitizeMultiplierValue(value: number | undefined) {
